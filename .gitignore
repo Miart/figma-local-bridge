@@ -1,0 +1,18 @@
+# dependencies
+node_modules/
+
+# build output
+server/dist/
+
+# generated plugin artifacts (npm run build:plugin)
+plugin/code.js
+plugin/ui.built.html
+plugin/scope.mjs
+plugin/commands.mjs
+plugin/dispatch.mjs
+plugin/tools.mjs
+plugin/fingerprint.mjs
+
+# logs and OS junk
+*.log
+.DS_Store

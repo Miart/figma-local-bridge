@@ -1,0 +1,504 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      /* Figma injects its own theme variables because showUI() passes
+         themeColors: true. Everything falls back to the dark palette this panel
+         shipped with, so it stays readable in both editor themes. */
+      :root {
+        --bg: var(--figma-color-bg, #1e1e1e);
+        --panel: var(--figma-color-bg-secondary, #2a2a2a);
+        --line: var(--figma-color-border, #3d3d3d);
+        --text: var(--figma-color-text, #e8e8e8);
+        /* Derived from the text colour rather than taken from Figma's secondary
+           token: in the light theme that token is #b3b3b3, which on white is
+           about 1.9:1 — the labels this panel is made of became unreadable.
+           Mixing keeps the hierarchy in both themes and stays legible. */
+        --dim: color-mix(in srgb, var(--text) 68%, transparent);
+        --ok: #35c496;
+        --warn: #d9a441;
+        --err: #e26060;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 0 12px 14px;
+        min-height: 100vh;
+        /* Column flex so the footer can be pinned to the bottom of whatever
+           height Figma gives the window instead of floating mid-panel. */
+        display: flex; flex-direction: column;
+        background: var(--bg);
+        color: var(--text);
+        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        -webkit-font-smoothing: antialiased;
+      }
+      [hidden] { display: none !important; }
+
+      header { display: flex; align-items: center; gap: 8px; padding: 11px 0 8px; }
+      h1 {
+        flex: 1 1 auto; margin: 0;
+        font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim);
+      }
+      .chip {
+        flex: 0 0 auto; padding: 1px 7px;
+        border: 1px solid var(--line); border-radius: 999px;
+        font-size: 10px; color: var(--dim); font-variant-numeric: tabular-nums;
+      }
+
+      .status {
+        display: flex; align-items: center; gap: 7px;
+        min-height: 26px; padding: 5px 9px;
+        border: 1px solid var(--line); border-radius: 6px;
+        background: var(--panel);
+      }
+      .status.ok   { border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); }
+      .status.warn { border-color: color-mix(in srgb, var(--warn) 50%, var(--line)); }
+      .status.err  { border-color: color-mix(in srgb, var(--err) 50%, var(--line)); }
+      #status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+      .dot.ok   { background: var(--ok);   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+      .dot.warn { background: var(--warn); animation: pulse 1.4s ease-in-out infinite; }
+      .dot.err  { background: var(--err); }
+      @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
+
+      section { margin-top: 9px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; }
+      h2 {
+        margin: 0 0 8px; font-size: 10px; font-weight: 600;
+        letter-spacing: .08em; text-transform: uppercase; color: var(--dim);
+      }
+
+      .field { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+      .field > label { flex: 0 0 42px; color: var(--dim); }
+      .join { flex: 1 1 auto; min-width: 0; display: flex; gap: 6px; }
+      input {
+        flex: 1 1 auto; min-width: 0;
+        padding: 4px 7px;
+        border: 1px solid var(--line); border-radius: 5px;
+        background: var(--bg); color: var(--text); font: inherit;
+      }
+      input:focus { outline: none; border-color: var(--ok); }
+      input::placeholder { color: var(--dim); }
+
+      button {
+        padding: 4px 9px;
+        border: 1px solid var(--line); border-radius: 5px;
+        background: var(--panel); color: var(--text);
+        font: inherit; cursor: pointer;
+      }
+      button:hover:not(:disabled) { border-color: var(--ok); }
+      button:disabled { opacity: .45; cursor: default; }
+      button.primary {
+        flex: 1 1 auto;
+        background: var(--ok); border-color: var(--ok);
+        color: #06231a; font-weight: 600;
+      }
+      button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+      .actions { display: flex; gap: 6px; margin-top: 7px; }
+      .hint { margin: 6px 0 0; color: var(--dim); font-size: 10px; }
+
+      dl { display: grid; grid-template-columns: 62px 1fr; gap: 6px 8px; margin: 0; }
+      dt { color: var(--dim); }
+      dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+      /* One line, ellipsised. A full list of names can run to a dozen rows and
+         pushes everything else out of the window; the count plus the first
+         names is what the panel is for. */
+      .sub {
+        display: block; color: var(--dim);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      /* The last failure, as one line. The full text belongs to the tool result
+         the agent reads; here it only has to say that something broke and
+         roughly where, without growing the panel every time a call fails. */
+      #last {
+        color: var(--err);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .chip.bad { color: var(--err); border-color: color-mix(in srgb, var(--err) 50%, var(--line)); }
+      footer { margin-top: auto; padding-top: 12px; color: var(--dim); font-size: 10px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Figma Local Bridge</h1>
+      <span class="chip" id="calls">no calls</span>
+    </header>
+
+    <div class="status" id="statusBox">
+      <span class="dot" id="dot"></span>
+      <span id="status">disconnected</span>
+    </div>
+
+    <section>
+      <h2>Connection</h2>
+      <div class="field">
+        <label for="port">port</label>
+        <input id="port" value="8787" inputmode="numeric" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="field">
+        <label for="token">token</label>
+        <div class="join">
+          <input id="token" type="password" placeholder="paste from the daemon" autocomplete="off" spellcheck="false" />
+          <button id="peek" title="Show or hide the token">show</button>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="go" class="primary">connect</button>
+        <button id="drop" hidden>disconnect</button>
+      </div>
+      <p class="hint" id="portHint">port and allowlist come from manifest.json.</p>
+    </section>
+
+    <section>
+      <h2>Session</h2>
+      <dl>
+        <dt>page</dt><dd id="page">—</dd>
+        <dt>selection</dt><dd id="sel"><span id="selSummary">—</span><span class="sub" id="selNames"></span></dd>
+        <dt>mcp</dt><dd id="mcp">—</dd>
+        <dt id="lastLabel" hidden>last</dt><dd id="last" hidden></dd>
+      </dl>
+    </section>
+
+    <footer id="footer">Keep open — Figma unloads the plugin in the background.</footer>
+
+    <script>
+      const WS_HOST = "localhost"; // must match manifest devAllowedDomains
+
+      // Reconnect fast the first time: Figma tears the plugin UI down in the
+      // background and brings it back within a second or two, and a fixed 2s
+      // wait meant every call landing in that window failed. Backs off so a
+      // genuinely dead daemon is not hammered.
+      //
+      // Figma also tears the plugin down and re-runs it several times a second
+      // in a heavy document. Resetting the delay on every open turns that into
+      // an endless 400ms reconnect loop that hammers the daemon, so a socket
+      // that dies right after opening counts as a flap and keeps growing the
+      // delay instead. Only a connection that actually held earns a reset.
+      const RETRY_MIN = 400;
+      const RETRY_MAX = 15000;
+      const FLAW_MS = 1500;
+
+      const $ = (id) => document.getElementById(id);
+      const el = {
+        dot: $("dot"), status: $("status"), statusBox: $("statusBox"),
+        port: $("port"), token: $("token"), go: $("go"), drop: $("drop"), peek: $("peek"),
+        page: $("page"), sel: $("sel"), selSummary: $("selSummary"), selNames: $("selNames"), mcp: $("mcp"),
+        last: $("last"), lastLabel: $("lastLabel"),
+        calls: $("calls"), footer: $("footer"),
+      };
+
+      let socket = null;
+      let retry = null;
+      let retryAt = 0;        // when the pending retry fires; drives the countdown
+      let backingOff = false; // true when the last socket died instantly
+      let openedAt = 0;
+      let retryDelay = RETRY_MIN;
+
+      let calls = 0;
+      let lastSelection = null;
+      let dropped = 0;
+      let stopped = false; // user pressed disconnect: silence is expected, not loss
+
+      // The plugin iframe is sandboxed: touching localStorage THROWS there, which
+      // used to abort this whole script (dead connect button). The token is kept
+      // in figma.clientStorage by the main thread instead.
+      const toMain = (m) => parent.postMessage({ pluginMessage: m }, "*");
+      const saveToken = () => toMain({ saveToken: el.token.value.trim() });
+
+      function tryParse(v) {
+        if (typeof v !== "string") return v;
+        try { return JSON.parse(v); } catch (_) { return null; }
+      }
+
+      // ---------------------------------------------------------------- status
+
+      function setStatus(text, kind) {
+        el.status.textContent = text;
+        el.statusBox.className = "status" + (kind ? " " + kind : "");
+        el.dot.className = "dot" + (kind ? " " + kind : "");
+      }
+
+      // A retry that is several seconds away looks like a hang unless the panel
+      // counts it down. The status text is the only place that says why the
+      // plugin is not connected, so it must never sit on a stale value.
+      setInterval(() => {
+        if (!retryAt) return;
+        const left = retryAt - Date.now();
+        if (left <= 0) return;
+        setStatus(
+          (backingOff ? "Figma reloaded the plugin — retrying in " : "offline — retrying in ") +
+            (Math.round(left / 100) / 10).toFixed(1) + "s",
+          "warn",
+        );
+      }, 200);
+
+      function setError(message) {
+        const has = !!message;
+        el.last.hidden = !has;
+        el.lastLabel.hidden = !has;
+        el.calls.className = has ? "chip bad" : "chip";
+        if (!has) { el.last.textContent = ""; el.last.removeAttribute("title"); return; }
+        // First line only: the guard messages open with the verdict and put the
+        // node-by-node detail after it. The whole thing stays in the tooltip.
+        el.last.textContent = String(message).split("\n")[0];
+        el.last.title = message;
+      }
+
+      function setDropped(n) {
+        dropped = n;
+        // Replaces the standing hint rather than joining it: in a panel this small
+        // a second status line is noise, and a dropped message is exactly what
+        // this line exists to explain.
+        el.footer.textContent = n
+          ? n + " message(s) dropped while offline — keep this window open."
+          : "Keep open — Figma unloads the plugin in the background.";
+      }
+
+      function updateButtons() {
+        const hasToken = !!el.token.value.trim();
+        const live = !!socket;
+        el.go.textContent = live ? "reconnect" : "connect";
+        el.go.disabled = !hasToken;
+        el.drop.hidden = !live;
+      }
+
+      // ---------------------------------------------------------------- session
+
+      // The main thread pushes this on load and on every selectionchange. Until
+      // now the panel received it and threw it away, so the page and selection
+      // rows were decorative dashes that never showed anything.
+      function renderSelection(ev) {
+        el.page.textContent = ev.page && ev.page.name ? ev.page.name : "—";
+        const sel = ev.selection || [];
+        if (!sel.length) {
+          el.selSummary.textContent = "nothing selected";
+          el.selNames.textContent = "";
+          return;
+        }
+        el.selSummary.textContent = sel.length + (sel.length === 1 ? " node" : " nodes");
+        const names = sel.slice(0, 2).map((n) => n.type + " " + n.name).join(", ") + (sel.length > 2 ? " +" + (sel.length - 2) : "");
+        el.selNames.textContent = names;
+      }
+
+      function renderClients(count) {
+        el.mcp.textContent =
+          count === 0 ? "no MCP session attached"
+          : count === 1 ? "1 MCP session attached"
+          : count + " MCP sessions attached";
+      }
+
+      function countCall(env) {
+        calls++;
+        el.calls.textContent = calls === 1 ? "1 call" : calls + " calls";
+        // The failure row is a state, not a log: it shows what is wrong NOW, so a
+        // later success clears it instead of leaving a stale failure on screen.
+        if (env.ok) setError(null);
+        else setError((env.error && env.error.message) || "the plugin returned an error");
+      }
+
+      // ----------------------------------------------------------------- socket
+
+      function teardown() {
+        const s = socket;
+        socket = null;
+        if (!s) return;
+        // Detach BEFORE closing. A closed socket fires its own onclose, and that
+        // handler schedules another connect() — which closes the socket this
+        // call just created. The result was a reconnect loop at ~4 Hz that also
+        // aborted the handshake of a still-CONNECTING socket, so the daemon saw
+        // code 1005 (no close frame) over and over.
+        try { s.onopen = s.onclose = s.onerror = s.onmessage = null; } catch (_) {}
+        try { s.close(); } catch (_) {}
+      }
+
+      function url(port, token) {
+        return "ws://" + WS_HOST + ":" + port + "/?role=plugin&token=" + encodeURIComponent(token);
+      }
+
+      function connect() {
+        if (retry) { clearTimeout(retry); retry = null; }
+        retryAt = 0;
+        stopped = false;
+        teardown();
+
+        const token = el.token.value.trim();
+        const port = (el.port.value || "8787").trim();
+        if (!token) { setStatus("paste the daemon token to connect", "warn"); el.token.focus(); updateButtons(); return; }
+        if (!/^\d+$/.test(port)) { setStatus("port must be a number", "err"); el.port.focus(); return; }
+
+        setStatus("connecting…", "warn");
+        let sock;
+        try {
+          sock = new WebSocket(url(port, token));
+        } catch (err) {
+          setStatus("bad address — check the port", "err");
+          return;
+        }
+        socket = sock;
+
+        sock.onopen = () => {
+          if (socket !== sock) return;
+          openedAt = Date.now();
+          setStatus("connected", "ok");
+          updateButtons();
+          // The MCP side clears its cached selection when the link drops, and
+          // the push that produced it has already happened. Re-send the latest
+          // one so `figma_get_selection` stays a local answer after a flap.
+          if (lastSelection && sock.readyState === WebSocket.OPEN) {
+            sock.send(lastSelection);
+            lastSelection = null;
+          }
+          toMain({ pluginReady: true });
+        };
+
+        sock.onmessage = (ev) => {
+          if (socket !== sock) return;
+          const parsed = tryParse(ev.data);
+          // Local-only: rendered here, never forwarded into Figma's sandbox.
+          if (parsed && parsed.event === "clients") { renderClients(parsed.count); return; }
+          if (parsed && parsed.id != null && typeof parsed.ok === "boolean") countCall(parsed);
+          // Server -> plugin main thread. Figma requires the pluginMessage
+          // envelope in BOTH directions and silently drops un-enveloped
+          // messages ("missing pluginMessage or pluginDrop").
+          toMain({ bridgeMessage: ev.data });
+        };
+
+        sock.onclose = (ev) => {
+          if (socket !== sock) return; // a superseded socket: stay quiet
+          socket = null;
+          el.mcp.textContent = "—";
+          toMain({ pluginReady: false });
+          updateButtons();
+
+          // 4401 = token rejected. The daemon's token is persistent, so this
+          // only happens if the secret file was deleted. Retrying would spin
+          // forever without saying anything, so ask for the new one instead.
+          if (ev && ev.code === 4401) {
+            toMain({ saveToken: "" });
+            el.token.value = "";
+            updateButtons();
+            setStatus("token rejected — paste the current one from the daemon", "err");
+            return;
+          }
+
+          // 4409 = another Figma window already holds the plugin's single slot.
+          // Worth retrying (that window may close), but not worth pretending it
+          // is an ordinary network blip.
+          const held = ev && ev.code === 4409;
+
+          // A socket that survived long enough to be useful earns a fresh budget.
+          // One that died immediately does not, or Figma's teardown loop would
+          // keep us at the floor delay forever.
+          if (openedAt && Date.now() - openedAt > 10000) retryDelay = RETRY_MIN;
+          const wait = Math.min(retryDelay, RETRY_MAX);
+          retryDelay = Math.min(retryDelay * 2, RETRY_MAX);
+          backingOff = !!(openedAt && Date.now() - openedAt < FLAW_MS);
+          // Jitter, so several Figma windows reconnecting after one restart do
+          // not arrive at the daemon in lockstep.
+          const delay = wait * (0.75 + Math.random() * 0.5);
+
+          if (held) {
+            setStatus("another Figma window holds the plugin slot — retrying", "err");
+          } else {
+            retryAt = Date.now() + delay;
+            setStatus(
+              backingOff ? "Figma reloaded the plugin — retrying…" : "offline — retrying…",
+              "warn",
+            );
+          }
+          retry = setTimeout(connect, delay);
+        };
+
+        sock.onerror = () => {
+          if (socket !== sock) return;
+          // onclose follows and carries the close code; this fires first for the
+          // cases where no socket ever opened, so it must not claim more than it
+          // knows.
+          setStatus("cannot reach the daemon on this port", "err");
+        };
+      }
+
+      // ---------------------------------------------------------------- wiring
+
+      // Persist AND try to connect. Without the connect-on-input there is a
+      // deadlock on a fresh install: connect() runs at load with an empty
+      // token, and pasting one later would never start a socket.
+      let debounce = null;
+      function onEdit() {
+        saveToken();
+        updateButtons();
+        if (!el.token.value.trim()) return;
+        clearTimeout(debounce);
+        debounce = setTimeout(connect, 350);
+      }
+      el.token.addEventListener("input", onEdit);
+      el.port.addEventListener("input", onEdit);
+      el.go.addEventListener("click", () => { saveToken(); connect(); });
+      el.drop.addEventListener("click", () => {
+        if (retry) { clearTimeout(retry); retry = null; }
+        retryAt = 0;
+        teardown();
+        // Deliberate: nothing is expected to reach the daemon, so the next push
+        // from the main thread must not be reported as a lost message.
+        stopped = true;
+        setDropped(0);
+        setStatus("disconnected by hand", "warn");
+        updateButtons();
+      });
+      el.peek.addEventListener("click", () => {
+        const shown = el.token.type === "text";
+        el.token.type = shown ? "password" : "text";
+        el.peek.textContent = shown ? "show" : "hide";
+      });
+
+      // Plugin main thread -> server. Figma delivers figma.ui.postMessage(x) as
+      // ev.data.pluginMessage === x; main always posts a JSON string.
+      window.onmessage = (ev) => {
+        const raw = ev.data && ev.data.pluginMessage;
+        if (raw === undefined || raw === null) return;
+        const parsed = typeof raw === "string" ? tryParse(raw) : raw;
+
+        // Local-only events: never forwarded to the server.
+        if (parsed && parsed.event === "token") {
+          if (parsed.token && !el.token.value.trim()) {
+            el.token.value = parsed.token;
+            updateButtons();
+            connect();
+            // connect() focused the token field because it was empty a moment
+            // ago (that is the fresh-install prompt). The stored token just
+            // arrived, so the prompt is answered — drop the focus ring.
+            if (document.activeElement === el.token) el.token.blur();
+          }
+          return;
+        }
+        if (parsed && (parsed.event === "handshake" || parsed.event === "link" || parsed.log !== undefined)) return;
+
+        if (parsed && parsed.event === "selection") {
+          renderSelection(parsed);
+          // Forwarded as well: the MCP side caches the selection so that
+          // figma_get_selection costs no round trip. Held back until the socket
+          // is up, otherwise the push made at plugin load is thrown away and
+          // the cache stays empty until the user clicks something.
+          const json = typeof raw === "string" ? raw : JSON.stringify(raw);
+          if (socket && socket.readyState === WebSocket.OPEN) { socket.send(json); lastSelection = null; }
+          else lastSelection = json;
+          return;
+        }
+
+        const msg = typeof raw === "string" ? raw : JSON.stringify(raw);
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(msg);
+          if (dropped) setDropped(0);
+        } else if (!stopped) {
+          setDropped(dropped + 1);
+        }
+      };
+
+      // Auto-connect on every launch. The token is persisted, so a plugin restart or
+      // a Figma restart reconnects without anyone pasting anything again.
+      updateButtons();
+      toMain({ uiReady: true });
+      connect();
+    </script>
+  </body>
+</html>

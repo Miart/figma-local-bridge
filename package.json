@@ -1,0 +1,28 @@
+{
+  "name": "figma-local-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP bridge for Figma: OpenCode <-> MCP(stdio) <-> WebSocket <-> Figma plugin",
+  "scripts": {
+    "build:plugin": "node plugin/build.mjs",
+    "build:server": "tsc -p tsconfig.json",
+    "build": "npm run build:plugin && npm run build:server",
+    "daemon": "node server/dist/daemon.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.plugin.json",
+    "test": "npm run build:plugin && npm run build:server && node --test --test-concurrency=1 test/*.test.mjs && node --test --test-concurrency=1 test/*.e2e.mjs",
+    "start": "node server/dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.100.0",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}

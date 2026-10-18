@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        margin: 0; padding: 12px; width: 420px;
+        font: 11px/1.6 ui-monospace, Menlo, monospace;
+        background: #1e1e1e; color: #e8e8e8;
+      }
+      h1 { font-size: 11px; text-transform: uppercase; color: #9a9a9a; margin: 0 0 8px; }
+      button { padding: 5px 10px; border: 1px solid #3d3d3d; border-radius: 4px;
+               background: #2a2a2a; color: #e8e8e8; font: inherit; cursor: pointer; margin: 0 4px 6px 0; }
+      button:hover { border-color: #4ec9a5; }
+      pre { background: #141414; border: 1px solid #3d3d3d; border-radius: 4px;
+            padding: 8px; margin-top: 8px; max-height: 320px; overflow: auto;
+            white-space: pre-wrap; font-size: 10px; }
+      .warn { color: #d9a441; }
+    </style>
+  </head>
+  <body>
+    <h1>Undo spike — commitUndo / triggerUndo</h1>
+    <p class="warn">Run this on a throwaway duplicate of a Figma file. It only touches nodes it creates itself.</p>
+    <button id="all">run all</button>
+    <button id="clean">cleanup</button>
+    <button id="hash">tree hash</button>
+    <div class="sep"></div>
+    <button id="fx6">fixture: 6 identical</button>
+    <button id="fxodd">fixture: 1 recoloured</button>
+    <button id="fxempty">fixture: empty file</button>
+    <pre id="out">waiting for plugin main thread…</pre>
+    <p class="warn">build: UNSPIKE-UI-2026-10-06-C</p>
+    <script>
+      const out = document.getElementById("out");
+      let lines = [];
+      let heard = false;
+      const push = (s) => { lines.push(s); out.textContent = lines.join("\n"); out.scrollTop = out.scrollHeight; };
+      window.onmessage = (ev) => {
+        // main -> ui: Figma adds the envelope, so we read event.data.pluginMessage
+        // directly. Wrapping on this side would give pluginMessage.pluginMessage.
+        const payload = ev.data && ev.data.pluginMessage;
+        if (payload && payload.log) { heard = true; push(payload.log); }
+      };
+      // UI -> main needs the { pluginMessage: ... } envelope; main -> UI gets it from Figma.
+      const send = (m) => parent.postMessage({ pluginMessage: m }, "*");
+
+      // Messages the main thread posts before this iframe finishes loading are
+      // DISCARDED, not queued. So the handshake is driven from here: we
+      // announce, and the main thread replies once we are provably listening.
+      push("UI loaded, announcing…");
+      send({ run: "hello" });
+
+      document.getElementById("all").onclick = () => send({ run: "all" });
+      document.getElementById("clean").onclick = () => send({ run: "clean" });
+      document.getElementById("hash").onclick = () => send({ run: "hash" });
+      document.getElementById("fx6").onclick = () => send({ run: "fx", variant: "identical" });
+      document.getElementById("fxodd").onclick = () => send({ run: "fx", variant: "odd" });
+      document.getElementById("fxempty").onclick = () => send({ run: "clean" });
+
+      // Watchdog: if the main thread never answers, say so instead of sitting
+      // there looking like a dead button.
+      setTimeout(() => {
+        if (!heard) {
+          lines = ["UI announced itself but got no reply.",
+                   "The plugin main thread is not answering UI -> main.",
+                   "Check Figma Console (Plugins > Development > Open Console)",
+                   "for an exception in code.js, then reload the plugin."];
+          out.textContent = lines.join("\n");
+        }
+      }, 4000);
+    </script>
+  </body>
+</html>
