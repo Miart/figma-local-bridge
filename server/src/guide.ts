@@ -68,8 +68,10 @@ figma_export_web_handoff (previews, spec.json, tokens.json/css and a README that
 names the limits: production HTML, image fills as files, gradient tokens,
 embedded fonts, masks/effects not applied by the CSS, paragraph spacing/vertical
 alignment; missing fonts are listed, not assumed, and a font whose check
-ran past the time budget is called unchecked; a bundle over 2,500 nodes or a
-preview over 24 MP is refused with the numbers, before the export). All only read the document,
+ran past the time budget is called unchecked; the reply's timings name the
+phase that took the time (walkMs walking, checkMs the font check, exportMs
+rasterising); a bundle over 2,500 nodes or a preview over 24 MP is refused
+with the numbers, before the export). All only read the document,
 so they work with writes off.
 `;
 

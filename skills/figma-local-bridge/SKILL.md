@@ -170,7 +170,11 @@ the README; it is not assumed present. That check is time-boxed (2 s per
 style, 12 s in total), because loading a font this machine does not have is a
 network round trip that can take minutes: a style that does not answer in time
 is listed separately as **unchecked** — whether the machine can render it is
-unknown, and the bundle says so instead of implying either way.
+unknown, and the bundle says so instead of implying either way. The reply
+divides the time by phase — `walkMs` reading the tree, `checkMs` the check
+above, `exportMs` rasterising — so a call that took minutes names the phase
+that took them; a cold font service lands in `exportMs` even when the check
+already called the style unchecked.
 
 All four are reads of the document (usable with `FIGMA_BRIDGE_WRITE=0`), and
 their files go to `outDir`, a temp directory by default.
