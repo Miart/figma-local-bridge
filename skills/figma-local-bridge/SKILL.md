@@ -73,10 +73,32 @@ barrier is global. Prefer the specific tools over raw code:
   viewport, which is the only way to move the user's cursor.
 - `figma_compare` checks a render against a PNG on disk (a mockup, an earlier
   export, another node written out with `figma_download_assets`) and reports
-  **where** it differs, not just whether: differing area, bounding box, largest
-  clusters, plus a heatmap. It is how a rebuild is proven to have landed
-  instead of eyeballed — and a size mismatch is a finding, while a clean
-  2×/3×/4× ratio means you passed the wrong `scale`.
+  **where** it differs, not just whether: differing area, bounding box (in the
+  reference's own pixels), largest clusters, plus a heatmap. It is how a rebuild
+  is proven to have landed instead of eyeballed — and a size mismatch is a
+  finding, while a clean 2×/3×/4× ratio means you passed the wrong `scale`.
+
+## A call that timed out, and the write nobody is waiting for
+
+Writes are chained in the plugin: a write waits behind the write ahead of it.
+Its caller does not wait that long — and when the caller gives up, the queued
+write still runs. That is the one case where an edit lands after everyone has
+stopped watching, so it has its own two tools.
+
+- `figma_ops` answers "what is still going to write?": per file, the call that
+  is `running`, the writes `queued` behind it, and what finished `recently` —
+  plus, for this session, the calls it is still waiting for and the ones it gave
+  up on. A timeout error names its `opId`: pass that to `figma_ops` to get the
+  operation's state and the answer recorded for it. That settles a call that
+  timed out — "it finished at rev 412 with this result" — instead of leaving
+  "may or may not have been applied" standing.
+- `figma_cancel` stops a call whose state is `queued`: nothing of it has run, its
+  caller is answered at once with OP_CANCELLED, and the revision does not move
+  because the document did not. A `running` call is refused with OP_RUNNING —
+  Figma runs plugin code to the end and nothing can interrupt it from inside the
+  plugin. OP_DONE means it already ran, and the message names the revision.
+- Both are read-only and work in a read-only bridge: cancelling only ever
+  prevents a write, never causes one.
 
 ## Checkpoints — the substitute for an undo stack
 

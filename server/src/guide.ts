@@ -39,7 +39,13 @@ replayed (the answer came from the opId cache, so the method did not run again;
 a replay is safe). After "may or may not have been applied", re-check with
 figma_inspect before retrying; after "not sent", retrying is free.
 
-Writes are serialized. Prefer figma_inspect (compareWith) and
+Writes are serialized, so a call can wait behind another write for longer than
+its caller waits. When one times out, figma_ops (opId from the error) says
+whether it is still queued, running, or already finished and what it returned;
+figma_cancel stops a queued write before it starts — a running one cannot be
+interrupted. Neither tool writes, so both work when the bridge is read-only.
+
+Prefer figma_inspect (compareWith) and
 figma_replace_repeated_with_component (dryRun first) over figma_use, which is
 raw Plugin API behind allowDestructive + scopeNodeId, rolls back anything
 outside the scope, and needs allowGlobalChanges for variables and styles.

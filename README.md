@@ -110,7 +110,7 @@ Run the plugin in each Figma file you want to drive — every panel connects to 
 
 ## Tools
 
-18 tools mirroring Figma's official server, plus 6 local ones — 24 in total.
+17 tools mirroring Figma's official server, plus 9 local ones — 26 in total.
 
 Every tool also accepts an optional `fileKey` to choose among several open Figma files; with one file it can be omitted, with several a call that omits it is refused and lists the connected files (`figma_ping` shows the same list).
 
@@ -147,6 +147,8 @@ The server also ships an **operating guide** — `fileKey` routing, what `rev` a
 | `figma_compare` | Diff a live render against a PNG on disk — a mockup, an earlier export, or another node written out with `figma_download_assets`. The diff runs in the MCP server, so the document is never touched: it answers with the differing area, its bounding box **in the reference's own pixels** (top-left origin — the box can be cropped straight out of that PNG) and the largest clusters, and writes a heatmap PNG next to the reference. `tolerance` absorbs anti-aliasing; a size mismatch is reported rather than hidden, and a clean 2×/3×/4× ratio names the `scale` you meant |
 | `figma_replace_repeated_with_component` | Replaces repeated identical nodes with instances of one master component, in a single transactional call. Refuses unless every target is provably equivalent; try `dryRun: true` first |
 | `figma_checkpoint` | Undo, without an undo stack: `save` describes a subtree as data (one JSON file per file, under `~/.local/share/opencode/figma-bridge-checkpoints/<fileKey>/`), `show` diffs the live subtree against it field by field, `restore` replaces the target's children from it in **one** transaction — dry run by default — and then dumps the subtree again to *verify*: `verified: true` only when that second diff is empty. Refuses a truncated dump, a `GROUP`/`INSTANCE`/page target, and unsupported node types unless `allowPartial`; a save lists what a rebuild cannot carry (instance interiors, per-run text styling, bindings) so the losses travel with the data |
+| `figma_ops` | What the plugin is doing per file: the call that is `running`, the writes `queued` behind it, and what finished `recently` — plus, for this session, the calls it is still waiting for and the ones it gave up on. With `opId` (a timeout error names it) it adds the answer recorded for that operation: that is how a call that timed out is settled without re-reading the document. Read-only, and answers even when the plugin is gone (with the local half and the reason) |
+| `figma_cancel` | Stop an operation whose state is `queued` — a write whose caller has already given up, still waiting behind another write. Its caller is answered at once with `OP_CANCELLED` and `rev` does not move, because nothing of it ran; a retry of the same `opId` replays the cancellation instead of starting the call. `OP_RUNNING` (Figma runs plugin code to completion — nothing can interrupt it), `OP_DONE` (it already ran; the message names the revision) and `OP_UNKNOWN` are refusals, not failures. Read-only: cancelling only ever prevents a write |
 
 Not available through a plugin (cloud-only in the official server): `create_new_file`, `generate_figma_design`, `generate_diagram`, `export_video`, shaders, Weave, cloud Code Connect sync.
 
@@ -158,6 +160,7 @@ The bridge edits real design files with an agent at the wheel, so most of the en
 - **A key names one call.** The cache stores a fingerprint of the method and arguments it answered (`plugin/dispatch.ts`), so a *different* call sent under a used `opId` is refused (`OPID_REUSED`) instead of being handed the first call's answer — the one path that could report a write that never happened. Key order does not change a call, so a retry re-encoded by another JSON writer still replays.
 - **Serialized mutations.** Figma's undo barrier is global — two mutations in flight roll each other back. Mutating methods are chained one at a time (`plugin/dispatch.ts`); reads stay parallel. `rev` bumps on success *and* failure.
 - **Honest disconnects.** An error distinguishes `disconnected before <method> was sent` (safe to retry) from `may or may not have been applied` (retried under the same `opId`, so a replay cannot apply code twice).
+- **An abandoned write does not land unseen.** Writes are chained, so a call can wait behind another write for longer than its caller is willing to wait — and when the timeout fires, the queued write would have run anyway, at a revision nobody was watching. Instead the call stays visible: `figma_ops` shows it `queued` (nothing of it has run), `running`, or finished *after* the caller gave up with the answer it returned; `figma_cancel` stops a `queued` one, answering its caller immediately with `OP_CANCELLED` and leaving `rev` untouched because the document did not move. A `running` call is refused loudly (`OP_RUNNING`) — Figma runs plugin code to completion, so any tool claiming to interrupt it would be lying.
 - **Fast-fail offline.** A call waits one 2-second grace period (`LINK_GRACE_MS`) for a reconnecting plugin, then fails with a precise reason. A request that was never sent is not retried at all.
 - **No guessing between files.** With several files connected, a call without `fileKey` is refused client-side *before* the request is sent — both the client (`server/src/figma.ts`) and the daemon (`server/src/link.ts`) check independently, and both name the connected files. A wrong file here is a wrong edit, so neither side ever "picks the most recent".
 - **Scope guard + fingerprint diff.** `figma_use` runs against a scoped, fingerprint-checked node set and is rolled back if the document drifts outside the scope. Switching pages inside a call is refused (`currentpagechange`): one call per page, or `figma_set_page` first.
@@ -179,7 +182,7 @@ npm test           # rebuilds artifacts, then unit + e2e with --test-concurrency
 
 `npm test` rebuilds `server/dist` and `plugin/*.mjs` first because the tests import the built modules — a test running against a stale artifact passes on code Figma will never execute. The suites run serially (`--test-concurrency=1`): e2e tests spin up real daemons on real ports and share one token file, and parallel runs make them flaky by construction.
 
-Current suites: **301 unit checks** — 188 `node:test` cases plus 113 harness checks (`commands`, `fingerprint`, `scope`, `use-figma.gate`) — and **113 e2e checks** (`daemon` 12, `link-state` 8, `mcp` 16, `multifile` 23, `tools` 22, `checkpoint` 32; the per-file summaries add up to 105 because `link-state` prints its checks without one).
+Current suites: **305 unit checks** — 83 `node:test` cases plus 222 harness checks (`commands` 29, `fingerprint` 42, `scope` 32, `use-figma.gate` 10, `checkpoint` 57, `checkpoint-store` 52) — and **121 e2e checks** (`daemon` 12, `link-state` 8, `mcp` 16, `multifile` 23, `tools` 30, `checkpoint` 32; the per-file summaries add up to 113 because `link-state` prints its checks without one).
 
 ## Troubleshooting
 
@@ -196,6 +199,7 @@ Current suites: **301 unit checks** — 188 `node:test` cases plus 113 harness c
 | `4401 bad token` | The token in the plugin doesn't match `figma-bridge-daemon.secret` |
 | `figma_checkpoint restore` refused | Three separate gates, each with its own message: a real rebuild needs `dryRun: false`, `allowDestructive: true`, and a bridge started with `FIGMA_BRIDGE_DESTRUCTIVE=1`. Without them the default dry run still reports exactly what would be deleted and created |
 | `figma_checkpoint restore` rebuilds but `verified: false` | The second dump differs from the checkpoint: read `verification.diff` (each entry has a path and both values) and `verification.notes`, which name the differences checkpoint-v1 knows it causes (HUG sizing, per-run text) |
+| A write timed out — did it ever run? | The timeout error names its `opId`: `figma_ops {opId}` reports whether it is still `queued`, `running`, or finished after the timeout, with the answer recorded for it. `figma_cancel` stops it while it is still `queued`; `OP_RUNNING` and `OP_DONE` are refusals that say why it cannot be stopped — and `OP_DONE` names the revision the call actually reached |
 
 Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the plugin is not paired.
 
