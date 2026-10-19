@@ -186,6 +186,25 @@ try {
   check("parity tools exposed", missingParity.length === 0,
     missingParity.length ? "missing: " + missingParity.join(",") : parity.join(","));
 
+  // --- the guide: handshake instructions + a readable resource ---
+  // Both carry the same text, and it must be the file on disk, not the inline
+  // fallback: that is what fails if guide.ts ever loses the path.
+  const armed = "Which file a call lands in";
+  check("initialize carries the operating guide as instructions",
+    typeof init.result?.instructions === "string" && init.result.instructions.includes(armed),
+    init.result?.instructions ? `${init.result.instructions.length} chars` : "none");
+
+  const resList = await rpc("resources/list", {});
+  const guideRes = (resList.result?.resources || []).find((r) => r.uri === "figma-local://guide/skill");
+  check("guide is listed as a resource", !!guideRes,
+    guideRes ? `${guideRes.mimeType}` : JSON.stringify(resList.result || resList.error));
+
+  const resRead = await rpc("resources/read", { uri: "figma-local://guide/skill" });
+  const guideText = resRead.result?.contents?.[0]?.text || "";
+  check("guide resource reads back SKILL.md",
+    guideText.includes(armed) && guideText.includes("scopeNodeId"),
+    `${guideText.length} chars`);
+
   // --- calls through the real chain ---
   const ping = toolText(await rpc("tools/call", { name: "figma_ping", arguments: {} }));
   check("figma_ping round-trip reaches the plugin",

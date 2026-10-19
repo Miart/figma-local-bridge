@@ -17,6 +17,7 @@ import { DaemonLink, OfflineLink, readDaemonInfo } from "./link.js";
 import { BridgeOffline } from "./websocket.js";
 import { FigmaClient } from "./figma.js";
 import { registerTools, type Capabilities } from "./tools.js";
+import { GUIDE, registerGuide } from "./guide.js";
 
 const INFO_FILE =
   process.env.FIGMA_BRIDGE_INFO_FILE ||
@@ -33,10 +34,16 @@ function log(...a: unknown[]) {
 }
 
 async function main() {
+  // The guide rides the handshake as well as the resource: a client that shows
+  // `instructions` to the model at connect time teaches the retry and fileKey
+  // rules before the first call, and one that ignores them can still fetch
+  // figma-local://guide/skill. Deliberately short — it is a doctrine, not the
+  // README.
   const server = new McpServer(
     { name: "figma-local-bridge", version: "0.2.0" },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, instructions: GUIDE },
   );
+  registerGuide(server);
 
   if (!existsSync(INFO_FILE)) {
     // Still serve tools; they will report the daemon is missing. Failing here
