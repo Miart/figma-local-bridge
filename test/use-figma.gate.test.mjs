@@ -54,6 +54,7 @@ function mcpClient(destructive) {
       ...process.env,
       FIGMA_BRIDGE_INFO_FILE: INFO,
       FIGMA_BRIDGE_DESTRUCTIVE: destructive ? "1" : "0",
+      FIGMA_BRIDGE_JOURNAL: "0",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });

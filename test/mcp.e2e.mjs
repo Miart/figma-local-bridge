@@ -48,6 +48,7 @@ const proc = spawn("node", ["server/dist/index.js"], {
     ...process.env,
     FIGMA_BRIDGE_INFO_FILE: INFO,
     FIGMA_BRIDGE_DESTRUCTIVE: "1",
+    FIGMA_BRIDGE_JOURNAL: "0",
   },
   stdio: ["pipe", "pipe", "pipe"],
 });

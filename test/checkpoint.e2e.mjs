@@ -38,7 +38,7 @@ function connect(url) {
 
 async function mcpClient(env = {}) {
   const proc = spawn("node", ["server/dist/index.js"], {
-    env: { ...process.env, FIGMA_BRIDGE_INFO_FILE: INFO, FIGMA_BRIDGE_CHECKPOINTS_DIR: DIR, ...env },
+    env: { ...process.env, FIGMA_BRIDGE_INFO_FILE: INFO, FIGMA_BRIDGE_CHECKPOINTS_DIR: DIR, FIGMA_BRIDGE_JOURNAL: "0", ...env },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let buf = "";
