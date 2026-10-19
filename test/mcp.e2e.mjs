@@ -43,18 +43,25 @@ const daemon = spawn("node", ["server/dist/daemon.js"], {
   stdio: ["ignore", "ignore", "ignore"],
 });
 
-const proc = spawn("node", ["server/dist/index.js"], {
-  env: {
-    ...process.env,
-    FIGMA_BRIDGE_INFO_FILE: INFO,
-    FIGMA_BRIDGE_DESTRUCTIVE: "1",
-    FIGMA_BRIDGE_JOURNAL: "0",
-  },
-  stdio: ["pipe", "pipe", "pipe"],
-});
-
+// The MCP client is started only once the daemon descriptor is on disk.
+// server/dist/index.js reads it once, synchronously, at startup and latches
+// into an OfflineLink when it is missing — spawning it next to the daemon made
+// this file win or lose a boot race.
+let proc = null;
 let stderr = "";
-proc.stderr.on("data", (d) => { stderr += d.toString(); });
+function startClient() {
+  proc = spawn("node", ["server/dist/index.js"], {
+    env: {
+      ...process.env,
+      FIGMA_BRIDGE_INFO_FILE: INFO,
+      FIGMA_BRIDGE_DESTRUCTIVE: "1",
+      FIGMA_BRIDGE_JOURNAL: "0",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  proc.stderr.on("data", (d) => { stderr += d.toString(); });
+  return proc;
+}
 
 const waitForToken = async () => {
   const t0 = Date.now();
@@ -74,21 +81,23 @@ const waitForToken = async () => {
 let rpcId = 0;
 const pendingRpc = new Map();
 let stdoutBuf = "";
-proc.stdout.on("data", (d) => {
-  stdoutBuf += d.toString();
-  let i;
-  while ((i = stdoutBuf.indexOf("\n")) >= 0) {
-    const line = stdoutBuf.slice(0, i).trim();
-    stdoutBuf = stdoutBuf.slice(i + 1);
-    if (!line) continue;
-    let msg;
-    try { msg = JSON.parse(line); } catch { continue; }
-    if (msg.id !== undefined && pendingRpc.has(msg.id)) {
-      pendingRpc.get(msg.id)(msg);
-      pendingRpc.delete(msg.id);
+const attachStdout = (p) => {
+  p.stdout.on("data", (d) => {
+    stdoutBuf += d.toString();
+    let i;
+    while ((i = stdoutBuf.indexOf("\n")) >= 0) {
+      const line = stdoutBuf.slice(0, i).trim();
+      stdoutBuf = stdoutBuf.slice(i + 1);
+      if (!line) continue;
+      let msg;
+      try { msg = JSON.parse(line); } catch { continue; }
+      if (msg.id !== undefined && pendingRpc.has(msg.id)) {
+        pendingRpc.get(msg.id)(msg);
+        pendingRpc.delete(msg.id);
+      }
     }
-  }
-});
+  });
+};
 
 function rpc(method, params) {
   const id = ++rpcId;
@@ -124,6 +133,10 @@ let ws;
 try {
   const token = await waitForToken();
   check("bridge token available from daemon descriptor", !!token);
+
+  // The descriptor is on disk — only now can the client start (see
+  // startClient above).
+  attachStdout(startClient());
 
   // Pair a simulated plugin BEFORE any tool call — this also exercises the
   // "client attaches late and must learn the state immediately" path.

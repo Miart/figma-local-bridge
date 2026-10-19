@@ -16,6 +16,7 @@ import fs from "node:fs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import os, { homedir } from "node:os";
+import { freshDescriptor } from "./helpers/fresh-descriptor.mjs";
 
 const PORT = Number(process.env.TEST_PORT || 8897);
 const INFO = join(homedir(), ".local/share/opencode", "figma-bridge-daemon-checkpoint-test.json");
@@ -94,6 +95,7 @@ let liveRev = 11;
 const fingerprintOf = (tree) => "fp" + JSON.stringify(tree).length;
 
 const pluginCalls = [];
+freshDescriptor(INFO);
 const daemon = spawn("node", ["server/dist/daemon.js"], {
   env: { ...process.env, FIGMA_BRIDGE_PORT: String(PORT), FIGMA_BRIDGE_INFO_FILE: INFO },
   stdio: ["ignore", "pipe", "pipe"],

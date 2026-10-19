@@ -20,6 +20,7 @@ import { WebSocket } from "ws";
 import fs from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { freshDescriptor } from "./helpers/fresh-descriptor.mjs";
 
 const PORT = Number(process.env.TEST_PORT_MULTI || 8898);
 const INFO = join(homedir(), ".local/share/opencode", "figma-bridge-daemon-multifile-test.json");
@@ -108,6 +109,7 @@ async function fakePlugin(info, file) {
   return ws;
 }
 
+freshDescriptor(INFO);
 const daemon = spawn("node", ["server/dist/daemon.js"], {
   env: { ...process.env, FIGMA_BRIDGE_PORT: String(PORT), FIGMA_BRIDGE_INFO_FILE: INFO },
   stdio: ["ignore", "pipe", "pipe"],
@@ -161,9 +163,14 @@ try {
     u.searchParams.set("role", "mcp");
     u.searchParams.set("key", info.clientKey);
     u.searchParams.set("cid", "raw00001");
-    const ws = await connect(u.toString());
+    // Attach the listener BEFORE the socket opens: the daemon's hello packet
+    // (link + files) can arrive in the same tick as the open event, and a
+    // listener registered after `await connect(...)` misses it — the exact
+    // late-subscriber trap the daemon's hello exists to prevent.
+    const ws = new WebSocket(u.toString());
     const seen = [];
     ws.on("message", (raw) => { try { seen.push(JSON.parse(raw.toString())); } catch {} });
+    await new Promise((res, rej) => { ws.on("open", res); ws.on("error", rej); });
     await sleep(300);
 
     const helloFiles = seen.find((e) => e.event === "files");

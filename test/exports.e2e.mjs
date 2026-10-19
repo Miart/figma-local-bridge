@@ -19,6 +19,7 @@ import os from "node:os";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { encodePng, pngSize } from "../server/dist/compare.js";
+import { freshDescriptor } from "./helpers/fresh-descriptor.mjs";
 
 const PORT = Number(process.env.TEST_PORT || 8901);
 const INFO = join(homedir(), ".local/share/opencode", "figma-bridge-daemon-exports-test.json");
@@ -80,6 +81,7 @@ function png(width, height, rgba = [255, 0, 0, 255]) {
   return encodePng({ width, height, rgba: new Uint8Array(buf) }).toString("base64");
 }
 
+freshDescriptor(INFO);
 const daemon = spawn("node", ["server/dist/daemon.js"], {
   env: { ...process.env, FIGMA_BRIDGE_PORT: String(PORT), FIGMA_BRIDGE_INFO_FILE: INFO },
   stdio: ["ignore", "pipe", "pipe"],
