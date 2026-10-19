@@ -43,6 +43,18 @@ async function guard(fn: () => Promise<ToolResult>): Promise<ToolResult> {
 }
 
 const safe = (s: string) => s.replace(/[^\w.\- ]+/g, "_").slice(0, 80) || "node";
+/**
+ * A bundle gets its own directory. `safe` keeps dots because file names need
+ * them, but a node called "." or ".." would make `join(root, name)` the root or
+ * its parent — a write outside outDir. Directory names therefore lose their
+ * leading/trailing dots and fall back to "node" when nothing is left.
+ */
+const safeDir = (s: string) => {
+  const cleaned = safe(s).replace(/^\.+/, "").replace(/\.+$/, "").trim();
+  return cleaned || "node";
+};
+/** The plugin enforces this too; the boundary repeats it before writing. */
+const MAX_HANDOFF_PREVIEW = 8 * 1024 * 1024;
 const sha = (buf: Buffer) => createHash("sha256").update(buf).digest("hex").slice(0, 16);
 
 function svgSize(svg: string): { width: number; height: number } | null {
@@ -330,6 +342,209 @@ export function registerExportTools(server: McpServer, client: FigmaClient) {
           files,
           rev: r.rev ?? null,
           ...(replaced ? { replacedManifest: true } : {}),
+          warnings,
+        });
+      }),
+  );
+
+  server.tool(
+    "figma_export_web_handoff",
+    "Write a web handoff bundle for one frame: preview.png (1x), an optional preview@Nx.png, spec.json with every layer's absolute box, text, " +
+      "paints and effects, tokens.json and tokens.css (colours, fonts, text classes, spacing), a README that states what the bundle does NOT carry, " +
+      "and handoff.json with hashes and counts. One call writes one folder and every file is re-read from disk. Read-only for the document — it works " +
+      "with write access off. Refuses above 2,500 nodes or 8 MiB per preview instead of truncating. This is a specification, not generated production HTML.",
+    {
+      nodeId: figmaNodeId().optional().describe("The frame, component or section to hand off; defaults to the single selected node"),
+      scale: z.number().min(1).max(4).default(2).describe("Scale of the second preview (preview@Nx.png); 1 means only preview.png"),
+      outDir: z.string().optional().describe("Parent directory for the bundle; the bundle gets its own folder named after the node"),
+      fileKey: fileKeyParam,
+    },
+    async (a) =>
+      guard(async () => {
+        const r = await call<any>(
+          "export_web_handoff",
+          { nodeId: a.nodeId, scale: a.scale, fileKey: a.fileKey },
+          300_000,
+        );
+
+        if (!r || typeof r !== "object") throw new Error("the plugin returned no handoff");
+        if (typeof r.nodeId !== "string" || typeof r.name !== "string" || !r.name.trim()) {
+          throw new Error("the plugin returned no node id or name");
+        }
+        if (!Array.isArray(r.spec?.nodes)) throw new Error("the plugin returned no spec nodes");
+        if (!r.tokens || typeof r.tokens !== "object") throw new Error("the plugin returned no tokens");
+        if (typeof r.css !== "string" || !r.css.trim()) throw new Error("the plugin returned an empty tokens.css");
+        if (typeof r.readme !== "string" || !r.readme.trim()) throw new Error("the plugin returned an empty README");
+
+        const root = resolve(a.outDir || join(tmpdir(), "figma-bridge-handoff"));
+        const dir = join(root, safeDir(r.name));
+        const manifestPath = join(dir, "handoff.json");
+
+        // A bundle is one node's truth. Reusing its folder for another node
+        // would mix hashes and warnings from two documents; refuse instead.
+        // Node ids are only unique within a file, so a known file key must
+        // agree too; when either side is an unsaved file, the node id is all
+        // there is to compare.
+        if (existsSync(manifestPath)) {
+          let previous: any = null;
+          try {
+            previous = JSON.parse(readFileSync(manifestPath, "utf8"));
+          } catch {
+            previous = null;
+          }
+          const previousFile = previous?.source?.fileKey || null;
+          const currentFile = a.fileKey || r.fileKey || null;
+          const sameFile = previousFile === null || currentFile === null || previousFile === currentFile;
+          if (
+            !previous ||
+            previous.schema !== "figma-web-handoff/v1" ||
+            previous.source?.nodeId !== r.nodeId ||
+            !sameFile
+          ) {
+            const owner = previous?.source
+              ? `${previous.source.nodeId}${previousFile ? ` in ${previousFile}` : ""}`
+              : "an unreadable manifest";
+            throw new Error(`${dir} already holds a handoff for ${owner}; choose another outDir or remove it`);
+          }
+        }
+
+        mkdirSync(dir, { recursive: true });
+        const warnings: string[] = [...(r.warnings ?? [])];
+        if (r.spec.nodes.length !== (r.counts?.nodes ?? -1)) {
+          warnings.push(
+            `the plugin counted ${r.counts?.nodes ?? "no"} node(s) but spec.json has ${r.spec.nodes.length} — ` +
+              `the manifest says what the files contain`,
+          );
+        }
+
+        const want = a.scale === 1 ? [1] : [1, a.scale];
+        const images: any[] = [];
+        const files: any[] = [];
+        for (const s of want) {
+          const p = (r.previews ?? []).find((x: any) => x.scale === s);
+          if (!p) throw new Error(`the plugin did not return the ${s}x preview`);
+          if (typeof p.base64 !== "string" || !p.base64) throw new Error(`the ${s}x preview has no bytes`);
+          const bytes = Buffer.from(p.base64, "base64");
+          if (bytes.length > MAX_HANDOFF_PREVIEW) {
+            throw new Error(
+              `the ${s}x preview is ${bytes.length} bytes, over the ${MAX_HANDOFF_PREVIEW} byte cap — lower scale or pick a smaller frame`,
+            );
+          }
+          const name = s === 1 ? "preview.png" : `preview@${s}x.png`;
+          const expected =
+            typeof p.width === "number" && typeof p.height === "number" ? { width: p.width, height: p.height } : null;
+          const disk = writeChecked(join(dir, name), bytes, expected, "png");
+          diskWarnings(disk, expected, warnings);
+          images.push({
+            name,
+            path: disk.path,
+            scale: s,
+            width: disk.width ?? null,
+            height: disk.height ?? null,
+            bytes: disk.bytes,
+            sha256_16: disk.hash,
+            matchesManifest: disk.matchesManifest !== false,
+          });
+          files.push({ name, kind: "image", path: disk.path, bytes: disk.bytes, sha256_16: disk.hash });
+        }
+
+        const writeJson = (name: string, value: unknown): any => {
+          if (value === undefined) throw new Error(`there is no ${name} to write`);
+          const path = join(dir, name);
+          const replaced = existsSync(path);
+          writeFileSync(path, JSON.stringify(value, null, 2));
+          const back = readFileSync(path);
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(back.toString("utf8"));
+          } catch (err: any) {
+            throw new Error(`${path} is not valid JSON after writing: ${String(err?.message ?? err)}`);
+          }
+          const entry = { name, kind: "json", path, bytes: back.length, sha256_16: sha(back), replaced };
+          files.push(entry);
+          return { entry, parsed };
+        };
+
+        const writeText = (name: string, value: string): any => {
+          const path = join(dir, name);
+          const replaced = existsSync(path);
+          writeFileSync(path, value);
+          const back = readFileSync(path);
+          if (back.toString("utf8") !== value) throw new Error(`${path} did not read back as it was written`);
+          const entry = { name, kind: "text", path, bytes: back.length, sha256_16: sha(back), replaced };
+          files.push(entry);
+          return entry;
+        };
+
+        const spec = writeJson("spec.json", r.spec);
+        const tokens = writeJson("tokens.json", r.tokens);
+        const css = writeText("tokens.css", r.css);
+        const readme = writeText("README.md", r.readme);
+        if (!spec.parsed || typeof spec.parsed !== "object") throw new Error(`${spec.entry.path} did not parse as an object`);
+        if (!tokens.parsed || typeof tokens.parsed !== "object") {
+          throw new Error(`${tokens.entry.path} did not parse as an object`);
+        }
+
+        const replacedNames = files.filter((f) => f.replaced).map((f) => f.name);
+        if (replacedNames.length) {
+          warnings.push(`replaced ${replacedNames.length} existing file(s) in ${dir}: ${replacedNames.join(", ")}`);
+        }
+
+        // The manifest's `allFilesWritten` is a claim about the filesystem, so
+        // it is computed from the filesystem: size and hash, not existence.
+        const bad = files.filter((f) => {
+          try {
+            const back = readFileSync(f.path);
+            return back.length !== f.bytes || sha(back) !== f.sha256_16;
+          } catch {
+            return true;
+          }
+        });
+        const allFilesWritten = bad.length === 0;
+        if (!allFilesWritten) {
+          warnings.push(`on disk: ${bad.map((f) => f.name).join(", ")} did not read back with the recorded bytes and hash`);
+        }
+
+        const manifest = {
+          schema: "figma-web-handoff/v1",
+          generatedAt: new Date().toISOString(),
+          source: {
+            fileKey: a.fileKey || r.fileKey || null,
+            nodeId: r.nodeId,
+            name: r.name,
+            type: r.type,
+            rev: r.rev ?? null,
+          },
+          space: r.spec.space ?? null,
+          scale: a.scale,
+          images: images.map(({ path, ...rest }) => rest),
+          files: files.map(({ path, ...rest }) => rest),
+          counts: r.counts ?? null,
+          fonts: { missing: r.missingFonts ?? [] },
+          verification: {
+            nodesInSpec: r.spec.nodes.length,
+            countsMatchSpec: r.counts?.nodes === r.spec.nodes.length,
+            imagesMatchManifest: images.every((i) => i.matchesManifest !== false),
+            allFilesWritten,
+          },
+          warnings,
+        };
+        const manifestEntry = writeJson("handoff.json", manifest).entry;
+
+        return text({
+          dir,
+          entry: readme.path,
+          manifest: manifestPath,
+          manifestSha256_16: manifestEntry.sha256_16,
+          files: files.filter((f) => f.name !== "handoff.json").map(({ path, ...rest }) => rest),
+          images: images.map(({ path, ...rest }) => rest),
+          counts: r.counts ?? null,
+          fonts: { missing: r.missingFonts ?? [] },
+          rev: r.rev ?? null,
+          nodeId: r.nodeId,
+          name: r.name,
+          scale: a.scale,
+          verification: manifest.verification,
           warnings,
         });
       }),
