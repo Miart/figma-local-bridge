@@ -54,6 +54,13 @@ clear, flatten, grid and text, which handle this manifest's traps —
 getNodeById throws in dynamic-page mode, writing characters needs a loaded
 font, and node.x is parent-relative while bbox() is absolute. Its write
 helpers refuse an out-of-scope or other-page target before writing.
+
+Exports for a build: figma_export_ui_atlas (one PNG plus rects in that file's
+pixels, with overlaps/off-sheet/bleed/duplicate names named, and the file
+re-read from disk), figma_export_9slice (insets in file pixels plus
+border-image values) and figma_export_ui_states (one file per state, refusing
+to guess which variant property names them, reporting byte-identical states).
+They only read the document, so they work with writes off.
 `;
 
 function readGuide(): string {

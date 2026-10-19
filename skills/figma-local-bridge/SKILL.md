@@ -111,6 +111,47 @@ const placed = flb.grid(sprites, { parent: sheet, cell: 128, columns: 4, fit: tr
 return { cells: placed.cells, resized: placed.resized, notes: placed.notes };
 ```
 
+## Exporting for a build: atlas, 9-slice, button states
+
+`figma_export_ui_atlas` takes the sheet you just built and returns ONE PNG plus a
+manifest of rects **in that PNG's own pixels**, written next to it
+(`.atlas.json`) and re-read from disk before the answer. Nothing is repacked: the
+frame's direct children are the sprites, in their document order. What the
+manifest refuses to hide:
+
+- `sheet.sizeMatches: false` — Figma produced something other than
+  `round(size × scale)`; the rects follow the FILE, and `exportWidth/Height` is
+  what they are measured against.
+- `overlaps`, `offSheet`, `bleed` — rects that overlap (an engine slicing by rect
+  cannot tell whose pixel it is), sprites outside the image, and drawing that
+  reaches past its own box (a shadow or a stroke the neighbouring cell cuts off).
+- repeated names: keys become `coin#1`, `coin#2`; a child with no bounds at all
+  lands in `skipped` with a reason instead of quietly missing.
+- `basis: "nodeBox"` — the frame has a stroke, so the image is the frame's own
+  box and the rects are measured from the node's top-left. Which box the image is
+  is decided by the exported size, not assumed.
+
+So the order is: build the sheet (`flb.grid`), read `verification` and
+`warnings`, and only then wire the engine up — the rects in the reply are what
+the engine needs; the JSON on disk is what a build pipeline reads.
+
+`figma_export_9slice` returns insets in the file's pixels, the stretchable
+middle, and CSS values ready for `border-image` (`borderImageSlice` in image
+pixels, `borderImageWidth` in design pixels — the pair a `@2x` image needs).
+Insets come from `insets` or from a child layer named exactly `9slice`; insets
+that leave no middle are refused with the numbers that caused them.
+
+`figma_export_ui_states` writes one file per state. A `COMPONENT_SET` names them
+by its variant property — the only one it declares, or the one passed as
+`property`; several properties without `property` is a refusal that lists them,
+because `State=hover` and `Size=L` are both plausible names and one would be a
+lie. A frame names states by layer name. States with **identical bytes** are
+reported: a hover that draws exactly like normal is usually a variant that is not
+what its name says, and this is the cheapest place to find that out.
+
+All three are reads of the document (usable with `FIGMA_BRIDGE_WRITE=0`), and
+their files go to `outDir`, a temp directory by default.
+
 ## Reading
 
 - `figma_get_metadata` is the cheap way to find ids; `figma_inspect` gives the
