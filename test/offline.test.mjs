@@ -15,6 +15,7 @@
 // The grace is a real 2 s timer, so these tests take a few seconds. That is the
 // point: they fail if someone raises the constant back towards 15 s.
 
+import "./helpers/journal-dir.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FigmaClient } from "../server/dist/figma.js";

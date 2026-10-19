@@ -15,6 +15,7 @@
 //   - reading is bounded and total: a partial tail or a corrupt line is
 //     reported, not fatal.
 
+import "./helpers/journal-dir.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

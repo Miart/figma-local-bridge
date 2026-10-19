@@ -14,6 +14,7 @@
  * These are invisible to a test that only checks the happy path, which is why
  * the suite was green while the product was unusable.
  */
+import "./helpers/journal-dir.mjs";
 import { spawn } from "node:child_process";
 import { WebSocket } from "ws";
 import { existsSync, rmSync } from "node:fs";

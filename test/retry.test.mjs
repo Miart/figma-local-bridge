@@ -10,6 +10,7 @@
 // These tests pin that contract, because a regression here corrupts a design
 // file silently rather than loudly.
 
+import "./helpers/journal-dir.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FigmaClient } from "../server/dist/figma.js";

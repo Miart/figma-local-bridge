@@ -16,6 +16,7 @@
 // Every refusal here is synchronous before the send, so these tests do not
 // wait on timers.
 
+import "./helpers/journal-dir.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FigmaClient } from "../server/dist/figma.js";
