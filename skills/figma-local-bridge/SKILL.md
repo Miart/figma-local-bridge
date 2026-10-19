@@ -111,7 +111,7 @@ const placed = flb.grid(sprites, { parent: sheet, cell: 128, columns: 4, fit: tr
 return { cells: placed.cells, resized: placed.resized, notes: placed.notes };
 ```
 
-## Exporting for a build: atlas, 9-slice, button states
+## Exporting for a build or the web: atlas, 9-slice, states, handoff
 
 `figma_export_ui_atlas` takes the sheet you just built and returns ONE PNG plus a
 manifest of rects **in that PNG's own pixels**, written next to it
@@ -149,7 +149,24 @@ lie. A frame names states by layer name. States with **identical bytes** are
 reported: a hover that draws exactly like normal is usually a variant that is not
 what its name says, and this is the cheapest place to find that out.
 
-All three are reads of the document (usable with `FIGMA_BRIDGE_WRITE=0`), and
+`figma_export_web_handoff` writes the folder a web developer opens:
+`preview.png` (1x) plus `preview@Nx.png`, `spec.json` (flat, document order —
+every layer's box relative to the frame, text, paints, effects and layout
+fields), `tokens.json`/`tokens.css` (solid colours named by their paint styles
+when one value has one style, fonts, text classes, spacing) and a `README.md`
+that says what the bundle is **not**: production HTML, responsive layout,
+image fills as separate files, gradient tokens, embedded fonts, masks and
+effects applied by the CSS, paragraph spacing or vertical alignment. A colour
+bound to several styles, a gradient, an
+image fill or a mixed text layer is never averaged into an invented value: it
+is named as missing, or carried as stops/segments. `handoff.json` keeps the
+hashes and counts, every file is re-read from disk, and one call owns one
+folder — it refuses to reuse it for another node. Above 2,500 nodes or 8 MiB per
+preview it refuses rather than truncating; lower the scale or pick a smaller
+frame. A font that the document uses but the machine cannot load is listed in
+the README; it is not assumed present.
+
+All four are reads of the document (usable with `FIGMA_BRIDGE_WRITE=0`), and
 their files go to `outDir`, a temp directory by default.
 
 ## Reading
