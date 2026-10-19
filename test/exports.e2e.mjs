@@ -1,0 +1,277 @@
+// End-to-end test for the export tools: the plugin side measures and renders,
+// the MCP side writes the artefacts and checks what landed on disk.
+//
+// The stub plugin answers with PNGs built here, which is the point: the checks
+// under test are the ones that compare the FILE with the manifest, so the file
+// has to be real. Three things this test exists to catch:
+//
+//   - a manifest whose numbers describe an image nobody wrote (the stub claims
+//     128x64 and sends 64x32: the tool must say the file contradicts it);
+//   - states that are byte-identical (two of the three here), which is usually a
+//     variant that does not draw what its name says;
+//   - exports being unavailable in read-only mode — they are reads of the
+//     document, so a handoff or a build must work with writes off.
+import { spawn } from "node:child_process";
+import { WebSocket } from "ws";
+import fs from "node:fs";
+import { join } from "node:path";
+import os from "node:os";
+import { homedir } from "node:os";
+import { encodePng } from "../server/dist/compare.js";
+
+const PORT = Number(process.env.TEST_PORT || 8901);
+const INFO = join(homedir(), ".local/share/opencode", "figma-bridge-daemon-exports-test.json");
+const OUT = fs.mkdtempSync(join(os.tmpdir(), "figma-exports-e2e-"));
+
+let pass = 0, fail = 0;
+const check = (name, ok, detail = "") => {
+  if (ok) { pass++; process.stdout.write(`PASS  ${name}\n`); }
+  else { fail++; process.stdout.write(`FAIL  ${name}${detail ? "  — " + detail : ""}\n`); }
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function connect(url) {
+  return new Promise((res) => {
+    const ws = new WebSocket(url);
+    ws.on("open", () => res(ws));
+    ws.on("error", () => res(null));
+  });
+}
+
+async function mcpClient(env = {}) {
+  const proc = spawn("node", ["server/dist/index.js"], {
+    env: { ...process.env, FIGMA_BRIDGE_INFO_FILE: INFO, FIGMA_BRIDGE_DESTRUCTIVE: "1", ...env },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let buf = "";
+  const pending = new Map();
+  proc.stdout.on("data", (d) => {
+    buf += d.toString();
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+      if (!line) continue;
+      let m; try { m = JSON.parse(line); } catch { continue; }
+      if (m.id !== undefined && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
+    }
+  });
+  let rpcId = 0;
+  const rpc = (method, params) => new Promise((res, rej) => {
+    const id = ++rpcId;
+    const t = setTimeout(() => rej(new Error("rpc timeout " + method)), 8000);
+    pending.set(id, (m) => { clearTimeout(t); res(m); });
+    proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+  });
+  await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "0" } });
+  proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+  const text = (r) => {
+    const t = r?.result?.content?.[0]?.text;
+    return t ? JSON.parse(t) : null;
+  };
+  return { proc, rpc, text, kill: () => proc.kill() };
+}
+
+/** A real PNG of the given size, so `pngSize` on disk has something to read. */
+function png(width, height, rgba = [255, 0, 0, 255]) {
+  const buf = Buffer.alloc(width * height * 4);
+  for (let i = 0; i < width * height; i++) buf.set(rgba, i * 4);
+  return encodePng({ width, height, rgba: new Uint8Array(buf) }).toString("base64");
+}
+
+const daemon = spawn("node", ["server/dist/daemon.js"], {
+  env: { ...process.env, FIGMA_BRIDGE_PORT: String(PORT), FIGMA_BRIDGE_INFO_FILE: INFO },
+  stdio: ["ignore", "pipe", "pipe"],
+});
+
+try {
+  let info = null;
+  for (let i = 0; i < 60 && !info; i++) {
+    await sleep(150);
+    try { info = JSON.parse(fs.readFileSync(INFO, "utf8")); } catch {}
+  }
+  if (!info) throw new Error("no daemon info");
+
+  const c = await mcpClient();
+  const tools = (await c.rpc("tools/list", {})).result.tools.map((t) => t.name);
+  check(
+    "the three export tools are registered",
+    ["figma_export_ui_atlas", "figma_export_9slice", "figma_export_ui_states"].every((n) => tools.includes(n)),
+    tools.join(","),
+  );
+
+  const plugin = await connect(info.ws.replace("127.0.0.1", "localhost") + "&role=plugin");
+  const seen = [];
+  plugin.on("message", (raw) => {
+    const env = JSON.parse(raw.toString());
+    seen.push(env);
+    const ok = (result) => plugin.send(JSON.stringify({ id: env.id, ok: true, result, rev: 11 }));
+    const fail = (m) => plugin.send(JSON.stringify({ id: env.id, ok: false, error: { message: m } }));
+    switch (env.method) {
+      case "ping": return ok({ ok: true });
+      case "export_atlas": {
+        if (env.params.nodeId === "1:2") {
+          // The honest case: a 200x100 file and a manifest that describes it.
+          return ok({
+            nodeId: "9:1", name: "Sheet/Hero", format: "PNG", scale: 2, bytes: 80070, exportSize: { width: 200, height: 100 },
+            skipped: [{ id: "9:9", name: "empty", type: "FRAME", why: "no bounds (empty)" }],
+            manifest: {
+              sheet: { id: "9:1", name: "Sheet/Hero", scale: 2, width: 100, height: 50, exportWidth: 200, exportHeight: 100, expectedWidth: 200, expectedHeight: 100, sizeMatches: true, basis: "boundingBox" },
+              sprites: [
+                { key: "icon", id: "9:2", name: "icon", rect: { x: 0, y: 0, width: 80, height: 60 } },
+                { key: "gem#1", id: "9:3", name: "gem", rect: { x: 80, y: 0, width: 80, height: 60 } },
+              ],
+              verification: { rounded: 0, overlaps: 0, offSheet: 0, duplicateNames: 1, bleed: 0, hidden: 0, overlapScan: "full" },
+              warnings: ['1 sprite name(s) repeat — entries are keyed "name#2"'],
+            },
+            rev: 11,
+            base64: png(200, 100),
+          });
+        }
+        // The trap: the manifest says 128x64 while the bytes are 64x32.
+        return ok({
+          nodeId: "9:4", name: "Lying", format: "PNG", scale: 2, bytes: 10, exportSize: { width: 128, height: 64 },
+          skipped: [],
+          manifest: {
+            sheet: { id: "9:4", name: "Lying", scale: 2, width: 64, height: 32, exportWidth: 128, exportHeight: 64, expectedWidth: 128, expectedHeight: 64, sizeMatches: true, basis: "boundingBox" },
+            sprites: [],
+            verification: { rounded: 0, overlaps: 0, offSheet: 0, duplicateNames: 0, bleed: 0, hidden: 0, overlapScan: "full" },
+            warnings: [],
+          },
+          rev: 11,
+          base64: png(64, 32),
+        });
+      }
+      case "export_9slice": return ok({
+        nodeId: "8:1", name: "Panel", format: "PNG", scale: 2, bytes: 48040, exportSize: { width: 120, height: 80 },
+        guide: { id: "8:2", name: "9slice", ignored: false },
+        descriptor: {
+          design: { width: 60, height: 40, insets: { top: 8, right: 10, bottom: 6, left: 12 } },
+          exported: { width: 120, height: 80, insets: { top: 16, right: 20, bottom: 12, left: 24 } },
+          middle: { width: 76, height: 52 },
+          cssBorderImageSlice: "16 20 12 24",
+          warnings: [],
+        },
+        rev: 11,
+        base64: png(120, 80),
+      });
+      case "export_ui_states": {
+        // normal and disabled are byte-identical on purpose: the tool must notice.
+        const [normal, hover] = [png(80, 32, [10, 10, 10, 255]), png(80, 32, [200, 200, 200, 255])];
+        return ok({
+          nodeId: "7:1", name: "Button/States", type: "COMPONENT_SET", property: "State", format: "PNG", scale: 2,
+          states: [
+            { key: "normal", name: "normal", id: "7:2", width: 40, height: 16, visible: true, value: "normal" },
+            { key: "hover", name: "hover", id: "7:3", width: 40, height: 16, visible: true, value: "hover" },
+            { key: "disabled", name: "disabled", id: "7:4", width: 40, height: 16, visible: true, value: "disabled" },
+          ],
+          files: [
+            { key: "normal", id: "7:2", name: "normal", format: "PNG", scale: 2, bytes: 1, exportSize: { width: 80, height: 32 }, base64: normal },
+            { key: "hover", id: "7:3", name: "hover", format: "PNG", scale: 2, bytes: 1, exportSize: { width: 80, height: 32 }, base64: hover },
+            { key: "disabled", id: "7:4", name: "disabled", format: "PNG", scale: 2, bytes: 1, exportSize: { width: 80, height: 32 }, base64: normal },
+          ],
+          warnings: [],
+          rev: 11,
+        });
+      }
+      default: return fail("unhandled " + env.method);
+    }
+  });
+  await sleep(300);
+
+  // ------------------------------------------------------------- atlas
+  const atlasDir = join(OUT, "atlas");
+  const atlas = c.text(await c.rpc("tools/call", { name: "figma_export_ui_atlas", arguments: { nodeId: "1:2", scale: 2, outDir: atlasDir } }));
+  const atlasReq = seen.find((e) => e.method === "export_atlas");
+  check("export_atlas is asked for a scaled PNG of the sheet", atlasReq.params.scale === 2 && atlasReq.params.nodeId === "1:2");
+  check("the sheet name becomes the file name", atlas.image.path === join(atlasDir, "Sheet_Hero.png"), atlas.image.path);
+  check(
+    "the file on disk is the size the manifest claims",
+    atlas.image.width === 200 && atlas.image.height === 100 && atlas.verification.disk.matchesManifest === true,
+    JSON.stringify(atlas.image),
+  );
+  const atlasManifest = JSON.parse(fs.readFileSync(atlas.manifest, "utf8"));
+  check(
+    "the manifest on disk carries the rects, the skipped layer and the warnings",
+    atlasManifest.sprites.length === 2 && atlasManifest.sprites[1].key === "gem#1" &&
+      atlasManifest.skipped[0].why === "no bounds (empty)" && atlasManifest.warnings.length === 1,
+    JSON.stringify(atlasManifest).slice(0, 200),
+  );
+  check(
+    "the rects are in the sheet's own pixels, not the design's",
+    JSON.stringify(atlas.sprites.map((s) => s.rect)) === JSON.stringify([
+      { x: 0, y: 0, width: 80, height: 60 }, { x: 80, y: 0, width: 80, height: 60 },
+    ]),
+    JSON.stringify(atlas.sprites),
+  );
+
+  const lyingDir = join(OUT, "lying");
+  const lying = c.text(await c.rpc("tools/call", { name: "figma_export_ui_atlas", arguments: { nodeId: "9:4", scale: 2, outDir: lyingDir } }));
+  check(
+    "a file that contradicts the manifest is reported, not believed",
+    lying.verification.disk.matchesManifest === false &&
+      lying.warnings.some((w) => w.includes("the manifest does not describe this file")),
+    JSON.stringify(lying.warnings),
+  );
+
+  // ------------------------------------------------------------- 9-slice
+  const sliceDir = join(OUT, "slice");
+  const slice = c.text(await c.rpc("tools/call", { name: "figma_export_9slice", arguments: { nodeId: "8:1", outDir: sliceDir } }));
+  check(
+    "the 9-slice descriptor keeps slices in image pixels and widths in design pixels",
+    slice.css.borderImageSlice === "16 20 12 24" &&
+      slice.css.borderImageWidth === "8px 10px 6px 12px" &&
+      slice.css.borderImageSource === "url(Panel.png)",
+    JSON.stringify(slice.css),
+  );
+  const sliceManifest = JSON.parse(fs.readFileSync(slice.descriptor, "utf8"));
+  check(
+    "the descriptor on disk names the guide layer and the middle",
+    sliceManifest.guide.name === "9slice" && sliceManifest.middle.width === 76 && sliceManifest.image.width === 120,
+    JSON.stringify(sliceManifest).slice(0, 200),
+  );
+
+  // ------------------------------------------------------------- states
+  const statesDir = join(OUT, "states");
+  const states = c.text(await c.rpc("tools/call", { name: "figma_export_ui_states", arguments: { nodeId: "7:1", scale: 2, outDir: statesDir } }));
+  const names = states.files.map((f) => f.file).sort();
+  check(
+    "each state is one file, named by the variant value with the scale suffix",
+    JSON.stringify(names) === JSON.stringify(["disabled@2x.png", "hover@2x.png", "normal@2x.png"]),
+    names.join(","),
+  );
+  check("the variant property that named the states is reported", states.property === "State");
+  check(
+    "two states with identical bytes are called out",
+    states.warnings.some((w) => w.includes("normal@2x.png and disabled@2x.png are byte-identical")),
+    JSON.stringify(states.warnings),
+  );
+  check(
+    "the files on disk are real PNGs of the node's size at scale 2",
+    states.files.every((f) => f.width === 80 && f.height === 32 && fs.statSync(f.path).size === f.bytes),
+    JSON.stringify(states.files),
+  );
+
+  // ------------------------------------------------------------- read-only
+  const ro = await mcpClient({ FIGMA_BRIDGE_WRITE: "0" });
+  const roTools = (await ro.rpc("tools/list", {})).result.tools.map((t) => t.name);
+  const roDir = join(OUT, "readonly");
+  const roAtlas = ro.text(await ro.rpc("tools/call", { name: "figma_export_ui_atlas", arguments: { nodeId: "1:2", scale: 1, outDir: roDir } }));
+  check(
+    "exports work with write access off",
+    roTools.includes("figma_export_ui_atlas") && roAtlas.image.path === join(roDir, "Sheet_Hero.png") && roAtlas.verification.disk.matchesManifest === true,
+    roTools.join(","),
+  );
+  ro.kill();
+
+  c.kill();
+} catch (err) {
+  fail++;
+  process.stdout.write(`FAIL  harness — ${err && err.message}\n${err && err.stack}\n`);
+} finally {
+  daemon.kill();
+  try { fs.rmSync(OUT, { recursive: true, force: true }); } catch {}
+  await sleep(200);
+  process.stdout.write(`\n${pass} passed, ${fail} failed\n`);
+  process.exit(fail ? 1 : 0);
+}
