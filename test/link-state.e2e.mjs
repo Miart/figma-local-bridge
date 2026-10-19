@@ -139,6 +139,36 @@ async function main() {
   }
 
   // ---------------------------------------------------------------- test 4
+  // The state frames are sent ONCE per connection. A subscriber that joins
+  // AFTER they arrived must still learn the current state — otherwise any
+  // component built late (index.ts used to construct its FigmaClient only
+  // after connect()) reports a live, paired plugin as offline for the rest of
+  // the session. That is exactly the "the plugin keeps dying" shape.
+  {
+    const link = new DaemonLink(info1, "eee", INFO);
+    link.connect();
+
+    // Precondition: watch the frames arrive from the wire on this connection.
+    let wireFiles = null;
+    const off = link.subscribe((e) => { if (e.event === "files") wireFiles = e; });
+    const arrived = await until(() => !!wireFiles, 3000);
+    off();
+    check("4a. attach frames carry the state", arrived, JSON.stringify(wireFiles));
+
+    // Now subscribe late, as a FigmaClient built after connect() would.
+    const replayed = [];
+    link.subscribe((e) => replayed.push(e));
+    const linkEv = replayed.find((e) => e.event === "link");
+    const filesEv = replayed.find((e) => e.event === "files");
+    check(
+      "4b. a subscriber that joins after the state still learns it",
+      !!linkEv && linkEv.connected === true && !!filesEv && (filesEv.files || []).length === 1,
+      JSON.stringify(replayed),
+    );
+    link.close();
+  }
+
+  // ---------------------------------------------------------------- test 5
   // Daemon restart must not orphan clients, and the client must pick up the NEW
   // clientKey rather than retrying with the dead one.
   {
@@ -146,14 +176,14 @@ async function main() {
     const client = new FigmaClient(link);
     link.connect();
     await until(() => client.connected === true, 4000);
-    check("4a. client connected before daemon restart", client.connected === true);
+    check("5a. client connected before daemon restart", client.connected === true);
 
     daemon.kill("SIGTERM");
     await sleep(500);
     daemon = startDaemon();
     await until(() => existsSync(INFO) && readInfo().pid !== info1.pid, 6000);
     const info2 = readInfo();
-    check("4b. daemon really restarted with a NEW clientKey", info2.clientKey !== info1.clientKey);
+    check("5b. daemon really restarted with a NEW clientKey", info2.clientKey !== info1.clientKey);
 
     // No plugin can be paired yet: the old plugin's socket died with the old
     // daemon. In the real product the Figma plugin retries every 2s; here we do
@@ -165,7 +195,7 @@ async function main() {
 
     const back = await until(() => client.connected === true, 15_000, 100);
     check(
-      "4c. client RECONNECTS by itself and re-authenticates with the new key",
+      "5c. client RECONNECTS by itself and re-authenticates with the new key",
       back,
       "connected=" + client.connected,
     );

@@ -69,6 +69,14 @@ export class DaemonLink implements Link {
   private closedByUs = false;
   private retry: NodeJS.Timeout | null = null;
   private attempt = 0;
+  /**
+   * The last state the daemon sent on this connection. `link` and `files` are
+   * sent ONCE per connection, when it attaches; a subscriber that joins after
+   * that frame must still learn the current state rather than wait for the
+   * next change — or forever.
+   */
+  private lastLink: Envelope | null = null;
+  private lastFiles: Envelope | null = null;
 
   constructor(
     private info: DaemonInfo,
@@ -111,6 +119,8 @@ export class DaemonLink implements Link {
         return;
       }
       if (env.event) {
+        if (env.event === "link") this.lastLink = env;
+        else if (env.event === "files") this.lastFiles = env;
         for (const h of this.handlers) h(env);
         return;
       }
@@ -134,7 +144,15 @@ export class DaemonLink implements Link {
     });
 
     ws.on("close", () => {
-      for (const h of this.handlers) h({ id: null, event: "link", connected: false });
+      // A socket that a NEWER one has already replaced must not clobber the
+      // current connection's state — the same identity check the daemon uses
+      // for plugin sockets.
+      if (this.ws !== ws) return;
+      // Whatever the daemon last said, a closed socket is offline with nothing
+      // connected; the next subscriber is owed THIS state, not the stale one.
+      this.lastLink = { id: null, event: "link", connected: false };
+      this.lastFiles = { id: null, event: "files", files: [] };
+      for (const h of this.handlers) h(this.lastLink);
       // The daemon is the long-lived process; it restarts (crash, kickstart) far
       // more often than the editor respawns us. Without this, one daemon restart
       // orphans every MCP process until the user restarts their editor.
@@ -156,6 +174,12 @@ export class DaemonLink implements Link {
 
   subscribe(handler: (e: Envelope) => void) {
     this.handlers.add(handler);
+    // The daemon answers with its state ONCE per connection: replay the last
+    // known one so a subscriber that joins afterwards (index.ts used to build
+    // its FigmaClient only after connect()) starts informed instead of
+    // reporting a live plugin as offline until the next change.
+    if (this.lastLink) handler(this.lastLink);
+    if (this.lastFiles) handler(this.lastFiles);
     return () => this.handlers.delete(handler);
   }
 

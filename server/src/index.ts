@@ -57,7 +57,9 @@ async function main() {
     log("Figma Local Bridge — daemon NOT running.");
     log("  start it with:  npm run daemon");
     log("  expected info file: " + INFO_FILE);
-    log("  tools will report FIGMA_BRIDGE_OFFLINE until it is up.");
+    log("  the descriptor is read ONCE, at startup: tools report");
+    log("  FIGMA_BRIDGE_OFFLINE for this whole session — restart the session");
+    log("  (or the editor that spawned it) once the daemon is up.");
     log("");
     await server.connect(new StdioServerTransport());
     return;
@@ -67,6 +69,14 @@ async function main() {
   if (!info) throw new Error("daemon info file is unreadable: " + INFO_FILE);
 
   const link = new DaemonLink(info, undefined, INFO_FILE);
+
+  // Subscribe BEFORE the socket opens. The daemon sends its current state —
+  // `link` and `files` — exactly once per connection, when the client
+  // attaches; a FigmaClient built after connect() could miss both frames and
+  // spend the whole session reporting a live plugin as offline. (link-state.e2e
+  // pins the invariant on the link itself; this ordering is what made the gap
+  // reachable from here.)
+  const figma = new FigmaClient(link);
   link.connect();
 
   // Wait for the daemon's authoritative plugin state rather than sleeping a
@@ -82,7 +92,7 @@ async function main() {
     });
   });
 
-  registerTools(server, new FigmaClient(link), caps);
+  registerTools(server, figma, caps);
 
   log("");
   log("Figma Local Bridge — client attached");
