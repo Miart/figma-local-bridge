@@ -333,6 +333,11 @@ export class Dispatcher {
     const queued: OpSnapshot[] = [];
     const recent: OpSnapshot[] = [];
     for (const info of this.ops.values()) {
+      // The report call itself is the question, not the work: listing it as
+      // `running` would make "is anything running?" answer yes every single time
+      // — a live run caught exactly that. A finished `ops` stays in `recent`,
+      // where it is history like every other method.
+      if (info.state === "running" && info.method === "ops") continue;
       const snap = this.snapshot(info, now);
       if (info.state === "running") running.push(snap);
       else if (info.state === "queued") queued.push(snap);
@@ -348,7 +353,8 @@ export class Dispatcher {
       note:
         "Only calls that carried an opId appear here — the MCP server sends one per logical call, so a fire-and-forget message never shows up. " +
         "`queued` means the call has not started and figma_cancel can still stop it. " +
-        "A `running` call cannot be interrupted from inside the plugin: Figma runs the code to the end, and the answer is recorded when it does.",
+        "A `running` call cannot be interrupted from inside the plugin: Figma runs the code to the end, and the answer is recorded when it does. " +
+        "The report call itself is not listed as running — it is the question, not work; it shows up in `recent` once it has finished.",
     };
   }
 

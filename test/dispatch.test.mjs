@@ -479,6 +479,38 @@ test("cancel says exactly which refusal it is: unknown, or already finished at a
   await Promise.all([a, b]);
 });
 
+test("report does not count the report itself as work", async () => {
+  // A live run caught this: `figma_ops` listed its own call as running, so
+  // "is anything running?" answered yes every single time — and an agent that
+  // cancels or waits based on that would never see an idle plugin.
+  const hold = gate();
+  let seen = null;
+  const d = new Dispatcher({
+    run: async (method) => {
+      if (method === "use_figma") await hold.promise;
+      if (method === "ops") seen = d.report();
+      return {};
+    },
+    mutating: new Set(["use_figma"]),
+    bump: counter(),
+    peek: () => 3,
+  });
+
+  const a = d.handle({ id: "a", method: "use_figma", opId: "op-a" });
+  await tick();
+  await d.handle({ id: "ask", method: "ops", opId: "op-ask" });
+
+  assert.deepEqual(seen.running.map((o) => o.opId), ["op-a"], "the write is running; the question is not");
+  assert.deepEqual(seen.queued, []);
+  assert.equal(seen.recent.length, 0, "and the report is not in the tail either — it has not finished yet");
+  hold.open();
+  await a;
+
+  // Once finished it is history like any other method.
+  const after = d.report();
+  assert.ok(after.recent.some((o) => o.method === "ops"));
+});
+
 test("report shows the queue and the tail of what finished, and stays bounded", async () => {
   const rev = revCounter();
   const d = new Dispatcher({
