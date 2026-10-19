@@ -353,7 +353,8 @@ export function registerExportTools(server: McpServer, client: FigmaClient) {
       "paints and effects, tokens.json and tokens.css (colours, fonts, text classes, spacing), a README that states what the bundle does NOT carry, " +
       "and handoff.json with hashes and counts. One call writes one folder and every file is re-read from disk. Read-only for the document — it works " +
       "with write access off. Refuses above 2,500 nodes, 24 MP per preview or 8 MiB per PNG instead of truncating; font availability is checked within a time budget, " +
-      "and a font the check could not confirm is reported as unchecked, not assumed present. This is a specification, not generated production HTML.",
+      "and a font the check could not confirm is reported as unchecked, not assumed present. The reply separates the phases by time — walkMs reading the tree, " +
+      "checkMs pinging fonts, exportMs rasterising — so a call that took minutes names the phase that took them. This is a specification, not generated production HTML.",
     {
       nodeId: figmaNodeId().optional().describe("The frame, component or section to hand off; defaults to the single selected node"),
       scale: z.number().min(1).max(4).default(2).describe("Scale of the second preview (preview@Nx.png); 1 means only preview.png"),
@@ -541,6 +542,7 @@ export function registerExportTools(server: McpServer, client: FigmaClient) {
           images: images.map(({ path, ...rest }) => rest),
           counts: r.counts ?? null,
           fonts: { missing: r.missingFonts ?? [], unchecked: r.uncheckedFonts ?? [] },
+          timings: r.timings ?? null,
           rev: r.rev ?? null,
           nodeId: r.nodeId,
           name: r.name,

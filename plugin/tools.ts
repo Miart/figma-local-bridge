@@ -1255,7 +1255,14 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
     const scale = Math.min(Math.max(Number(p.scale) || 2, 1), 4);
     const refusal = handoffPreviewRefusal(node.width, node.height, scale);
     if (refusal) throw new Error(refusal);
+
+    // The reply says where the minutes went. The walk reads the tree, the check
+    // pings fonts (time-boxed below), the export rasterises — and the export is
+    // the phase a cold font service can own for minutes even after the check
+    // has given up on the same styles.
+    const walkStart = Date.now();
     const facts = await handoffFacts(node, MAX_HANDOFF_NODES);
+    const walkMs = Date.now() - walkStart;
     const fonts = handoffFonts(facts);
 
     // Availability is a fact about the person opening the bundle, not about the
@@ -1266,8 +1273,9 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
     const checkCap = 64;
     const missingFonts: string[] = [];
     const uncheckedFonts: string[] = [];
+    const checkStart = Date.now();
     const candidates = fonts.slice(0, checkCap);
-    const deadline = Date.now() + FONT_CHECK_BUDGET_MS;
+    const deadline = checkStart + FONT_CHECK_BUDGET_MS;
     let answered = 0;
     for (const f of candidates) {
       const label = `${f.family} ${f.style}`;
@@ -1287,6 +1295,7 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
       else if (raced === "unchecked") uncheckedFonts.push(label);
       else answered++;
     }
+    const checkMs = Date.now() - checkStart;
 
     const previewAt = async (s: number): Promise<Json> => {
       const bytes: Uint8Array = await node.exportAsync({
@@ -1310,8 +1319,10 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
       };
     };
 
+    const exportStart = Date.now();
     const previews = [await previewAt(1)];
     if (scale !== 1) previews.push(await previewAt(scale));
+    const exportMs = Date.now() - exportStart;
 
     const rev = currentRev();
     const bundle = webHandoff({
@@ -1345,6 +1356,7 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
       previews,
       missingFonts,
       uncheckedFonts,
+      timings: { walkMs, checkMs, exportMs },
     };
   },
 

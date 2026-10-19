@@ -208,6 +208,7 @@ try {
           counts: { nodes: 2, colors: 1, fonts: 1, textStyles: 1, spacing: 0 },
           missingFonts: other ? [] : ["Inter Display Bold"],
           uncheckedFonts: other ? [] : ["Stolzl Medium"],
+          timings: { walkMs: 12, checkMs: 3, exportMs: 41 },
           warnings: other ? [] : [warning],
           previews: lying
             ? [{ scale: 1, width: 200, height: 100, basis: "boundingBox", base64: png(100, 50) }]
@@ -381,6 +382,12 @@ try {
       hManifest.fonts.unchecked.includes("Stolzl Medium") &&
       handoff.fonts.missing.includes("Inter Display Bold"),
     JSON.stringify({ reply: handoff.fonts, manifest: hManifest.fonts }),
+  );
+  check(
+    "the reply keeps the plugin's per-phase timings, and the manifest invents none",
+    JSON.stringify(handoff.timings) === JSON.stringify({ walkMs: 12, checkMs: 3, exportMs: 41 }) &&
+      hManifest.timings === undefined,
+    JSON.stringify({ reply: handoff.timings, manifest: hManifest.timings }),
   );
 
   // A bundle belongs to one node; the same folder for another node would mix
