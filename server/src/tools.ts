@@ -8,6 +8,7 @@ import { registerParityTools } from "./parity-tools.js";
 import { registerCompareTool } from "./compare-tools.js";
 import { registerCheckpointTools } from "./checkpoint-tools.js";
 import { registerOpsTools } from "./ops-tools.js";
+import { registerExportTools } from "./export-tools.js";
 
 export interface Capabilities {
   read: boolean;
@@ -93,6 +94,9 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   // "What is still running, and can I stop it?" — the read half is read-only,
   // and the cancel half only ever prevents a write, so both belong here too.
   registerOpsTools(server, client);
+  // Exports are reads of the document and writes of artefacts: usable with write
+  // access off, which is exactly when a handoff or a game build wants them.
+  registerExportTools(server, client);
 
   if (!caps.write) {
     server.tool(

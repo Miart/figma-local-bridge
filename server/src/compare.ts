@@ -43,6 +43,18 @@ const CLUSTER_MAX = 12;
 
 // ------------------------------------------------------------------ decoding
 
+/**
+ * Pixel size from a PNG's IHDR — the header only, no decode. Used where a file
+ * that was just written has to be checked against a manifest: a full decode of a
+ * 4096×4096 sheet would allocate 64 MB to answer a question about 8 bytes.
+ */
+export function pngSize(buf: Buffer): { width: number; height: number } | null {
+  if (buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47 || buf.toString("latin1", 12, 16) !== "IHDR") return null;
+  const width = buf.readUInt32BE(16);
+  const height = buf.readUInt32BE(20);
+  return width && height ? { width, height } : null;
+}
+
 export function decodePng(buf: Buffer): Bitmap {
   if (buf.length < 16 || buf.readUInt32BE(0) !== 0x89504e47 || buf.readUInt32BE(4) !== 0x0d0a1a0a) {
     throw new Error("not a PNG file (bad signature)");
