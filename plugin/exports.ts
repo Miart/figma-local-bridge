@@ -745,6 +745,64 @@ const FONT_WEIGHTS: Record<string, number> = {
 };
 
 /** CSS weight for a Figma style name ("Semi Bold Italic" → 600), or null. */
+/**
+ * A preview above this many pixels is refused before the export. The byte cap
+ * refuses after the fact; this refuses before it, because Figma's rasteriser is
+ * fast for a UI frame and slow for a poster: the live runs spent ~4 minutes on
+ * a 25.6 MP pair, close to the bridge's own timeout. The cap is on the pixels
+ * the export is asked for, the same round(w x scale) x round(h x scale) the
+ * preview check uses.
+ */
+export const HANDOFF_MAX_PIXELS = 24_000_000;
+
+/** Pixels the rasteriser will be asked for at this scale. */
+export function handoffPreviewPixels(width: number, height: number, scale: number): number {
+  return Math.round(width * scale) * Math.round(height * scale);
+}
+
+/** The largest integer scale in 1..scale whose raster fits `max`, or null when even 1x does not. */
+export function handoffFittingScale(
+  width: number,
+  height: number,
+  scale: number,
+  max: number = HANDOFF_MAX_PIXELS,
+): number | null {
+  for (let s = Math.floor(scale); s >= 1; s--) {
+    if (handoffPreviewPixels(width, height, s) <= max) return s;
+  }
+  return null;
+}
+
+/**
+ * A refusal message when the requested scale cannot be rendered within the
+ * pixel cap — or null when it can. The message names the raster that would be
+ * asked for and the largest scale that fits, so the caller changes one argument
+ * instead of guessing.
+ */
+export function handoffPreviewRefusal(
+  width: number,
+  height: number,
+  scale: number,
+  max: number = HANDOFF_MAX_PIXELS,
+): string | null {
+  const px = (s: number) => handoffPreviewPixels(width, height, s);
+  const mp = (n: number) => `${(n / 1e6).toFixed(1)} MP`;
+  if (px(1) > max) {
+    return (
+      `the 1x preview would be ${Math.round(width)}x${Math.round(height)} = ${mp(px(1))}, over the ${mp(max)} cap — ` +
+      `pick a smaller frame`
+    );
+  }
+  if (px(scale) > max) {
+    const fit = handoffFittingScale(width, height, scale, max) as number;
+    return (
+      `the ${scale}x preview would be ${Math.round(width * scale)}x${Math.round(height * scale)} = ${mp(px(scale))}, ` +
+      `over the ${mp(max)} cap — pass scale: ${fit} (${mp(px(fit))}) or pick a smaller frame`
+    );
+  }
+  return null;
+}
+
 export function handoffFontWeight(style: string): number | null {
   const key = String(style || "")
     .toLowerCase()

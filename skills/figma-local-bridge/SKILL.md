@@ -161,9 +161,11 @@ bound to several styles, a gradient, an
 image fill or a mixed text layer is never averaged into an invented value: it
 is named as missing, or carried as stops/segments. `handoff.json` keeps the
 hashes and counts, every file is re-read from disk, and one call owns one
-folder — it refuses to reuse it for another node. Above 2,500 nodes or 8 MiB per
-preview it refuses rather than truncating; lower the scale or pick a smaller
-frame. A font that the document uses but the machine cannot load is listed in
+folder — it refuses to reuse it for another node. Above 2,500 nodes, 24 MP per
+preview or 8 MiB per PNG it refuses rather than truncating; lower the scale or
+pick a smaller frame. The 24 MP preflight runs before the rasteriser: a preview
+that would take minutes is named, with the largest scale that fits
+(`pass scale: 1 (6.4 MP)`), instead of burning the bridge's timeout. A font that the document uses but the machine cannot load is listed in
 the README; it is not assumed present. That check is time-boxed (2 s per
 style, 12 s in total), because loading a font this machine does not have is a
 network round trip that can take minutes: a style that does not answer in time

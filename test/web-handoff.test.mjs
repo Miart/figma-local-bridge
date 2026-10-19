@@ -9,7 +9,13 @@
 // named as missing in the README — the tests pin that down.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { handoffFontWeight, handoffSlug, webHandoff } from "../plugin/exports.mjs";
+import {
+  handoffFittingScale,
+  handoffFontWeight,
+  handoffPreviewRefusal,
+  handoffSlug,
+  webHandoff,
+} from "../plugin/exports.mjs";
 
 // ---------------------------------------------------------------- fixtures
 
@@ -154,6 +160,22 @@ test("handoff: two style names that slug to the same token are disambiguated, no
   assert.equal(out.tokens.colors["primary-500"].value, "#010203");
   assert.equal(out.tokens.colors["color-2"].value, "#040506");
   assert.match(out.warnings.join(" "), /collided/);
+});
+
+test("handoff: a preview above the pixel cap is refused before the export, with the largest scale that fits", () => {
+  // 2192x2922 at 2x is 4384x5844 = 25.6 MP, over the 24 MP cap; 1x is 6.4 MP.
+  assert.match(
+    handoffPreviewRefusal(2192, 2922, 2),
+    /the 2x preview would be 4384x5844 = 25\.6 MP, over the 24\.0 MP cap — pass scale: 1 \(6\.4 MP\)/,
+  );
+  // 1920x1080 at 2x (8.3 MP) fits; at 4x (33.2 MP) it does not, but 3x (18.7 MP) does.
+  assert.equal(handoffPreviewRefusal(1920, 1080, 2), null);
+  assert.match(handoffPreviewRefusal(1920, 1080, 4), /pass scale: 3 \(18\.7 MP\)/);
+  // A frame over the cap even at 1x has only one honest answer.
+  assert.match(handoffPreviewRefusal(6000, 5000, 1), /the 1x preview would be 6000x5000 = 30\.0 MP.*pick a smaller frame/);
+  assert.equal(handoffFittingScale(2192, 2922, 2), 1);
+  assert.equal(handoffFittingScale(1920, 1080, 4), 3);
+  assert.equal(handoffFittingScale(6000, 5000, 4), null);
 });
 
 // ---------------------------------------------------------------- text + fonts

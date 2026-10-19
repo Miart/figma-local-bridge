@@ -22,7 +22,7 @@ import { snapshot, STRICT } from "./fingerprint";
 import { DUMP_SCHEMA, LIMITATIONS, dumpSubtree, restoreSubtree } from "./checkpoint";
 import { sessionKey } from "./session-key";
 import { makeHelpers } from "./helpers";
-import { atlasManifest, nineSliceDescriptor, pngSize, stateList, webHandoff } from "./exports";
+import { atlasManifest, handoffPreviewRefusal, nineSliceDescriptor, pngSize, stateList, webHandoff } from "./exports";
 
 const NS = "figma-local-bridge";
 const MAX_NODES = 1500;
@@ -1253,6 +1253,8 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
     // A preview below 1x would be smaller than the design and useless in a
     // handoff; 4x is Figma's own export ceiling.
     const scale = Math.min(Math.max(Number(p.scale) || 2, 1), 4);
+    const refusal = handoffPreviewRefusal(node.width, node.height, scale);
+    if (refusal) throw new Error(refusal);
     const facts = await handoffFacts(node, MAX_HANDOFF_NODES);
     const fonts = handoffFonts(facts);
 
