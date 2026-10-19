@@ -22,7 +22,7 @@ import { snapshot, STRICT } from "./fingerprint";
 import { DUMP_SCHEMA, LIMITATIONS, dumpSubtree, restoreSubtree } from "./checkpoint";
 import { sessionKey } from "./session-key";
 import { makeHelpers } from "./helpers";
-import { atlasManifest, nineSliceDescriptor, pngSize, stateList } from "./exports";
+import { atlasManifest, nineSliceDescriptor, pngSize, stateList, webHandoff } from "./exports";
 
 const NS = "figma-local-bridge";
 const MAX_NODES = 1500;
@@ -490,6 +490,273 @@ function plain(v: any, depth = 0, verbose = false): any {
   return out;
 }
 
+// ---------------------------------------------------------------- web handoff facts
+
+/** Refused above this many nodes rather than silently truncated. */
+const MAX_HANDOFF_NODES = 2500;
+/** Two PNGs travel in one reply; this keeps the message and the files sane. */
+const MAX_HANDOFF_PREVIEW = 8 * 1024 * 1024;
+
+function handoffFont(f: any): Json | null {
+  return f && typeof f.family === "string" && typeof f.style === "string" ? { family: f.family, style: f.style } : null;
+}
+
+function handoffLineHeight(v: any): Json | null {
+  if (!v || isMixed(v) || (v.unit !== "PIXELS" && v.unit !== "PERCENT")) return null;
+  return typeof v.value === "number" ? { unit: v.unit, value: round(v.value) } : null;
+}
+
+function handoffLetterSpacing(v: any): Json | null {
+  if (!v || isMixed(v) || (v.unit !== "PIXELS" && v.unit !== "PERCENT")) return null;
+  return typeof v.value === "number" ? { unit: v.unit, value: round(v.value) } : null;
+}
+
+/** The first visible solid paint, with the paint opacity folded into alpha. */
+function handoffSolidColor(list: any): Json | null {
+  if (!Array.isArray(list)) return null;
+  const p = list.find((x: any) => x.visible !== false && x.type === "SOLID");
+  if (!p || !p.color) return null;
+  return { r: p.color.r, g: p.color.g, b: p.color.b, a: (p.color.a ?? 1) * (p.opacity ?? 1) };
+}
+
+/** Paints as facts, not CSS: a gradient keeps its stops, an image its hash. */
+function handoffPaints(list: any): Json {
+  if (isMixed(list)) return "mixed";
+  if (!Array.isArray(list) || !list.length) return undefined;
+  return list
+    .filter((p: any) => p.visible !== false)
+    .map((p: any) => {
+      if (p.type === "SOLID") {
+        return {
+          type: "SOLID",
+          color: { r: p.color.r, g: p.color.g, b: p.color.b, a: (p.color.a ?? 1) * (p.opacity ?? 1) },
+        };
+      }
+      if (p.type.startsWith("GRADIENT")) {
+        return {
+          type: p.type,
+          stops: p.gradientStops.map((s: any) => ({
+            at: round(s.position),
+            color: { r: s.color.r, g: s.color.g, b: s.color.b, a: s.color.a ?? 1 },
+          })),
+          opacity: p.opacity ?? 1,
+        };
+      }
+      if (p.type === "IMAGE") {
+        return {
+          type: "IMAGE",
+          ...(p.imageHash ? { imageHash: p.imageHash } : {}),
+          ...(p.scaleMode ? { scaleMode: p.scaleMode } : {}),
+        };
+      }
+      return { type: p.type };
+    });
+}
+
+/**
+ * Text facts for the handoff.
+ *
+ * A layer can have a different font, size or colour per range. Averaging those
+ * into one "style" would be a plausible lie, so a mixed layer is marked mixed
+ * and carries `getStyledTextSegments` output instead. When even that is not
+ * available, the characters survive and the warning says the rest did not.
+ */
+function handoffText(node: any): Json {
+  const font = handoffFont(node.fontName);
+  const size = typeof node.fontSize === "number" ? round(node.fontSize) : null;
+  const lineHeight = handoffLineHeight(node.lineHeight);
+  const letterSpacing = handoffLetterSpacing(node.letterSpacing);
+  const color = handoffSolidColor(node.fills);
+  const mixed =
+    isMixed(node.fontName) ||
+    isMixed(node.fontSize) ||
+    isMixed(node.lineHeight) ||
+    isMixed(node.letterSpacing) ||
+    isMixed(node.textCase) ||
+    isMixed(node.textDecoration) ||
+    isMixed(node.fills);
+
+  let segments: Json[] | null = null;
+  if (mixed) {
+    try {
+      if (typeof node.getStyledTextSegments === "function") {
+        segments = node
+          .getStyledTextSegments([
+            "fontName",
+            "fontSize",
+            "lineHeight",
+            "letterSpacing",
+            "fills",
+            "textCase",
+            "textDecoration",
+          ])
+          .map((s: any) => {
+            const segFont = handoffFont(s.fontName);
+            const segLine = handoffLineHeight(s.lineHeight);
+            const segSpacing = handoffLetterSpacing(s.letterSpacing);
+            const segColor = handoffSolidColor(s.fills);
+            return {
+              characters: s.characters,
+              ...(segFont ? { font: segFont } : {}),
+              ...(typeof s.fontSize === "number" ? { fontSize: round(s.fontSize) } : {}),
+              ...(segLine ? { lineHeight: segLine } : {}),
+              ...(segSpacing ? { letterSpacing: segSpacing } : {}),
+              ...(segColor ? { color: segColor } : {}),
+              ...(typeof s.textCase === "string" && s.textCase !== "ORIGINAL" ? { textCase: s.textCase } : {}),
+              ...(typeof s.textDecoration === "string" && s.textDecoration !== "NONE"
+                ? { textDecoration: s.textDecoration }
+                : {}),
+            };
+          });
+      }
+    } catch {
+      segments = null;
+    }
+  }
+
+  return {
+    characters: typeof node.characters === "string" ? node.characters : "",
+    ...(font ? { font } : {}),
+    ...(size !== null ? { fontSize: size } : {}),
+    ...(lineHeight ? { lineHeight } : {}),
+    ...(letterSpacing ? { letterSpacing } : {}),
+    ...(node.textAlignHorizontal ? { align: node.textAlignHorizontal } : {}),
+    ...(typeof node.textCase === "string" && node.textCase !== "ORIGINAL" ? { textCase: node.textCase } : {}),
+    ...(typeof node.textDecoration === "string" && node.textDecoration !== "NONE"
+      ? { textDecoration: node.textDecoration }
+      : {}),
+    ...(color ? { color } : {}),
+    ...(mixed ? { mixed: true } : {}),
+    ...(segments ? { segments } : {}),
+  };
+}
+
+function handoffRadius(node: any): Json | null {
+  const r = node.cornerRadius;
+  if (!isMixed(r) && typeof r === "number") return r > 0 ? round(r) : null;
+  if (typeof node.topLeftRadius === "number") {
+    const values = [node.topLeftRadius, node.topRightRadius, node.bottomRightRadius, node.bottomLeftRadius].map(round);
+    return values.some((v: number) => v > 0) ? values : null;
+  }
+  return null;
+}
+
+/**
+ * Walks the rendered tree once, pre-order, and turns every node into a plain
+ * fact. Positions are relative to the frame's bounding box — the same origin
+ * the exported PNG uses — so a consumer never has to know where the frame sits
+ * on the page. Refuses above `max` nodes instead of truncating: a handoff that
+ * quietly loses half a screen is worse than one that asks for a smaller frame.
+ */
+async function handoffFacts(root: any, max: number): Promise<Json[]> {
+  const origin = root.absoluteBoundingBox;
+  if (!origin) throw new Error(`"${root.name}" has no bounds to hand off`);
+
+  const out: Json[] = [];
+  const styleCache = new Map<string, string | null>();
+  const resolveStyle = async (id: any): Promise<string | null> => {
+    if (!id || isMixed(id)) return null;
+    if (styleCache.has(id)) return styleCache.get(id)!;
+    let name: string | null = null;
+    try {
+      const style = await figma.getStyleByIdAsync(id);
+      name = style ? style.name : null;
+    } catch {
+      name = null;
+    }
+    styleCache.set(id, name);
+    return name;
+  };
+
+  const rel = (b: any): Json | null =>
+    b ? { x: round(b.x - origin.x), y: round(b.y - origin.y), width: round(b.width), height: round(b.height) } : null;
+
+  async function visit(node: any, parentId: string | null, depth: number): Promise<void> {
+    if (out.length >= max) {
+      throw new Error(`the handoff would exceed ${max} nodes — pick a smaller frame or a section of it`);
+    }
+
+    const render = node.absoluteRenderBounds ? rel(node.absoluteRenderBounds) : null;
+    const radius = handoffRadius(node);
+    const fills = handoffPaints(node.fills);
+    const strokes = handoffPaints(node.strokes);
+    const effectsFact = effects(node.effects);
+    const layout =
+      node.layoutMode && node.layoutMode !== "NONE"
+        ? {
+            mode: node.layoutMode,
+            ...(typeof node.itemSpacing === "number" ? { itemSpacing: round(node.itemSpacing) } : {}),
+            padding: {
+              top: round(node.paddingTop ?? 0),
+              right: round(node.paddingRight ?? 0),
+              bottom: round(node.paddingBottom ?? 0),
+              left: round(node.paddingLeft ?? 0),
+            },
+          }
+        : null;
+
+    const fillStyle = await resolveStyle(node.fillStyleId);
+    const strokeStyle = await resolveStyle(node.strokeStyleId);
+    const effectStyle = await resolveStyle(node.effectStyleId);
+    const textStyle = await resolveStyle(node.textStyleId);
+
+    const fact: Json = {
+      id: node.id,
+      parentId,
+      depth,
+      name: node.name,
+      type: node.type,
+      visible: node.visible !== false,
+      box: rel(node.absoluteBoundingBox),
+      ...(render ? { render } : {}),
+      ...(typeof node.rotation === "number" ? { rotation: round(node.rotation) } : {}),
+      ...(typeof node.opacity === "number" ? { opacity: round(node.opacity) } : {}),
+      ...(typeof node.blendMode === "string" ? { blend: node.blendMode } : {}),
+      ...(radius !== null ? { radius } : {}),
+      ...(fills !== undefined ? { fills } : {}),
+      ...(fillStyle ? { fillStyle } : {}),
+      ...(strokes !== undefined ? { strokes } : {}),
+      ...(strokeStyle ? { strokeStyle } : {}),
+      ...(node.strokeWeight !== undefined ? { strokeWeight: strokeWeight(node) } : {}),
+      ...(node.strokeAlign ? { strokeAlign: node.strokeAlign } : {}),
+      ...(effectsFact !== undefined ? { effects: effectsFact } : {}),
+      ...(effectStyle ? { effectStyle } : {}),
+      ...(node.isMask === true ? { isMask: true } : {}),
+      ...(node.clipsContent === true ? { clips: true } : {}),
+      ...(node.constraints
+        ? { constraints: { horizontal: node.constraints.horizontal, vertical: node.constraints.vertical } }
+        : {}),
+      ...(layout ? { layout } : {}),
+      ...(node.type === "TEXT" ? { text: handoffText(node) } : {}),
+      ...(textStyle ? { textStyle } : {}),
+    };
+
+    out.push(fact);
+    if ("children" in node && Array.isArray(node.children)) {
+      for (const child of node.children) await visit(child, node.id, depth + 1);
+    }
+  }
+
+  await visit(root, null, 0);
+  return out;
+}
+
+/** Every distinct font a text fact names, including per-range segments. */
+function handoffFonts(nodes: Json[]): Array<{ family: string; style: string }> {
+  const seen = new Map<string, { family: string; style: string }>();
+  const add = (f: any) => {
+    if (f && typeof f.family === "string" && typeof f.style === "string") {
+      seen.set(f.family + "\u0000" + f.style, { family: f.family, style: f.style });
+    }
+  };
+  for (const n of nodes) {
+    if (!n.text) continue;
+    add(n.text.font);
+    for (const s of n.text.segments ?? []) add(s.font);
+  }
+  return [...seen.values()];
+}
+
 // ---------------------------------------------------------------- tools
 
 /**
@@ -951,6 +1218,104 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
       files,
       warnings: list.warnings,
       rev: currentRev(),
+    };
+  },
+
+  /**
+   * A folder for a developer: previews, a flat spec, tokens, and a README that
+   * says what the bundle is not. Read-only — it exports and reads, never writes.
+   *
+   * The plugin measures and renders; the server writes the files and re-reads
+   * them. One call produces one bundle, so the manifest can describe every file
+   * in it and a half-written handoff is never mistaken for a complete one.
+   */
+  async export_web_handoff(p: Json) {
+    const node: any = await nodeOrSelectionOrPage(p.nodeId);
+    if (node.type === "PAGE" || node.type === "DOCUMENT") {
+      throw new Error(
+        `export_web_handoff needs a frame, component or section, not a ${node.type} — select one or pass nodeId`,
+      );
+    }
+    if (!(node.width > 0) || !(node.height > 0)) {
+      throw new Error(`"${node.name}" has no size to hand off`);
+    }
+    if (!node.absoluteBoundingBox) throw new Error(`"${node.name}" has no bounds to hand off`);
+
+    // A preview below 1x would be smaller than the design and useless in a
+    // handoff; 4x is Figma's own export ceiling.
+    const scale = Math.min(Math.max(Number(p.scale) || 2, 1), 4);
+    const facts = await handoffFacts(node, MAX_HANDOFF_NODES);
+    const fonts = handoffFonts(facts);
+
+    // Availability is a fact about the person opening the bundle, not about the
+    // document: a font can be in the file and absent from the machine. Capped,
+    // because loadFontAsync is a round trip per style.
+    const checkCap = 64;
+    const missingFonts: string[] = [];
+    const checked = fonts.slice(0, checkCap);
+    for (const f of checked) {
+      try {
+        await figma.loadFontAsync({ family: f.family, style: f.style } as FontName);
+      } catch {
+        missingFonts.push(`${f.family} ${f.style}`);
+      }
+    }
+
+    const previewAt = async (s: number): Promise<Json> => {
+      const bytes: Uint8Array = await node.exportAsync({
+        format: "PNG",
+        constraint: { type: "SCALE", value: s },
+      });
+      if (bytes.length > MAX_HANDOFF_PREVIEW) {
+        throw new Error(
+          `the ${s}x preview is ${bytes.length} bytes, over the ${MAX_HANDOFF_PREVIEW} byte cap — lower scale or pick a smaller frame`,
+        );
+      }
+      const size = pngSize(bytes);
+      if (!size) throw new Error(`the ${s}x export is not a readable PNG`);
+      return {
+        scale: s,
+        width: size.width,
+        height: size.height,
+        basis: exportBasis(node, size, s).basis,
+        bytes: bytes.length,
+        base64: figma.base64Encode(bytes),
+      };
+    };
+
+    const previews = [await previewAt(1)];
+    if (scale !== 1) previews.push(await previewAt(scale));
+
+    const rev = currentRev();
+    const bundle = webHandoff({
+      frame: {
+        id: node.id,
+        name: node.name,
+        type: node.type,
+        width: node.width,
+        height: node.height,
+        fileKey: (figma as any).fileKey ?? null,
+      },
+      nodes: facts,
+      scale,
+      previews,
+      missingFonts,
+      fontCheck: { checked: checked.length, skipped: Math.max(0, fonts.length - checkCap) },
+      rev,
+    });
+
+    return {
+      nodeId: node.id,
+      name: node.name,
+      type: node.type,
+      width: round(node.width),
+      height: round(node.height),
+      fileKey: (figma as any).fileKey ?? null,
+      scale,
+      rev,
+      ...bundle,
+      previews,
+      missingFonts,
     };
   },
 
