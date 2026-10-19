@@ -175,7 +175,7 @@ npm test           # rebuilds artifacts, then unit + e2e with --test-concurrency
 
 `npm test` rebuilds `server/dist` and `plugin/*.mjs` first because the tests import the built modules — a test running against a stale artifact passes on code Figma will never execute. The suites run serially (`--test-concurrency=1`): e2e tests spin up real daemons on real ports and share one token file, and parallel runs make them flaky by construction.
 
-Current suites: **168 unit checks** — 55 `node:test` cases plus 113 harness checks (`commands`, `fingerprint`, `scope`, `use-figma.gate`) — and **73 e2e checks** (`daemon`, `link-state`, `mcp`, `multifile`, `tools`).
+Current suites: **172 unit checks** — 59 `node:test` cases plus 113 harness checks (`commands`, `fingerprint`, `scope`, `use-figma.gate`) — and **76 e2e checks** (`daemon` 12, `link-state` 8, `mcp` 16, `multifile` 23, `tools` 17; the per-file summaries add up to 68 because `link-state` prints its checks without one).
 
 ## Troubleshooting
 
