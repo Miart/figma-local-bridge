@@ -39,6 +39,9 @@ async function main() {
   // rules before the first call, and one that ignores them can still fetch
   // figma-local://guide/skill. Deliberately short — it is a doctrine, not the
   // README.
+
+  // The version clients print for this server. Keep it in step with
+  // package.json: the two numbers had already drifted apart once.
   const server = new McpServer(
     { name: "figma-local-bridge", version: "0.2.0" },
     { capabilities: { tools: {} }, instructions: GUIDE },

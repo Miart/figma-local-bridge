@@ -37,7 +37,7 @@ The daemon exists for three concrete reasons:
 | `server/src/` | stdio MCP server, daemon (WebSocket hub), link state, tool implementations |
 | `plugin/` | Figma plugin: `code.ts` bundled to `code.js` by esbuild, UI panel, dispatcher, scope guard |
 | `skills/figma-local-bridge/SKILL.md` | the agent-facing operating guide, served both as MCP `instructions` and as a resource |
-| `scripts/mascot.py` | generates the ASCII octopus in the panel (its art block is emitted, never hand-edited) |
+| `scripts/mascot.py` | the ASCII octopus the panel ships: the art lives on the panel's own 21x10 grid, and its JS block is emitted from here, never hand-edited |
 | `scripts/mcp-smoke.mjs` | `npm run smoke`: build smoke test with no Figma and no daemon |
 | `test/` | unit tests (`node --test`) and e2e tests against a real daemon / WebSocket / MCP client |
 | `spike/` | the first prototype, kept for history |
@@ -197,6 +197,13 @@ Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the
 - Figma caches screenshot exports; `rev` makes stale renders visible, but there is no way to force a redraw from the Plugin API.
 - `figma_use` hands you the full plugin API: it is a notice-and-rollback guard, not a sandbox. Code that runs after the call returns (fire-and-forget promises) escapes the diff; a timeout therefore does **not** roll back and says so.
 - Figma unloads the plugin UI when the app is backgrounded. In-flight calls are cancelled immediately (instead of hanging until their timeout), and the bridge reconnects on its own when you return.
+
+## Versions
+
+| Version | What it carries |
+|---|---|
+| `0.2.0` | Several Figma files at once (16 slots, an explicit `fileKey` on every tool), `figma_get_layout_tree`, `opId` idempotency with a replay cache, serialised mutations, per-side stroke weights and pinned variable modes, the operating guide as MCP `instructions` and as a resource, `npm run smoke`, and the panel that fits its own content — with the octopus redrawn on the panel's grid, at half the font size, answering a tap |
+| `0.1.0` | The first cut: one daemon, one token, one Figma file, the tool surface, and the safety model |
 
 ## License
 
