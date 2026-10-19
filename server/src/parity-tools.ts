@@ -232,7 +232,7 @@ export function registerParityTools(server: McpServer, client: FigmaClient, caps
       "`flb.find({within, name, match, type})` / `flb.one(...)` search descendants and refuse to answer with a truncated list or an ambiguous pick; " +
       "`flb.bbox(node, {render:true})` gives ABSOLUTE bounds (render bounds include shadows/strokes — the ones packing needs); " +
       "`flb.clear(node)` removes children and returns what went; " +
-      "`flb.flatten(node)` detaches every instance in a subtree (outermost first) and throws rather than leave it half flat; " +
+      "`flb.flatten(node)` detaches every instance in a subtree (outermost first) and throws rather than leave it half flat — the node passed in is invalidated by the detach, so use the returned `root`; " +
       "`flb.grid(nodes, {parent, cell, columns, gap, origin, fit})` lays nodes out in uniform atlas cells at ABSOLUTE coordinates, optionally scaling them down to fit; " +
       "`await flb.text(content, {parent, x, y, size, font, fills})` loads the font before writing characters. " +
       "The write helpers refuse a target outside scopeNodeId, or on a page other than the current one (the scope guard only indexes one page), BEFORE writing anything.",

@@ -82,7 +82,10 @@ named (`plugin/helpers.ts`), so a snippet does not rediscover them by failing:
 - `flb.flatten(node)` detaches every instance in the subtree, outermost first
   (Figma's own `detachInstance`, so overrides survive) — the flat-sprite step.
   It throws if anything could not be detached instead of reporting a half-flat
-  tree.
+  tree. **The node you passed in is dead afterwards**: Figma invalidates a
+  detached instance, so even reading its `name` throws `The node with id … does
+  not exist`. Carry on with the returned `root` (or `detached[i].frame`) — a
+  snippet that kept the old node to report on later dies on the way out.
 - `flb.grid(nodes, {parent, cell, columns, gap, origin, fit})` arranges nodes in
   uniform cells — the atlas layout. `origin` and the returned cell boxes are
   ABSOLUTE document coordinates; `cell` defaults to the largest render bounds;

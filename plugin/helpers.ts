@@ -299,12 +299,16 @@ export function makeHelpers(api: HelperApi, options: HelperOptions = {}) {
     const detached: Array<{ id: string; name: string; frame: string }> = [];
     const failed: Array<{ id: string; name: string; why: string }> = [];
     const detach = (inst: any): any => {
+      // Read the instance's own facts FIRST: detachInstance() invalidates the
+      // node, and even `inst.name` afterwards throws "The node with id … does
+      // not exist" — the live run is where that was learned.
+      const was = { id: inst.id, name: inst.name };
       try {
         const frame = inst.detachInstance();
-        detached.push({ id: inst.id, name: inst.name, frame: frame?.id ?? "?" });
+        detached.push({ ...was, frame: frame?.id ?? "?" });
         return frame;
       } catch (e) {
-        failed.push({ id: inst.id, name: inst.name, why: msg(e) });
+        failed.push({ ...was, why: msg(e) });
         return null;
       }
     };
@@ -333,7 +337,18 @@ export function makeHelpers(api: HelperApi, options: HelperOptions = {}) {
           `Nothing is reported as flattened while any instance is left — handle those explicitly (or detach the outer one by hand) and run again.`,
       );
     }
-    return { root, detached };
+    const out: { root: any; detached: Array<{ id: string; name: string; frame: string }>; note?: string } = {
+      root,
+      detached,
+    };
+    // The instance node the caller passed is dead the moment it is detached —
+    // reading even its `.name` afterwards throws "The node with id … does not
+    // exist". The live run showed a snippet holding `only.name` for later and
+    // dying on the way out, so the returned value says it out loud.
+    if (detached.length) {
+      out.note = `the node(s) passed in no longer exist: use the returned root (or detached[i].frame) from here on`;
+    }
+    return out;
   };
 
   /**
@@ -569,8 +584,11 @@ export function makeHelpers(api: HelperApi, options: HelperOptions = {}) {
   }
 
   /**
-   * A hex string becomes a SolidPaint through `figma.util.solidPaint` (which
-   * also takes "#RRGGBBAA"); an array is passed through. Hand-rolling
+   * A hex string becomes a ONE-ELEMENT fill array through
+   * `figma.util.solidPaint` (which also takes "#RRGGBBAA"); an array is passed
+   * through. `solidPaint(hex)` returns a single SolidPaint, and assigning that
+   * to `node.fills` fails validation in the real API ("Expected array, received
+   * object") — the reason this wrapper returns an array. Hand-rolling
    * `{ r, g, b }` is where the 0–255 / 0–1 scale mistake lives.
    */
   function paintOf(fills: string | readonly any[]): any {
@@ -578,7 +596,7 @@ export function makeHelpers(api: HelperApi, options: HelperOptions = {}) {
     if (!api.util || typeof api.util.solidPaint !== "function") {
       throw new Error("flb.text: figma.util.solidPaint is missing, so a hex string cannot be converted — pass a paint array.");
     }
-    return api.util.solidPaint(fills);
+    return [api.util.solidPaint(fills)];
   }
 
   return { byId, find, one, bbox, clear, flatten, grid, text };

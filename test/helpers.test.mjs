@@ -49,7 +49,7 @@ function buildNode(api, type, name, opts = {}) {
     _detachFails: opts.detachFails ?? null,
     _font: null,
     _characters: "",
-    fills: [],
+    _fills: [],
   };
 
   Object.defineProperty(node, "absoluteTransform", {
@@ -97,6 +97,15 @@ function buildNode(api, type, name, opts = {}) {
     get: () => node._font,
     set: (f) => { node._font = { family: f.family, style: f.style }; },
   });
+  Object.defineProperty(node, "fills", {
+    get: () => node._fills,
+    set: (v) => {
+      // Figma's own validation, and the trap it catches: solidPaint(hex) returns
+      // ONE paint, and assigning it straight to fills fails exactly like this.
+      if (!Array.isArray(v)) throw new Error('in set_fills: Property "fills" failed validation: Expected array, received object');
+      node._fills = v;
+    },
+  });
 
   if (CONTAINERS.has(type)) node.children = [];
   node.appendChild = (child) => {
@@ -123,6 +132,18 @@ function buildNode(api, type, name, opts = {}) {
       const at = node.parent.children.indexOf(node);
       node.parent.children[at] = frame;
       frame.parent = node.parent;
+    }
+    // Figma invalidates the instance the moment it is detached: reading ANY of
+    // its properties — even `name` — throws. A stub that kept it alive hid
+    // exactly the bug the live run found, so it dies here too.
+    const dead = node.id;
+    for (const prop of ["id", "name", "type", "children", "x", "y", "width", "height"]) {
+      Object.defineProperty(node, prop, {
+        configurable: true,
+        get() {
+          throw new Error(`in get_${prop}: The node with id "${dead}" does not exist`);
+        },
+      });
     }
     return frame;
   };
@@ -348,7 +369,9 @@ test("flatten: detaches the root and every nested instance, outermost first", ()
   assert.equal(res.detached.length, 2, "the caller's instance and the one inside it");
   assert.equal(res.root.type, "FRAME", "the root came back as the frame it became");
   assert.equal(frame.children[0], res.root, "and it sits where the instance was");
-  assert.deepEqual(res.detached.map((d) => d.name), ["Symbol", "Nested"]);
+  assert.deepEqual(res.detached.map((d) => d.name), ["Symbol", "Nested"], "names were read before the instances died");
+  assert.throws(() => outer.name, /does not exist/, "the stub kills a detached instance, as Figma does");
+  assert.match(res.note, /no longer exist[\s\S]*returned root/, "and the return value says so, because a snippet that kept the old node dies on the way out");
   assert.equal(plain.parent.id, res.detached[1].frame, "the leaf ended up inside the inner frame");
 });
 
@@ -357,7 +380,9 @@ test("flatten: a node with no instances is a no-op, and a failure is never repor
   const flb = makeHelpers(api);
   const frame = api.add("FRAME", "Plain");
   api.add("RECTANGLE", "a", { parent: frame });
-  assert.deepEqual(flb.flatten(frame).detached, []);
+  const nothing = flb.flatten(frame);
+  assert.deepEqual(nothing.detached, []);
+  assert.equal(nothing.note, undefined, "no instances, no warning");
 
   const stubborn = api.add("INSTANCE", "Locked", { detachFails: "this instance is locked by its main component" });
   assert.throws(() => flb.flatten(stubborn), /1 instance\(s\) could not be detached[\s\S]*locked by its main component[\s\S]*Nothing is reported as flattened/);
@@ -457,9 +482,11 @@ test("text: loads the font BEFORE writing characters, and turns a hex string int
   assert.equal(node.fontSize, 48);
   assert.deepEqual(node.fontName, { family: "Inter", style: "Bold" });
   assert.equal(node.name, "x5");
-  assert.equal(node.fills.type, "SOLID");
-  assert.equal(Math.round(node.fills.color.r * 255), 255);
-  assert.equal(Math.round(node.fills.color.g * 255), 204);
+  assert.ok(Array.isArray(node.fills), "a hex string becomes a fill ARRAY — one paint object fails validation");
+  assert.equal(node.fills.length, 1);
+  assert.equal(node.fills[0].type, "SOLID");
+  assert.equal(Math.round(node.fills[0].color.r * 255), 255);
+  assert.equal(Math.round(node.fills[0].color.g * 255), 204);
 });
 
 test("text: absolute coordinates become local to the parent, and a missing font names itself", async () => {
@@ -471,6 +498,9 @@ test("text: absolute coordinates become local to the parent, and a missing font 
   const node = await flb.text("win", { parent: frame, x: 1200, y: 600 });
   assert.deepEqual([node.x, node.y], [170, 80], "local to the frame, not the page");
   assert.equal(node.parent.id, frame.id);
+
+  const arr = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }];
+  assert.equal((await flb.text("given", { fills: arr })).fills, arr, "a paint array is passed through as given");
 
   await assert.rejects(() => flb.text("hi", { font: "Comic Sans Regular" }), /could not be loaded[\s\S]*listAvailableFontsAsync/);
 
