@@ -6,6 +6,7 @@ import { fileKeyParam } from "./file-key.js";
 import { BridgeOffline } from "./websocket.js";
 import { registerParityTools } from "./parity-tools.js";
 import { registerCompareTool } from "./compare-tools.js";
+import { registerCheckpointTools } from "./checkpoint-tools.js";
 
 export interface Capabilities {
   read: boolean;
@@ -85,6 +86,9 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   // Read-only, and useful precisely when nothing should be written: registered
   // in both modes.
   registerCompareTool(server, client);
+  // Same reasoning: save/show/list/drop and the dry run are read-only. Only a
+  // real rebuild writes, and it checks `caps.destructive` at call time.
+  registerCheckpointTools(server, client, caps);
 
   if (!caps.write) {
     server.tool(

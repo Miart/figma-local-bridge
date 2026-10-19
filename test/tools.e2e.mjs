@@ -83,7 +83,7 @@ try {
   const expected = ["figma_whoami", "figma_get_metadata", "figma_get_design_context", "figma_get_layout_tree", "figma_get_screenshot",
     "figma_get_variable_defs", "figma_get_libraries", "figma_search_design_system", "figma_get_figjam",
     "figma_download_assets", "figma_get_code_connect_map", "figma_use", "figma_upload_assets", "figma_add_code_connect_map",
-    "figma_compare"];
+    "figma_compare", "figma_checkpoint"];
   const missing = expected.filter((n) => !tools.includes(n));
   check("all parity tools are registered", missing.length === 0, "missing: " + missing.join(","));
 
