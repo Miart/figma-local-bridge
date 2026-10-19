@@ -137,6 +137,49 @@ function effects(list: any): Json {
     }));
 }
 
+/**
+ * A stroke weight readback. `MIXED` alone says only that the sides differ — not
+ * which side, nor by how much — and a caller comparing two nodes then has to
+ * answer INCONCLUSIVE about a property the plugin can plainly see. The four
+ * per-side weights are that truth, in [top, right, bottom, left] order, the
+ * same shape cornerRadius already uses.
+ */
+function strokeWeight(node: any): Json {
+  if (!isMixed(node.strokeWeight)) return node.strokeWeight;
+  if (!("strokeTopWeight" in node)) return "mixed";
+  return [node.strokeTopWeight, node.strokeRightWeight, node.strokeBottomWeight, node.strokeLeftWeight];
+}
+
+/**
+ * The variable modes a node PINS.
+ *
+ * A frame that pins a mode renders exactly like one that inherits it, and the
+ * difference decides whether re-wrapping a design in a new frame changes it —
+ * invisible otherwise, because the resolved set mixes pinned and inherited
+ * modes. Emitted only when something is pinned. Ids are resolved to
+ * collection/mode names the way variable names are, because that is what an
+ * agent (and a human reading a diff) can act on; a mode whose library is not
+ * loaded keeps its id.
+ */
+async function explicitModes(node: any): Promise<Json> {
+  const raw = node.explicitVariableModes;
+  if (!raw || typeof raw !== "object") return undefined;
+  const out: Json = {};
+  for (const [collectionId, modeId] of Object.entries(raw as Record<string, string>)) {
+    let key = collectionId;
+    let value = String(modeId);
+    try {
+      const col = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+      if (col) {
+        key = col.name;
+        value = col.modes.find((m) => m.modeId === modeId)?.name ?? value;
+      }
+    } catch { /* unknown collection: the ids still tell the two modes apart */ }
+    out[key] = value;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 async function boundNames(node: any): Promise<Json> {
   const bv = node.boundVariables;
   if (!bv) return undefined;
@@ -183,7 +226,7 @@ async function fullNode(node: any, depth: number, budget: { n: number; truncated
   if ("fills" in node) { const f = paints(node.fills); if (f) out.fills = f; }
   if ("strokes" in node) {
     const s = paints(node.strokes);
-    if (s) out.stroke = { paints: s, weight: isMixed(node.strokeWeight) ? "mixed" : node.strokeWeight, align: node.strokeAlign };
+    if (s) out.stroke = { paints: s, weight: strokeWeight(node), align: node.strokeAlign };
   }
   if ("cornerRadius" in node) {
     if (isMixed(node.cornerRadius)) out.cornerRadius = [node.topLeftRadius, node.topRightRadius, node.bottomRightRadius, node.bottomLeftRadius];
@@ -199,6 +242,8 @@ async function fullNode(node: any, depth: number, budget: { n: number; truncated
   if (Object.keys(styles).length) out.styles = styles;
   const vars = await boundNames(node);
   if (vars) out.variables = vars;
+  const modes = await explicitModes(node);
+  if (modes) out.explicitModes = modes;
 
   if (node.type === "TEXT") {
     out.text = node.characters;
