@@ -248,6 +248,76 @@ test("a retry arriving while the call is still QUEUED coalesces with it", async 
   assert.deepEqual(body(rb), body(rb2));
 });
 
+// The opId is an idempotency key, so it must keep naming the SAME call. Reusing
+// it for a different one handed out the first call's answer — and for a write
+// that means reporting an edit that was never made. It was the last way to get
+// a silently wrong answer through a correct-looking path.
+test("the same opId with different arguments is refused, not answered", async () => {
+  const calls = [];
+  const d = new Dispatcher({
+    run: async (method, params) => { calls.push(params.n); return { n: params.n }; },
+    mutating: new Set(["use_figma"]),
+    bump: counter(),
+    peek: () => 1,
+  });
+
+  const first = await d.handle({ id: "1", method: "use_figma", opId: "op-1", params: { n: 1 } });
+  assert.deepEqual(first.result, { n: 1 });
+
+  const other = await d.handle({ id: "2", method: "use_figma", opId: "op-1", params: { n: 2 } });
+  assert.equal(other.ok, false);
+  assert.match(other.error.message, /OPID_REUSED/);
+  assert.equal(other.replayed, undefined, "a refusal is not a replay");
+  assert.equal(other.rev, 1, "nothing ran, so the document did not move");
+  assert.deepEqual(calls, [1], "the second call must not run under a used key");
+
+  const still = await d.handle({ id: "3", method: "use_figma", opId: "op-1", params: { n: 1 } });
+  assert.deepEqual(still.result, { n: 1 }, "the recorded answer survives the refusal");
+  assert.equal(still.replayed, true);
+
+  const wrongMethod = await d.handle({ id: "4", method: "import_images", opId: "op-1", params: { n: 1 } });
+  assert.equal(wrongMethod.ok, false);
+  assert.match(wrongMethod.error.message, /OPID_REUSED/, "a different method under one key is the same mistake");
+});
+
+test("a retry may re-encode its arguments: key order does not change the call", async () => {
+  const calls = [];
+  const d = new Dispatcher({
+    run: async (method, params) => { calls.push(params); return { n: params.n }; },
+    mutating: new Set(["use_figma"]),
+    bump: counter(),
+    peek: () => 1,
+  });
+
+  const a = await d.handle({ id: "1", method: "use_figma", opId: "op-9", params: { nodeId: "1:2", depth: 3 } });
+  const b = await d.handle({ id: "2", method: "use_figma", opId: "op-9", params: { depth: 3, nodeId: "1:2" } });
+  assert.equal(calls.length, 1, "the same call is replayed, not re-run");
+  assert.equal(b.replayed, true);
+  assert.deepEqual(body(b), body(a));
+});
+
+test("a different call under a key that is still in flight is refused at once", async () => {
+  const hold = gate();
+  const calls = [];
+  const d = new Dispatcher({
+    run: async (method, params) => { calls.push(params.code); await hold.promise; return { code: params.code }; },
+    mutating: new Set(["use_figma"]),
+    bump: counter(),
+    peek: () => 0,
+  });
+
+  const a = d.handle({ id: "1", method: "use_figma", opId: "op-7", params: { code: "x" } });
+  await tick();
+  const other = await d.handle({ id: "2", method: "use_figma", opId: "op-7", params: { code: "y" } });
+  assert.equal(other.ok, false);
+  assert.match(other.error.message, /OPID_REUSED/);
+  assert.deepEqual(calls, ["x"], "the refused attempt neither joined nor started a run");
+
+  hold.open();
+  const ra = await a;
+  assert.deepEqual(ra.result, { code: "x" });
+});
+
 test("every declared mutating method exists on the tool table", () => {
   // A typo here is silent: the method simply would not be serialised. The
   // reverse mistake (a writer nobody listed) cannot be detected here — it is

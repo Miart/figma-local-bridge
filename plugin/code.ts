@@ -92,7 +92,7 @@ const log = (s: string) => post({ log: s });
 import { replaceRepeatedWithComponent, type ReplaceParams } from "./commands";
 import { toolMethods, MUTATING_METHODS } from "./tools";
 import { snapshot, compare, explain, STRICT, COMPONENTIZE } from "./fingerprint";
-import { bump } from "./rev";
+import { bump, current } from "./rev";
 import { Dispatcher } from "./dispatch";
 
 const CAPS = { write: true };
@@ -302,6 +302,7 @@ const dispatcher = new Dispatcher({
   },
   mutating: MUTATING,
   bump,
+  peek: current,
 });
 
 figma.ui.onmessage = async (envelope: Json) => {

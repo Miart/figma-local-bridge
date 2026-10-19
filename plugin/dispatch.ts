@@ -18,6 +18,13 @@
  *    are therefore chained: strictly one at a time. Reads stay concurrent; they
  *    can observe a half-applied state, but they cannot cause one.
  *
+ * 3. KEY REUSE. An `opId` is an idempotency key, and nothing checked that it
+ *    still named the SAME call. A sender that reused an id for a different
+ *    method or different arguments got the first call's answer back — and
+ *    believed the second had run, which for a write means believing an edit
+ *    exists that was never made. The cache now keeps a fingerprint of the call
+ *    it answered, and a mismatch is refused loudly instead of replayed.
+ *
  * Deliberately free of any `figma` reference so it can be unit-tested outside
  * the plugin sandbox (see test/dispatch.test.mjs) — same reason as scope.ts.
  */
@@ -39,6 +46,20 @@ export interface OpRecord {
   rev: number;
 }
 
+/** A recorded answer, plus the identity of the call that produced it. */
+interface Cached {
+  method: string;
+  fp: string;
+  record: OpRecord;
+}
+
+/** An attempt that is still running: same identity, answer not written yet. */
+interface Inflight {
+  method: string;
+  fp: string;
+  promise: Promise<OpRecord>;
+}
+
 export interface Reply extends OpRecord {
   id: string;
   replayed?: boolean;
@@ -51,15 +72,34 @@ export interface DispatcherOptions {
   mutating: ReadonlySet<string>;
   /** Advances the completed-call counter (plugin/rev.ts). */
   bump: () => number;
+  /** Reads the counter without advancing it (plugin/rev.ts `current`). */
+  peek?: () => number;
   /** How many answers to keep for retries. */
   limit?: number;
 }
 
 const DEFAULT_LIMIT = 200;
 
+/**
+ * Identity of a logical call: its method and its arguments, with object key
+ * order ignored — a retry can be written out by a different JSON encoder than
+ * the attempt it repeats, and reordering keys does not change the call.
+ */
+export function fingerprint(method: string, params: unknown): string {
+  return method + " " + canonical(params);
+}
+
+function canonical(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(v) ?? "null";
+  if (Array.isArray(v)) return "[" + v.map(canonical).join(",") + "]";
+  const o = v as Record<string, unknown>;
+  const keys = Object.keys(o).filter((k) => o[k] !== undefined).sort();
+  return "{" + keys.map((k) => JSON.stringify(k) + ":" + canonical(o[k])).join(",") + "}";
+}
+
 export class Dispatcher {
-  private cache = new Map<string, OpRecord>();
-  private inflight = new Map<string, Promise<OpRecord>>();
+  private cache = new Map<string, Cached>();
+  private inflight = new Map<string, Inflight>();
   /** Tail of the mutation queue. Never rejects — see serialised(). */
   private tail: Promise<void> = Promise.resolve();
 
@@ -71,30 +111,61 @@ export class Dispatcher {
    */
   async handle(req: Request): Promise<Reply> {
     const opId = typeof req.opId === "string" && req.opId ? req.opId : "";
+    const fp = fingerprint(req.method, req.params);
 
     if (opId) {
       const recorded = this.cache.get(opId);
-      if (recorded) return { id: req.id, ...recorded, replayed: true };
+      if (recorded) {
+        if (recorded.fp !== fp) return this.reused(req, opId, recorded.method);
+        return { id: req.id, ...recorded.record, replayed: true };
+      }
       const running = this.inflight.get(opId);
       // The attempt that is already running will post its own reply; this one
       // gets the same answer under its own transport id.
-      if (running) return { id: req.id, ...(await running), replayed: true };
+      if (running) {
+        if (running.fp !== fp) return this.reused(req, opId, running.method);
+        return { id: req.id, ...(await running.promise), replayed: true };
+      }
     }
 
-    const work = () => this.execute(req, opId);
+    const work = () => this.execute(req, opId, fp);
     const started = this.opts.mutating.has(req.method) ? this.serialised(work) : work();
 
     if (opId) {
-      this.inflight.set(opId, started);
+      this.inflight.set(opId, { method: req.method, fp, promise: started });
       void started.finally(() => {
         // Only clear the entry this dispatch installed: a later logical call
         // could not have reused the id, but a cleared-and-reused one would make
         // a stale removal drop a live entry.
-        if (this.inflight.get(opId) === started) this.inflight.delete(opId);
+        if (this.inflight.get(opId)?.promise === started) this.inflight.delete(opId);
       });
     }
 
     return { id: req.id, ...(await started) };
+  }
+
+  /**
+   * The id was already used for a DIFFERENT call. Neither replaying the old
+   * answer (the caller would believe a call ran that never did) nor running the
+   * new one (the key would stop meaning anything, and a retry of it would be
+   * answered from the wrong record) is acceptable, so the attempt is refused and
+   * the caller is told to mint a fresh id.
+   */
+  private reused(req: Request, opId: string, method: string): Reply {
+    return {
+      id: req.id,
+      ok: false,
+      error: {
+        message:
+          `OPID_REUSED: op ${opId} already answered a ${method} call and this is a ` +
+          `${req.method} call with different arguments — nothing was replayed and ` +
+          `nothing was run. Send this call under a fresh opId.`,
+      },
+      // Nothing ran, so the document did not move: read the counter, do not
+      // advance it. A fabricated bump would make the next screenshot look
+      // stale-but-valid.
+      rev: this.opts.peek ? this.opts.peek() : this.opts.bump(),
+    };
   }
 
   /** Chains `work` after the current tail of the mutation queue. */
@@ -109,7 +180,7 @@ export class Dispatcher {
     return next;
   }
 
-  private async execute(req: Request, opId: string): Promise<OpRecord> {
+  private async execute(req: Request, opId: string, fp: string): Promise<OpRecord> {
     let record: OpRecord;
     try {
       record = { ok: true, result: await this.opts.run(req.method, req.params ?? {}), rev: this.opts.bump() };
@@ -120,11 +191,11 @@ export class Dispatcher {
       // look stale-but-valid. Re-rendering is cheaper than a wrong conclusion.
       record = { ok: false, error: { message: String(err && err.message ? err.message : err) }, rev: this.opts.bump() };
     }
-    if (opId) this.remember(opId, record);
+    if (opId) this.remember(opId, { method: req.method, fp, record });
     return record;
   }
 
-  private remember(opId: string, record: OpRecord) {
+  private remember(opId: string, entry: Cached) {
     const limit = this.opts.limit ?? DEFAULT_LIMIT;
     if (this.cache.size >= limit) {
       // Oldest first. Evicting only costs a re-execution for a call older than
@@ -132,6 +203,6 @@ export class Dispatcher {
       const oldest = this.cache.keys().next().value;
       if (oldest !== undefined) this.cache.delete(oldest);
     }
-    this.cache.set(opId, record);
+    this.cache.set(opId, entry);
   }
 }
