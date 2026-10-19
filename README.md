@@ -88,7 +88,7 @@ Don't run a second bridge instance: the port is fixed, so the second daemon exit
 
 ### Several files at once
 
-Run the plugin in each Figma file you want to drive — every panel connects to the same daemon, which holds one socket per file, keyed by `fileKey` (a file that was never saved gets a session key like `unsaved-a1b2c3d4`). Up to **16 files**; a panel beyond that is refused with `4413` and says so.
+Run the plugin in each Figma file you want to drive — every panel connects to the same daemon, which holds one socket per file, keyed by `fileKey` (a file that was never saved gets a session key like `unsaved-a1b2c3d4`, which it keeps for as long as the document is open, panel reloads included). Up to **16 files**; a panel beyond that is refused with `4413` and says so.
 
 - `figma_ping` lists the connected files (`fileKey` + name) — it is the tool to call when you do not know which files are open.
 - Every tool takes an optional `fileKey`. With **one** file connected it may be omitted; with **several**, a call without `fileKey` is **refused before anything is sent**, listing the candidates. Guessing here would edit the wrong file.
@@ -182,6 +182,8 @@ Current suites: **172 unit checks** — 59 `node:test` cases plus 113 harness ch
 | Symptom | Cause |
 |---|---|
 | `FIGMA_BRIDGE_OFFLINE` | The plugin is not running in Figma, or the daemon is down |
+| `FIGMA_BRIDGE_UNKNOWN_FILE` | The `fileKey` is not one of the connected files — an unsaved file's key changes when its panel reloads. The error lists the keys that exist: call `figma_ping` and retry with one of them instead of the same key |
+| `FIGMA_BRIDGE_FILE_KEY_REQUIRED` | Several files are connected and no `fileKey` was given — the error lists them; pass one |
 | `figma_ping` → `connected: false` | The plugin is not paired |
 | The daemon won't start | Port 8787 is busy — `lsof -nP -iTCP:8787 -sTCP:LISTEN` |
 | `4409 replaced by a newer socket` | Another panel took this file's slot (plugin reloaded, or the file is open in two windows). Press *reconnect* in the panel you want to keep |

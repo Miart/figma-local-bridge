@@ -38,6 +38,10 @@ call was `not sent`, retrying is free.
 `FIGMA_BRIDGE_OFFLINE` means the plugin is not running: say so and stop instead
 of looping on retries.
 
+`FIGMA_BRIDGE_UNKNOWN_FILE` means the key is not (or no longer) connected — an
+unsaved file's key changes when its panel reloads. Do not retry the same key:
+the error lists what is connected, take one of those.
+
 ## Writes
 
 Mutations are serialized by the bridge, one at a time, because Figma's undo

@@ -33,7 +33,8 @@ export class BridgeOffline extends Error {
  * The request never left this process: no plugin is paired, or the daemon that
  * would carry it is not reachable. Kept as a subclass of BridgeOffline so every
  * existing `instanceof` check keeps working, and so the message keeps the
- * FIGMA_BRIDGE_OFFLINE code that agents, docs and the e2e match on.
+ * FIGMA_BRIDGE_OFFLINE code that agents, docs and the e2e match on —
+ * BridgeNotRouted below replaces that message, and says why.
  *
  * The distinct name is what FigmaClient.call() uses to stop immediately: it has
  * already given the link its grace period, and a request that was never sent has
@@ -44,6 +45,27 @@ export class BridgeNotPaired extends BridgeOffline {
   constructor(reason?: string) {
     super(reason);
     this.name = "BridgeNotPaired";
+  }
+}
+
+/**
+ * The bridge is up, but this call could not be routed to a plugin: the caller
+ * named a fileKey nothing serves, or left it out while several files are
+ * connected. "The plugin is not connected" would be the wrong story — it sends
+ * the caller to open a panel that is already open — and a stale key is routine
+ * rather than an outage: an unsaved file's key is reminted whenever its panel
+ * reloads. The message carries its own code and the connected list, so the
+ * retry is a lookup instead of a guess.
+ *
+ * Inherits BridgeNotPaired: nothing was sent, and call() must fail fast rather
+ * than retry the same bad key five times.
+ */
+export class BridgeNotRouted extends BridgeNotPaired {
+  constructor(message: string) {
+    super();
+    // super() built the offline text; this call is not an offline story.
+    this.message = message;
+    this.name = "BridgeNotRouted";
   }
 }
 

@@ -178,13 +178,13 @@ try {
     check("unknown fileKey: daemon answers with an error, not a timeout", !!gone && gone.ok === false, JSON.stringify(seen));
     check("…fast (no waiting for a plugin)", Date.now() - t0 < 1500, `${Date.now() - t0}ms`);
     check("…with the id echoed for matching", !!gone && gone.id === "raw00001:gone-1");
-    check("…and the reason names the file", /no Figma plugin is connected for fileKey "no-such-file"/.test(String(gone?.error?.message)), JSON.stringify(gone?.error));
+    check("…and the reason names the file", /FIGMA_BRIDGE_UNKNOWN_FILE.*no Figma plugin is connected for fileKey "no-such-file"/s.test(String(gone?.error?.message)), JSON.stringify(gone?.error));
 
     seen.length = 0;
     ws.send(JSON.stringify({ id: "raw00001:two-1", method: "ping", params: {} }));
     await sleep(700);
     const two = seen.find((e) => e.id === "raw00001:two-1");
-    check("two files, no fileKey: daemon refuses with the list", !!two && two.ok === false && /more than one file is connected/.test(String(two.error?.message)), JSON.stringify(seen));
+    check("two files, no fileKey: daemon refuses with the list", !!two && two.ok === false && /FIGMA_BRIDGE_FILE_KEY_REQUIRED/.test(String(two.error?.message)) && /more than one file is connected/.test(String(two.error?.message)), JSON.stringify(seen));
     ws.close();
   }
 
@@ -213,7 +213,7 @@ try {
 
   const toGoneFile = await client.rpc("tools/call", { name: "figma_get_selection", arguments: { fileKey: ATLAS.fileKey } });
   const toGoneText = String(textOf(toGoneFile));
-  check("a call to the closed file is refused with the current list", isError(toGoneFile) && /no Figma plugin is connected for fileKey/.test(toGoneText) && /"Lobby"/.test(toGoneText) && !/"Atlas"/.test(toGoneText), toGoneText);
+  check("a call to the closed file is refused with the current list", isError(toGoneFile) && /FIGMA_BRIDGE_UNKNOWN_FILE/.test(toGoneText) && /no Figma plugin is connected for fileKey/.test(toGoneText) && /"Lobby"/.test(toGoneText) && !/"Atlas"/.test(toGoneText), toGoneText);
 
   lobby.close();
   await sleep(400);

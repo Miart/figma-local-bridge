@@ -79,8 +79,10 @@ test("with several files, omitting fileKey refuses and nothing is sent", async (
   const { link, client } = clientWith([ATLAS, LOBBY]);
 
   await assert.rejects(client.call("ping", {}, 5000), (err) => {
-    assert.equal(err.name, "BridgeNotPaired");
+    assert.equal(err.name, "BridgeNotRouted");
     assert.ok(err instanceof BridgeOffline, "still an offline error for the tool guard");
+    assert.match(err.message, /^FIGMA_BRIDGE_FILE_KEY_REQUIRED — /);
+    assert.doesNotMatch(err.message, /Open "Figma Local Bridge"/, "not an outage: the plugin is open");
     assert.match(err.message, /more than one Figma file is connected/);
     assert.match(err.message, /"Atlas" \(atlas123\)/);
     assert.match(err.message, /"Lobby" \(lobby456\)/);
@@ -106,10 +108,15 @@ test("an unknown fileKey is refused with the list, before sending", async () => 
   const { link, client } = clientWith([ATLAS, LOBBY]);
 
   await assert.rejects(client.call("ping", { fileKey: "ghost" }, 5000), (err) => {
-    assert.equal(err.name, "BridgeNotPaired");
+    assert.equal(err.name, "BridgeNotRouted");
+    assert.match(err.message, /^FIGMA_BRIDGE_UNKNOWN_FILE — /);
     assert.match(err.message, /no Figma plugin is connected for fileKey "ghost"/);
     assert.match(err.message, /"Atlas" \(atlas123\)/);
     assert.match(err.message, /"Lobby" \(lobby456\)/);
+    // The stale-key case used to be dressed as an outage, which sent the caller
+    // to open a panel that was already open. It must stay a routing answer.
+    assert.doesNotMatch(err.message, /Open "Figma Local Bridge"/);
+    assert.match(err.message, /re-run figma_ping/);
     return true;
   });
   assert.equal(link.sent.length, 0);

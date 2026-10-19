@@ -425,6 +425,11 @@ export class Daemon {
    * Why a request could not be routed, phrased so the agent can act: which
    * files exist, and what to pass. Never "did you mean X" — a wrong guess here
    * edits the wrong file.
+   *
+   * Only the first branch is an outage. The other two are calls the caller can
+   * fix, so they carry their own codes instead of the FIGMA_BRIDGE_OFFLINE
+   * prefix, which reads as "open the plugin" and sends the caller after the
+   * wrong thing.
    */
   private routeError(file: unknown): string {
     if (!this.hasPlugin) {
@@ -432,12 +437,12 @@ export class Daemon {
     }
     if (typeof file === "string" && file) {
       return (
-        `no Figma plugin is connected for fileKey "${file}" — the request was not delivered. ` +
-        `Connected files: ${this.describeFiles()}.`
+        `FIGMA_BRIDGE_UNKNOWN_FILE — no Figma plugin is connected for fileKey "${file}" — the request was not delivered. ` +
+        `Connected files: ${this.describeFiles()} — re-run figma_ping and retry with one of these keys.`
       );
     }
     return (
-      `no fileKey was given and more than one file is connected — the request was not delivered. ` +
+      `FIGMA_BRIDGE_FILE_KEY_REQUIRED — no fileKey was given and more than one file is connected — the request was not delivered. ` +
       `Connected files: ${this.describeFiles()} — pass fileKey to choose one.`
     );
   }

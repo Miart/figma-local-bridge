@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { Link, Envelope } from "./link.js";
-import { BridgeOffline, BridgeNotPaired } from "./websocket.js";
+import { BridgeOffline, BridgeNotPaired, BridgeNotRouted } from "./websocket.js";
 
 /**
  * How long a call waits for the link before giving up.
@@ -252,21 +252,26 @@ export class FigmaClient {
    * The refusal is repeated here, with the list, so the agent hears it BEFORE
    * anything is sent — a guess at this point would silently edit the wrong
    * file, and the daemon's own check would arrive too late to prevent it.
+   *
+   * Both refusals are BridgeNotRouted, not "offline": the bridge is up and
+   * other files are being served, so the honest reading is "this call was not
+   * routed", and the message has to say what to pass instead.
    */
   private resolveFile(requested?: string): string | undefined {
     if (requested) {
       if (this.connectedFiles.length && !this.connectedFiles.some((f) => f.fileKey === requested)) {
-        throw new BridgeNotPaired(
-          `no Figma plugin is connected for fileKey "${requested}", so nothing was sent. ` +
-            `Connected files: ${describeFiles(this.connectedFiles)}.`,
+        throw new BridgeNotRouted(
+          `FIGMA_BRIDGE_UNKNOWN_FILE — no Figma plugin is connected for fileKey "${requested}", so nothing was sent. ` +
+            `Connected files: ${describeFiles(this.connectedFiles)}. ` +
+            `An unsaved file's key changes when its panel reloads — re-run figma_ping and retry with one of these keys.`,
         );
       }
       return requested;
     }
     if (this.connectedFiles.length === 1) return this.connectedFiles[0].fileKey;
     if (this.connectedFiles.length > 1) {
-      throw new BridgeNotPaired(
-        `more than one Figma file is connected, so nothing was sent — pass fileKey to choose one: ` +
+      throw new BridgeNotRouted(
+        `FIGMA_BRIDGE_FILE_KEY_REQUIRED — more than one Figma file is connected, so nothing was sent — pass fileKey to choose one: ` +
           `${describeFiles(this.connectedFiles)}.`,
       );
     }
