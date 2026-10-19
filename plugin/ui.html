@@ -68,7 +68,11 @@
          characters, one cell per character — the block's size on screen is
          therefore set here, not in the script, and the panel's own font is not
          what the art is bound to. */
-      #pet { position: relative; }
+      /* The pointer over the octopus says it is tappable, and the art never
+         turns into a text selection under the finger. The press itself dims the
+         art (below); the answer — a hop and a beaming face — is the script's. */
+      #pet { position: relative; cursor: pointer; user-select: none; }
+      #pet:active #mascot { opacity: .7; }
       /* The mascot switch, off. The state rides a data-pet attribute on the root
          element rather than a class on #pet, so the CSS is the only thing that
          knows how to hide it: the main thread pushes the stored value to the
@@ -97,7 +101,7 @@
          21 cells x 10 lines are a 142.8x110 box. Halving the font rather than
          the grid keeps the same picture — twice the resolution of a coarser
          one would look — while the octopus takes half the height. */
-      #mascot { position: relative; margin: 0; font: inherit; font-size: 11px; line-height: 1; white-space: pre; transition: color .25s; }
+      #mascot { position: relative; margin: 0; font: inherit; font-size: 11px; line-height: 1; white-space: pre; transition: color .25s, opacity .12s; }
       #mascot.m-ready, #mascot.m-happy, #mascot.m-look { color: var(--ok); }
       #mascot.m-busy, #mascot.m-annoyed { color: var(--warn); }
       #mascot.m-sad { color: var(--err); }
@@ -217,7 +221,7 @@
   </head>
   <body data-pet="shown">
     <header>
-      <div id="pet">
+      <div id="pet" title="pet the octopus">
         <pre id="mascot" class="mascot m-sleep"></pre>
         <span class="zzz" id="zzz" hidden><i>z</i><i>z</i></span>
       </div>
@@ -428,6 +432,19 @@
         el.pet.classList.add(cls);
       }
       el.pet.addEventListener("animationend", () => el.pet.classList.remove("hop", "shake", "pop"));
+
+      // A tap is answered at once: a hop, or a pop when taps come in quick
+      // succession, plus a beaming face for a moment — the octopus forgives a
+      // sad link while the finger is on it. pointerdown rather than click, so
+      // the answer lands while the finger is still down.
+      let taps = 0, tapped = 0;
+      el.pet.addEventListener("pointerdown", () => {
+        const now = Date.now();
+        taps = now - tapped < 900 ? taps + 1 : 1;
+        tapped = now;
+        pulse(taps % 2 ? "hop" : "pop");
+        flashMood("happy", 900);
+      });
 
       // ------------------------------------------------------------ pet switch
       // Only the attribute is switched here: the CSS does the hiding, the main

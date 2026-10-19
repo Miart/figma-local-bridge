@@ -99,7 +99,7 @@ Run the plugin in each Figma file you want to drive — every panel connects to 
 
 | Row | Meaning |
 |---|---|
-| mascot | decorative only: an ASCII octopus whose mood follows the link — asleep while offline, shuffling while connecting, blinking when idle, winking when you click the canvas, upset after a failed call. It reacts (hop / shake) to what happened; the status line below always carries the same facts in words. `hide pet` / `show pet` in the footer switches it off for good (stored per user in `figma.clientStorage`) |
+| mascot | decorative only: an ASCII octopus whose mood follows the link — asleep while offline, shuffling while connecting, blinking when idle, winking when you click the canvas, upset after a failed call. It reacts (hop / shake) to what happened, and answers a tap on itself with a hop and a beaming face; the status line below always carries the same facts in words. `hide pet` / `show pet` in the footer switches it off for good (stored per user in `figma.clientStorage`) |
 | window height | the panel measures what it rendered and asks Figma to fit the window to it, so hiding the mascot (~120px) or showing the error line (~20px) never leaves dead space behind. If Figma drops the resize, the panel re-asks on its own until the window matches the content |
 | status | `connected` / `offline — retrying in Ns` / `token rejected` / `another panel is serving this file — press reconnect to take over` / `all 16 file slots are taken — retrying in Ns` |
 | chips: `page`, selection | what is open and selected right now — pushed by the plugin, so it stays live even without a connection; hover a chip for the full list |
