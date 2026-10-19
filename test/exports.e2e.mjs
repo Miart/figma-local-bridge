@@ -17,7 +17,8 @@ import fs from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { homedir } from "node:os";
-import { encodePng } from "../server/dist/compare.js";
+import { createHash } from "node:crypto";
+import { encodePng, pngSize } from "../server/dist/compare.js";
 
 const PORT = Number(process.env.TEST_PORT || 8901);
 const INFO = join(homedir(), ".local/share/opencode", "figma-bridge-daemon-exports-test.json");
@@ -95,8 +96,10 @@ try {
   const c = await mcpClient();
   const tools = (await c.rpc("tools/list", {})).result.tools.map((t) => t.name);
   check(
-    "the three export tools are registered",
-    ["figma_export_ui_atlas", "figma_export_9slice", "figma_export_ui_states"].every((n) => tools.includes(n)),
+    "the four export tools are registered",
+    ["figma_export_ui_atlas", "figma_export_9slice", "figma_export_ui_states", "figma_export_web_handoff"].every((n) =>
+      tools.includes(n),
+    ),
     tools.join(","),
   );
 
@@ -155,6 +158,64 @@ try {
         rev: 11,
         base64: png(120, 80),
       });
+      case "export_web_handoff": {
+        if (!["6:1", "6:2", "6:3", "6:4"].includes(env.params.nodeId)) return fail("unknown handoff node");
+        const other = env.params.nodeId === "6:2";
+        const lying = env.params.nodeId === "6:3";
+        const dotted = env.params.nodeId === "6:4";
+        const name = dotted ? ".." : lying ? "Lying" : "Page/Home";
+        const warning = "1 font style could not be loaded: Inter Display Bold — a browser without it will substitute";
+        return ok({
+          nodeId: env.params.nodeId, name, type: "FRAME", width: 200, height: 100,
+          fileKey: "web-file", scale: 2, rev: 11,
+          spec: {
+            schema: "figma-web-handoff-spec/v1",
+            source: { fileKey: "web-file", nodeId: env.params.nodeId, name, type: "FRAME", rev: 11 },
+            space: { units: "px", origin: "top-left of the frame's bounding box", yDown: true },
+            frame: { id: env.params.nodeId, name, type: "FRAME", width: 200, height: 100 },
+            counts: { nodes: 2, colors: 1, fonts: 1, textStyles: 1, spacing: 0 },
+            nodes: [
+              { id: env.params.nodeId, parent: null, depth: 0, name, type: "FRAME", box: { x: 0, y: 0, width: 200, height: 100 } },
+              {
+                id: "6:9", parent: env.params.nodeId, depth: 1, name: "Title", type: "TEXT",
+                box: { x: 16, y: 12, width: 168, height: 32 },
+                text: {
+                  characters: "Hello", font: { family: "Inter", style: "Bold", weight: 700 }, fontSize: 24,
+                  color: "#111111", token: "text-primary", styleToken: "heading-h1",
+                },
+              },
+            ],
+            warnings: other ? [] : [warning],
+          },
+          tokens: {
+            schema: "figma-web-handoff-tokens/v1",
+            colors: { "text-primary": { value: "#111111", hex: "#111111", cssVar: "--color-text-primary", uses: 1 } },
+            fonts: {
+              "inter-bold": { name: "inter-bold", family: "Inter", style: "Bold", weight: 700, familyVar: "--font-family-inter", weightVar: "--font-weight-inter-bold", uses: 1 },
+            },
+            text: {
+              "heading-h1": { name: "heading-h1", cssClass: "heading-h1", font: { family: "Inter", style: "Bold", weight: 700 }, size: 24, align: "LEFT", uses: 1 },
+            },
+            spacing: {},
+          },
+          css:
+            "/* handoff */\n:root {\n  --color-text-primary: #111111;\n  --font-family-inter: \"Inter\", sans-serif;\n" +
+            "  --font-weight-inter-bold: 700;\n}\n\n.heading-h1 {\n  font-family: var(--font-family-inter);\n" +
+            "  font-weight: 700;\n  font-size: 24px;\n}\n",
+          readme:
+            `# Web handoff — ${name}\n\nThis folder is a specification for a developer, not production HTML.\n\n` +
+            (other ? "" : `- ${warning}\n`),
+          counts: { nodes: 2, colors: 1, fonts: 1, textStyles: 1, spacing: 0 },
+          missingFonts: other ? [] : ["Inter Display Bold"],
+          warnings: other ? [] : [warning],
+          previews: lying
+            ? [{ scale: 1, width: 200, height: 100, basis: "boundingBox", base64: png(100, 50) }]
+            : [
+                { scale: 1, width: 200, height: 100, basis: "boundingBox", bytes: 1, base64: png(200, 100) },
+                { scale: 2, width: 400, height: 200, basis: "boundingBox", bytes: 1, base64: png(400, 200) },
+              ],
+        });
+      }
       case "export_ui_states": {
         // normal and disabled are byte-identical on purpose: the tool must notice.
         const [normal, hover] = [png(80, 32, [10, 10, 10, 255]), png(80, 32, [200, 200, 200, 255])];
@@ -252,6 +313,114 @@ try {
     JSON.stringify(states.files),
   );
 
+  // ------------------------------------------------------------- web handoff
+  const handoffRoot = join(OUT, "handoff");
+  const handoff = c.text(
+    await c.rpc("tools/call", {
+      name: "figma_export_web_handoff",
+      arguments: { nodeId: "6:1", scale: 2, outDir: handoffRoot },
+    }),
+  );
+  const hdir = handoff.dir;
+  const hfiles = ["preview.png", "preview@2x.png", "spec.json", "tokens.json", "tokens.css", "README.md", "handoff.json"];
+  check(
+    "the handoff writes one folder with every promised file",
+    hdir === join(handoffRoot, "Page_Home") && hfiles.every((n) => fs.existsSync(join(hdir, n))),
+    hdir,
+  );
+  const hSpec = JSON.parse(fs.readFileSync(join(hdir, "spec.json"), "utf8"));
+  const hTokens = JSON.parse(fs.readFileSync(join(hdir, "tokens.json"), "utf8"));
+  const hCss = fs.readFileSync(join(hdir, "tokens.css"), "utf8");
+  const hReadme = fs.readFileSync(join(hdir, "README.md"), "utf8");
+  const hManifest = JSON.parse(fs.readFileSync(join(hdir, "handoff.json"), "utf8"));
+  check(
+    "the spec on disk keeps both layers and names the source",
+    hSpec.source.nodeId === "6:1" && hSpec.nodes.length === 2 && hSpec.nodes[1].text.font.weight === 700,
+    JSON.stringify(hSpec.nodes).slice(0, 200),
+  );
+  check(
+    "the tokens and CSS on disk carry the colour and the text class",
+    hTokens.colors["text-primary"].value === "#111111" &&
+      hCss.includes("--color-text-primary: #111111;") &&
+      hCss.includes(".heading-h1"),
+    hCss.slice(0, 160),
+  );
+  check(
+    "the README says this is not production HTML and repeats the missing font",
+    hReadme.includes("not production HTML") && hReadme.includes("Inter Display Bold"),
+    hReadme.slice(0, 160),
+  );
+  check(
+    "the PNGs on disk are the sizes the manifest names",
+    JSON.stringify(pngSize(fs.readFileSync(join(hdir, "preview.png")))) === JSON.stringify({ width: 200, height: 100 }) &&
+      JSON.stringify(pngSize(fs.readFileSync(join(hdir, "preview@2x.png")))) === JSON.stringify({ width: 400, height: 200 }) &&
+      hManifest.images.every((i) => i.matchesManifest === true),
+    JSON.stringify(hManifest.images),
+  );
+  const specEntry = hManifest.files.find((f) => f.name === "spec.json");
+  const specHash = createHash("sha256").update(fs.readFileSync(join(hdir, "spec.json"))).digest("hex").slice(0, 16);
+  check(
+    "the manifest's hashes describe the files that were written",
+    specEntry &&
+      specEntry.sha256_16 === specHash &&
+      hManifest.verification.allFilesWritten === true &&
+      hManifest.verification.countsMatchSpec === true &&
+      hManifest.verification.imagesMatchManifest === true &&
+      handoff.files.length === 6,
+    JSON.stringify(hManifest.verification),
+  );
+  check(
+    "the reply points at the README and the manifest",
+    handoff.entry === join(hdir, "README.md") && handoff.manifest === join(hdir, "handoff.json"),
+    JSON.stringify({ entry: handoff.entry, manifest: handoff.manifest }),
+  );
+
+  // A bundle belongs to one node; the same folder for another node would mix
+  // two documents' hashes and warnings.
+  const clash = await c.rpc("tools/call", {
+    name: "figma_export_web_handoff",
+    arguments: { nodeId: "6:2", scale: 2, outDir: handoffRoot },
+  });
+  const clashText = String(clash?.result?.content?.[0]?.text ?? clash?.error?.message ?? "");
+  check(
+    "a second node cannot reuse the first node's folder",
+    clash?.result?.isError === true && /already holds a handoff/.test(clashText),
+    clashText.slice(0, 180),
+  );
+
+  // A preview is checked against its own bytes, not against what the plugin
+  // says it exported: a manifest that describes an image nobody wrote is the
+  // failure this check exists for.
+  const mismatched = c.text(
+    await c.rpc("tools/call", {
+      name: "figma_export_web_handoff",
+      arguments: { nodeId: "6:3", scale: 1, outDir: join(OUT, "handoff-lying") },
+    }),
+  );
+  check(
+    "a preview whose bytes contradict its declared size is reported, not believed",
+    mismatched.verification.imagesMatchManifest === false &&
+      mismatched.warnings.some((w) => w.includes("on disk: the file is 100x50")),
+    JSON.stringify({ verification: mismatched.verification, warnings: mismatched.warnings }),
+  );
+
+  // A layer can be called "..". It must become a folder name, not a path that
+  // walks out of outDir.
+  const dotRoot = join(OUT, "handoff-dotdot");
+  const dotted = c.text(
+    await c.rpc("tools/call", {
+      name: "figma_export_web_handoff",
+      arguments: { nodeId: "6:4", scale: 1, outDir: dotRoot },
+    }),
+  );
+  check(
+    "a node named .. cannot escape outDir",
+    dotted.dir === join(dotRoot, "node") &&
+      fs.existsSync(join(dotted.dir, "preview.png")) &&
+      !fs.existsSync(join(dotRoot, "README.md")),
+    dotted.dir,
+  );
+
   // ------------------------------------------------------------- read-only
   const ro = await mcpClient({ FIGMA_BRIDGE_WRITE: "0" });
   const roTools = (await ro.rpc("tools/list", {})).result.tools.map((t) => t.name);
@@ -261,6 +430,19 @@ try {
     "exports work with write access off",
     roTools.includes("figma_export_ui_atlas") && roAtlas.image.path === join(roDir, "Sheet_Hero.png") && roAtlas.verification.disk.matchesManifest === true,
     roTools.join(","),
+  );
+  const roHandoff = ro.text(
+    await ro.rpc("tools/call", {
+      name: "figma_export_web_handoff",
+      arguments: { nodeId: "6:1", scale: 1, outDir: join(OUT, "readonly-handoff") },
+    }),
+  );
+  check(
+    "the handoff works with write access off, and scale 1 writes only preview.png",
+    roTools.includes("figma_export_web_handoff") &&
+      fs.existsSync(join(roHandoff.dir, "preview.png")) &&
+      !fs.existsSync(join(roHandoff.dir, "preview@1x.png")),
+    JSON.stringify({ dir: roHandoff.dir, files: roHandoff.files?.map((f) => f.name) }),
   );
   ro.kill();
 
