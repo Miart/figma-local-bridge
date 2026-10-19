@@ -69,8 +69,23 @@ const MUTATING = new Set<string>([...MUTATING_METHODS, "replace_repeated_with_co
  * cap. See plugin/dispatch.ts.
  */
 
+/**
+ * Identity of the file this panel serves.
+ *
+ * figma.fileKey is undefined until the file is first saved, so an unsaved file
+ * gets a session key instead. The daemon routes requests by this key and uses it
+ * to tell two open Figma windows apart; the key never reaches Figma itself.
+ * Computed at handshake time, so a file saved mid-session reports its real key
+ * the next time the plugin reloads.
+ */
+const UNSAVED_KEY = "unsaved-" + Math.random().toString(36).slice(2, 10);
+
+function fileMeta(): Json {
+  return { key: figma.fileKey || UNSAVED_KEY, name: figma.root.name };
+}
+
 function announce(): void {
-  post({ event: "handshake", ok: true, write: CAPS.write });
+  post({ event: "handshake", ok: true, write: CAPS.write, file: fileMeta() });
   // Push the session state on load as well as on change. `selectionchange` only
   // fires on an actual change, so without this the panel's page and selection
   // rows sat on "—" from the moment it opened until the user clicked something.

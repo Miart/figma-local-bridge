@@ -120,6 +120,16 @@ try {
     shot.result.content.find((x) => x.type === "text").text.includes("rev 7"),
     JSON.stringify(shot.result.content.map((x) => x.text || x.type)));
 
+  // The plugin would answer "node not found" to a hyphenated id, which names
+  // the wrong problem. The refusal has to happen at the tool edge, before the
+  // request is even sent.
+  const seenBefore = seen.length;
+  const badId = await c.rpc("tools/call", { name: "figma_get_metadata", arguments: { nodeId: "4029-12345" } });
+  const badIdMsg = String(badId.error?.message ?? badId.result?.content?.[0]?.text ?? JSON.stringify(badId));
+  check("hyphenated node id is refused before the plugin sees it",
+    /colon/.test(badIdMsg) && seen.length === seenBefore,
+    badIdMsg.slice(0, 140));
+
   const dir = fs.mkdtempSync(join(os.tmpdir(), "flb-dl-"));
   const dl = c.text(await c.rpc("tools/call", { name: "figma_download_assets", arguments: { nodeIds: ["1:2", "9:9"], outDir: dir } }));
   const first = dl.files[0];

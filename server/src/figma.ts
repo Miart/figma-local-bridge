@@ -23,6 +23,8 @@ interface Pending {
   /** Logical call this attempt belongs to, for the drop message. */
   opId: string;
   method: string;
+  /** fileKey this request was routed to, when it was known before sending. */
+  file: string | undefined;
 }
 
 /**
@@ -44,13 +46,31 @@ export interface SelectionState {
   at: number;
 }
 
+/** One connected Figma file, as the daemon reports it. */
+export interface FileInfo {
+  fileKey: string;
+  name: string;
+  saved: boolean;
+}
+
+/** `"Name" (key)` for every connected file — the phrase all errors share. */
+const describeFiles = (files: FileInfo[]) =>
+  files.map((f) => `"${f.name}" (${f.fileKey || "no key"})`).join(", ");
+
 /**
  * RPC client over a Link. Behaves identically whether this process is the
  * daemon (BridgeLink) or a client attached to it (DaemonLink).
  */
 export class FigmaClient {
   private pending = new Map<string, Pending>();
-  private selection: SelectionState | null = null;
+  /**
+   * Most recent selection per file — the plugin pushes selectionchange, so this
+   * is answered from memory. Key `` "" `` holds pushes that carry no file
+   * identity (the legacy in-process bridge).
+   */
+  private selections = new Map<string, SelectionState>();
+  /** Files the daemon reports as connected. The daemon is the authority. */
+  private connectedFiles: FileInfo[] = [];
   private linked = false;
   private waiters = new Set<() => void>();
 
@@ -58,21 +78,43 @@ export class FigmaClient {
     link.subscribe((env) => this.onEnvelope(env));
   }
 
-  /** Rejects every in-flight request. Used when the plugin goes away. */
-  private failAll(reason: string) {
+  /**
+   * Rejects every in-flight request matching `match`. Used when a plugin goes
+   * away: ALL of them when the daemon link itself dropped, only the named
+   * file's when one file disconnected while its neighbours stayed — a call to a
+   * file that is still there must not be shot down by the one next to it.
+   *
+   * `noRetry` is for the per-file case: the file's own slot is gone, so
+   * re-sending to it cannot reach anything, and the retry loop's message
+   * ("nothing was sent") would be wrong about the attempt that DID go out. The
+   * rejection is marked so callWithMeta hands it straight to the agent.
+   */
+  private failWhere(match: (p: Pending) => boolean, reason: string, noRetry = false) {
     for (const [id, p] of this.pending) {
+      if (!match(p)) continue;
       clearTimeout(p.timer);
-      p.reject(
-        p.sent
+      const err = p.sent
+        ? noRetry
           ? new BridgeOffline(
+              `${reason} ${p.method} was in flight (op ${p.opId}) and may or may not have been applied — ` +
+                `re-check the document (rev / figma_inspect) before running it again.`,
+            )
+          : new BridgeOffline(
               `the Figma plugin disconnected while ${p.method} was in flight (op ${p.opId}). ` +
                 `It may or may not have been applied; the retry carries the same opId so the plugin ` +
                 `replays the recorded answer instead of running it twice. ${reason}`,
             )
-          : new BridgeOffline(`the Figma plugin disconnected before ${p.method} was sent (op ${p.opId}). ${reason}`),
-      );
+        : noRetry
+          ? new BridgeOffline(`${reason} ${p.method} was not sent (op ${p.opId}).`)
+          : new BridgeOffline(`the Figma plugin disconnected before ${p.method} was sent (op ${p.opId}). ${reason}`);
+      if (noRetry) (err as Error & { bridgeNoRetry?: boolean }).bridgeNoRetry = true;
+      p.reject(err);
       this.pending.delete(id);
     }
+  }
+
+  private failAll(reason: string) {
+    this.failWhere(() => true, reason);
   }
 
   /**
@@ -102,6 +144,30 @@ export class FigmaClient {
   }
 
   private onEnvelope(env: Envelope) {
+    if (env.event === "files") {
+      // The daemon's authoritative list of connected files. Kept verbatim so a
+      // tool can either route by fileKey or tell the agent what to choose from.
+      const list = Array.isArray(env.files) ? (env.files as Array<Partial<FileInfo>>) : [];
+      this.connectedFiles = list
+        .filter((f) => f && typeof f.fileKey === "string")
+        .map((f) => ({ fileKey: String(f.fileKey), name: String(f.name ?? ""), saved: f.saved === true }));
+      return;
+    }
+    if (env.event === "file") {
+      const file = String(env.fileKey ?? "");
+      if (env.connected) return;
+      // ONE file went away. Fail only the calls aimed at it (plus calls sent
+      // before the list arrived, which cannot be attributed) and drop its
+      // remembered selection; the other files stay usable. No retry — see
+      // failWhere.
+      this.selections.delete(file);
+      this.failWhere(
+        (p) => p.file === file || p.file === undefined,
+        `file ${file ? `"${file}"` : "(no key)"} disconnected.`,
+        true,
+      );
+      return;
+    }
     if (env.event === "link") {
       const was = this.linked;
       this.linked = !!env.connected;
@@ -110,6 +176,8 @@ export class FigmaClient {
         // hang until their own timeout: a dropped plugin used to turn every
         // request in progress into a 30-115s stall, with a generic timeout
         // message that hid the real cause.
+        this.connectedFiles = [];
+        this.selections.clear();
         this.failAll("It is reconnecting.");
         return;
       }
@@ -126,18 +194,19 @@ export class FigmaClient {
     }
     if (env.event === "disconnected") {
       this.linked = false;
-      this.selection = null;
+      this.selections.clear();
+      this.connectedFiles = [];
       // Fail in-flight calls immediately instead of leaving the agent on a
       // 30s timeout.
       this.failAll("The bridge link is down.");
       return;
     }
     if (env.event === "selection") {
-      this.selection = {
+      this.selections.set(String(env.file ?? ""), {
         page: env.page as SelectionState["page"],
         selection: env.selection as SelectionState["selection"],
         at: Date.now(),
-      };
+      });
       return;
     }
     if (env.id === null || env.id === undefined) return;
@@ -158,8 +227,50 @@ export class FigmaClient {
     return this.linked && this.link.connected;
   }
 
-  get lastSelection() {
-    return this.selection;
+  /** Connected Figma files, as the daemon last reported them. */
+  get files(): FileInfo[] {
+    return this.connectedFiles;
+  }
+
+  /**
+   * The selection the plugin pushed for a file, answered from memory.
+   *
+   * With several files connected and no fileKey this refuses (like every other
+   * file-scoped read) instead of guessing which window the user meant.
+   */
+  lastSelection(fileKey?: string): SelectionState | null {
+    const file = this.resolveFile(fileKey);
+    if (file !== undefined) return this.selections.get(file) ?? null;
+    if (this.selections.size === 1) return [...this.selections.values()][0];
+    return null;
+  }
+
+  /**
+   * Which file a call targets, or undefined to let the daemon pick (it routes
+   * to the only file and refuses when there are several).
+   *
+   * The refusal is repeated here, with the list, so the agent hears it BEFORE
+   * anything is sent — a guess at this point would silently edit the wrong
+   * file, and the daemon's own check would arrive too late to prevent it.
+   */
+  private resolveFile(requested?: string): string | undefined {
+    if (requested) {
+      if (this.connectedFiles.length && !this.connectedFiles.some((f) => f.fileKey === requested)) {
+        throw new BridgeNotPaired(
+          `no Figma plugin is connected for fileKey "${requested}", so nothing was sent. ` +
+            `Connected files: ${describeFiles(this.connectedFiles)}.`,
+        );
+      }
+      return requested;
+    }
+    if (this.connectedFiles.length === 1) return this.connectedFiles[0].fileKey;
+    if (this.connectedFiles.length > 1) {
+      throw new BridgeNotPaired(
+        `more than one Figma file is connected, so nothing was sent — pass fileKey to choose one: ` +
+          `${describeFiles(this.connectedFiles)}.`,
+      );
+    }
+    return undefined;
   }
 
   async call<T = unknown>(
@@ -181,6 +292,15 @@ export class FigmaClient {
     params: Record<string, unknown> = {},
     timeoutMs = 30_000,
   ): Promise<CallMeta<T>> {
+    // `fileKey` in params is ROUTING metadata, not payload: it is consumed
+    // here and never forwarded, because a plugin only ever serves the one file
+    // it runs in. Tools pass their arguments through unchanged either way.
+    const { fileKey, ...payload } = params as Record<string, unknown> & { fileKey?: unknown };
+    const requested = typeof fileKey === "string" && fileKey ? fileKey : undefined;
+    // Throws BridgeNotPaired (immediately, no retry) when the target is
+    // ambiguous or unknown — see resolveFile.
+    const file = this.resolveFile(requested);
+
     // Figma can tear the plugin down and bring it back several times a second
     // in a heavy document. A single attempt has a good chance of landing in
     // the gap, so a dropped connection is not a failure — it is a retry.
@@ -196,12 +316,14 @@ export class FigmaClient {
     let firstDrop: string | null = null;
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        return await this.callOnce<T>(method, params, timeoutMs, opId);
+        return await this.callOnce<T>(method, payload, timeoutMs, opId, file);
       } catch (err) {
         // Nothing was ever sent — callOnce already waited its grace. Retrying
         // now would just spend the same two seconds again and then report the
-        // same state; the agent may as well learn right away.
-        if (err instanceof BridgeNotPaired) throw err;
+        // same state; the agent may as well learn right away. Same for a
+        // failure that belongs to ONE file's slot (see failWhere): re-sending
+        // cannot reach anything, and the message already tells the whole story.
+        if (err instanceof BridgeNotPaired || (err as { bridgeNoRetry?: boolean } | null)?.bridgeNoRetry) throw err;
         const drop = err instanceof BridgeOffline || /disconnected/i.test(String((err as Error)?.message || err));
         if (!drop) throw err;
         if (!firstDrop) firstDrop = String((err as Error)?.message || err);
@@ -251,6 +373,7 @@ export class FigmaClient {
     params: Record<string, unknown>,
     timeoutMs: number,
     opId: string,
+    file: string | undefined,
   ): Promise<CallMeta<T>> {
     await this.ensureLinked(opId, method);
 
@@ -267,12 +390,13 @@ export class FigmaClient {
         sent: false,
         opId,
         method,
+        file,
       });
     });
 
     const entry = this.pending.get(id)!;
     try {
-      this.link.send({ id, method, params, opId });
+      this.link.send({ id, method, params, opId, ...(file ? { file } : {}) });
       entry.sent = true;
     } catch (err) {
       const p = this.pending.get(id);

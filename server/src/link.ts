@@ -200,15 +200,43 @@ export class OfflineLink implements Link {
 }
 
 /**
- * Daemon side. Holds THE WebSocket to the plugin and fans envelopes out to every
- * connected MCP client. Only the plugin connection is token-gated; MCP clients
- * authenticate with a shared key read from the session file.
+ * How many Figma files one daemon serves at once. A ceiling exists at all so a
+ * runaway loop of panels (or a bug) cannot grow the routing table forever; 16 is
+ * far past what anyone works with, and a panel that hits it is told exactly why.
+ */
+const MAX_FILES = 16;
+
+/** One connected Figma window, addressed by the file it serves. */
+interface PluginEntry {
+  ws: WebSocket;
+  /** figma.root.name — for error messages and the files list, nothing else. */
+  name: string;
+  /** false for a file that was never saved (the plugin mints the session key). */
+  saved: boolean;
+}
+
+/**
+ * Daemon side. Holds ONE WebSocket per connected Figma file and fans envelopes
+ * out to every connected MCP client. Only plugin connections are token-gated;
+ * MCP clients authenticate with a shared key read from the session file.
+ *
+ * Multi-file: the daemon used to hold a single plugin slot, so the second Figma
+ * window was refused with 4409 and the user had to close the first. The slot is
+ * now a map keyed by fileKey — still ONE process, ONE port, ONE token, but a
+ * request can name the file it is for. A request that names no file is routed
+ * only when exactly one is connected; otherwise it is answered with an error
+ * (never guessed), listing what IS connected.
  */
 export class Daemon {
   private servers: WebSocketServer[] = [];
   /** MCP clients, each with the namespace its request ids carry (see broadcast). */
   private mcpClients = new Map<WebSocket, string | null>();
-  private plugin: WebSocket | null = null;
+  /**
+   * Connected files, keyed by fileKey. A missing fileKey (an older plugin
+   * build, or a hand-written probe) registers under "" and behaves as the
+   * single legacy file.
+   */
+  private plugins = new Map<string, PluginEntry>();
   private handlers = new Set<(e: Envelope) => void>();
   private heartbeat: NodeJS.Timeout | null = null;
 
@@ -219,27 +247,30 @@ export class Daemon {
     process.stderr.write("[conn] " + a.join(" ") + "\n");
 
   /**
-   * Pings the plugin socket so a dead one is detected instead of lingering.
+   * Pings every plugin socket so a dead one is detected instead of lingering.
    *
    * Figma unloads plugin UIs when the app is backgrounded, and the browser
    * tears the socket down without a close frame (code 1005). The plugin then
    * reconnects, but a half-frozen iframe can also leave the socket open while
    * silent — that one is invisible from here and every call into it hangs.
    * A ping that gets no pong means the peer is gone: terminate it and let the
-   * plugin pair again.
+   * plugin pair again. Per socket, not globally: one frozen window must not
+   * fail the files that are fine.
    */
   private startHeartbeat() {
     if (this.heartbeat) return;
     this.heartbeat = setInterval(() => {
-      const p = this.plugin as any;
-      if (!p || p.readyState !== WebSocket.OPEN) return;
-      if (p._alive === false) {
-        this.say("plugin heartbeat missed — terminating dead socket");
-        try { p.terminate(); } catch { /* ignore */ }
-        return;
+      for (const [key, entry] of this.plugins) {
+        const p = entry.ws as any;
+        if (p.readyState !== WebSocket.OPEN) continue;
+        if (p._alive === false) {
+          this.say(`plugin heartbeat missed — terminating dead socket (file ${key || "legacy"})`);
+          try { p.terminate(); } catch { /* ignore */ }
+          continue;
+        }
+        p._alive = false;
+        try { p.ping(); } catch { /* ignore */ }
       }
-      p._alive = false;
-      try { p.ping(); } catch { /* ignore */ }
     }, 15000);
     if (typeof (this.heartbeat as any).unref === "function") (this.heartbeat as any).unref();
   }
@@ -272,39 +303,62 @@ export class Daemon {
         socket.close(4401, "bad token");
         return;
       }
-      if (this.plugin && this.plugin.readyState === WebSocket.OPEN) {
-        log("refuse plugin: slot already held (4409)");
-        socket.close(4409, "already paired");
+      const fileKey = url.searchParams.get("fileKey") || "";
+      const name = url.searchParams.get("name") || (fileKey ? fileKey : "legacy plugin");
+      if (!this.plugins.has(fileKey) && this.plugins.size >= MAX_FILES) {
+        log(`refuse plugin: already serving ${MAX_FILES} files`);
+        socket.close(4413, `too many files (max ${MAX_FILES})`);
         return;
       }
-      this.plugin = socket;
+      const previous = this.plugins.get(fileKey);
+      if (previous && previous.ws !== socket && previous.ws.readyState === WebSocket.OPEN) {
+        // A reloaded panel for the SAME file takes its own slot back. The old
+        // socket is closed with 4409, and its close handler checks identity
+        // before touching the map, so it cannot evict the new entry.
+        log(`replace the older socket for file ${fileKey || "(no key)"}`);
+        try { previous.ws.close(4409, "replaced by a newer socket"); } catch { /* it is going away */ }
+      }
+      this.plugins.set(fileKey, { ws: socket, name, saved: !!fileKey && !fileKey.startsWith("unsaved-") });
       (socket as any)._alive = true;
       socket.on("pong", () => { (socket as any)._alive = true; });
       this.startHeartbeat();
-      log("plugin PAIRED");
+      log(`plugin PAIRED file=${fileKey || "(no key)"} name="${name}" files=${this.plugins.size}`);
+      this.broadcast({ id: null, event: "file", fileKey, connected: true });
       this.broadcast({ id: null, event: "link", connected: true });
+      this.broadcast(this.filesEvent());
       // A freshly opened panel must not claim "no MCP session" until the next
       // connection event happens to fire.
       this.notifyPluginClients();
       socket.on("message", (data) => {
-        // Only the socket that currently holds the slot may speak. A plugin UI
-        // that is being torn down leaves its socket behind for a moment, and
-        // its stale replies used to be accepted as if they came from the live
-        // plugin.
-        if (this.plugin !== socket) return;
+        // Only the socket that CURRENTLY holds this file's slot may speak. A
+        // plugin UI that is being torn down leaves its socket behind for a
+        // moment, and its stale replies used to be accepted as if they came
+        // from the live plugin — per file, so a replaced panel cannot answer
+        // for the panel that took over.
+        const entry = this.plugins.get(fileKey);
+        if (!entry || entry.ws !== socket) return;
         const env = this.parse(data);
         if (env) {
-          for (const h of this.handlers) h(env);
-          this.broadcast(env);
+          // The daemon, not the plugin, knows which file a frame belongs to
+          // (it mapped the socket), so replies and pushed events carry `file`
+          // without the plugin having to repeat itself.
+          const stamped = fileKey && env.file === undefined ? { ...env, file: fileKey } : env;
+          for (const h of this.handlers) h(stamped);
+          this.broadcast(stamped);
         }
       });
       socket.on("close", (code, reason) => {
-        const wasOurs = this.plugin === socket;
-        if (wasOurs) this.plugin = null;
-        log(
-          `plugin CLOSE code=${code} reason=${String(reason || "")} wasHolder=${wasOurs}`,
-        );
-        if (wasOurs) this.broadcast({ id: null, event: "link", connected: false });
+        const entry = this.plugins.get(fileKey);
+        const wasOurs = !!entry && entry.ws === socket;
+        if (wasOurs) this.plugins.delete(fileKey);
+        if (wasOurs) {
+          log(`plugin CLOSE code=${code} reason=${String(reason || "")} file=${fileKey || "(no key)"}`);
+          this.broadcast({ id: null, event: "file", fileKey, connected: false });
+          this.broadcast({ id: null, event: "link", connected: this.hasPlugin });
+          this.broadcast(this.filesEvent());
+        } else {
+          log(`plugin CLOSE (superseded) code=${code} file=${fileKey || "(no key)"}`);
+        }
       });
       socket.on("error", (e) => log("plugin error " + (e as Error).message));
       return;
@@ -319,16 +373,33 @@ export class Daemon {
       this.mcpClients.set(socket, url.searchParams.get("cid"));
       // Answer the CURRENT state immediately. Without this a client that starts
       // after the plugin paired waits forever for an event that already fired,
-      // and reports the file as empty/offline while the plugin is live.
+      // and reports the file as empty/offline while the plugin is live. The
+      // files list rides along, or the first tool call in a narrow window would
+      // refuse with an empty list of candidates.
       socket.send(JSON.stringify({ id: null, event: "link", connected: this.hasPlugin }));
+      socket.send(JSON.stringify(this.filesEvent()));
       this.notifyPluginClients();
       socket.on("message", (data) => {
         const env = this.parse(data);
         if (!env) return;
-        // Requests from MCP clients go only to the plugin.
-        if (env.id != null && this.plugin && this.plugin.readyState === WebSocket.OPEN) {
-          this.plugin.send(data.toString());
+        // Requests from MCP clients go only to the plugin that serves the
+        // named file (or the only file, when no file was named).
+        if (env.id == null) return;
+        const target = this.route(env.file);
+        if (target) {
+          target.send(data.toString());
+          return;
         }
+        // Unroutable: answer in the same envelope shape the plugin would use,
+        // so the caller fails NOW with the reason instead of counting down a
+        // timeout that blames the wrong thing. The id is echoed VERBATIM — it
+        // carries the sender's namespace, which is how the reply finds its way
+        // back through broadcast().
+        socket.send(JSON.stringify({
+          id: env.id,
+          ok: false,
+          error: { message: this.routeError(env.file) },
+        }));
       });
       socket.on("close", () => {
         this.mcpClients.delete(socket);
@@ -339,6 +410,54 @@ export class Daemon {
     }
 
     socket.close(4400, "unknown role");
+  }
+
+  /** The socket a request with this `file` must go to, or null when unroutable. */
+  private route(file: unknown): WebSocket | null {
+    const open = (e: PluginEntry | undefined) =>
+      e && e.ws.readyState === WebSocket.OPEN ? e.ws : null;
+    if (typeof file === "string" && file) return open(this.plugins.get(file));
+    if (this.plugins.size === 1) return open([...this.plugins.values()][0]);
+    return null;
+  }
+
+  /**
+   * Why a request could not be routed, phrased so the agent can act: which
+   * files exist, and what to pass. Never "did you mean X" — a wrong guess here
+   * edits the wrong file.
+   */
+  private routeError(file: unknown): string {
+    if (!this.hasPlugin) {
+      return "FIGMA_BRIDGE_OFFLINE — no Figma plugin is connected, so nothing was sent.";
+    }
+    if (typeof file === "string" && file) {
+      return (
+        `no Figma plugin is connected for fileKey "${file}" — the request was not delivered. ` +
+        `Connected files: ${this.describeFiles()}.`
+      );
+    }
+    return (
+      `no fileKey was given and more than one file is connected — the request was not delivered. ` +
+      `Connected files: ${this.describeFiles()} — pass fileKey to choose one.`
+    );
+  }
+
+  /** The connected files, stable order, for the `files` event and errors. */
+  private fileList(): Array<{ fileKey: string; name: string; saved: boolean }> {
+    return [...this.plugins.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([fileKey, e]) => ({ fileKey, name: e.name, saved: e.saved }));
+  }
+
+  private filesEvent(): Envelope {
+    return { id: null, event: "files", files: this.fileList() };
+  }
+
+  /** `"Name" (key)` for every connected file — the phrase all errors share. */
+  private describeFiles(): string {
+    return this.fileList()
+      .map((f) => `"${f.name}" (${f.fileKey || "no key"})`)
+      .join(", ");
   }
 
   private parse(data: unknown): Envelope | null {
@@ -373,18 +492,21 @@ export class Daemon {
   }
 
   /**
-   * Tells the plugin how many MCP sessions are attached, so its panel can show
-   * it. The plugin has no other way to learn this: it only ever sees its own
-   * replies, and "is opencode actually attached to this file" is the first
-   * question when a tool call does nothing.
+   * Tells every plugin how many MCP sessions are attached, so its panel can
+   * show it. The plugin has no other way to learn this: it only ever sees its
+   * own replies, and "is opencode actually attached to this file" is the first
+   * question when a tool call does nothing. The count is global (a session is
+   * attached to the daemon, not to one file) — that is the honest number.
    */
   private notifyPluginClients() {
-    const p = this.plugin;
-    if (!p || p.readyState !== WebSocket.OPEN) return;
-    try {
-      p.send(JSON.stringify({ id: null, event: "clients", count: this.mcpClients.size }));
-    } catch {
-      /* the socket went away between the check and the send */
+    const raw = JSON.stringify({ id: null, event: "clients", count: this.mcpClients.size });
+    for (const { ws } of this.plugins.values()) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      try {
+        ws.send(raw);
+      } catch {
+        /* the socket went away between the check and the send */
+      }
     }
   }
 
@@ -393,7 +515,10 @@ export class Daemon {
   }
 
   get hasPlugin() {
-    return !!this.plugin && this.plugin.readyState === WebSocket.OPEN;
+    for (const e of this.plugins.values()) {
+      if (e.ws.readyState === WebSocket.OPEN) return true;
+    }
+    return false;
   }
 
   close() {
