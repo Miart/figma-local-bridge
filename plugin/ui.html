@@ -70,7 +70,7 @@
          what the art is bound to. */
       /* The pointer over the octopus says it is tappable, and the art never
          turns into a text selection under the finger. The press itself dims the
-         art (below); the answer — a hop and a beaming face — is the script's. */
+         art (below); the answer — a move, a face and a colour — is the script's. */
       #pet { position: relative; cursor: pointer; user-select: none; }
       #pet:active #mascot { opacity: .7; }
       /* The mascot switch, off. The state rides a data-pet attribute on the root
@@ -108,13 +108,43 @@
       #mascot.m-sleep { color: var(--faint); }
       #mascot.m-ready, #mascot.m-happy { text-shadow: 0 0 6px color-mix(in srgb, var(--ok) 30%, transparent); }
 
-      /* Reactions. Each is re-added with a reflow so it can retrigger. */
+      /* Reactions. Each is re-added with a reflow so it can retrigger. Five
+         moves, because a tap is answered with a different one every time (the
+         script draws them from a shuffled bag). */
       #pet.hop { animation: hop .55s ease; }
       #pet.shake { animation: shake .45s ease; }
       #pet.pop { animation: pop .35s ease; }
+      #pet.spin { animation: spin .6s ease; }
+      #pet.squash { animation: squash .5s ease; }
       @keyframes hop { 0%, 100% { transform: translateY(0) } 35% { transform: translateY(-2px) } 70% { transform: translateY(-1px) } }
       @keyframes shake { 0%, 100% { transform: translateX(0) } 20% { transform: translateX(-2px) } 40% { transform: translateX(2px) } 60% { transform: translateX(-1px) } 80% { transform: translateX(1px) } }
       @keyframes pop { 0%, 100% { transform: scale(1) } 45% { transform: scale(1.04) } }
+      @keyframes spin { 0%, 100% { transform: rotate(0) } 35% { transform: rotate(-8deg) } 70% { transform: rotate(6deg) } }
+      @keyframes squash { 0%, 100% { transform: scale(1, 1) } 35% { transform: scale(1.07, .93) } 65% { transform: scale(.97, 1.04) } }
+
+      /* A tap tints the octopus and its halo, each answer with its own colour:
+         the standing mood still says what the link is doing, the tint only
+         answers the finger. One class plus --tap keeps the palette in the
+         script, next to the reactions that use it. */
+      #pet.c-tap #mascot { color: var(--tap, var(--ok)); text-shadow: 0 0 7px color-mix(in srgb, var(--tap, var(--ok)) 45%, transparent); }
+      #pet.c-tap::before { background: radial-gradient(closest-side, color-mix(in srgb, var(--tap, var(--ok)) 28%, transparent), transparent 80%); }
+      /* The rainbow is the one answer that is not a single colour: the art is
+         text, so the gradient is the ink — the whole spectrum lies across it at
+         once, and the animation turns the palette so the colours flow. The halo
+         behind it holds the same wheel, softly. */
+      #pet.c-rainbow #mascot {
+        color: transparent; -webkit-text-fill-color: transparent;
+        background: linear-gradient(90deg, #ff5f6d, #ffc371, #5ee7a0, #4facfe, #b06ab3, #ff5f6d);
+        background-size: 100% 100%;
+        -webkit-background-clip: text; background-clip: text;
+        text-shadow: none;
+        animation: rainbow-ink 1.3s linear;
+      }
+      #pet.c-rainbow::before {
+        background: conic-gradient(from 0deg, #ff5f6d, #ffc371, #5ee7a0, #4facfe, #b06ab3, #ff5f6d);
+        opacity: .3;
+      }
+      @keyframes rainbow-ink { from { filter: hue-rotate(0deg) } to { filter: hue-rotate(360deg) } }
 
       .zzz { position: absolute; top: 2px; right: -3px; display: flex; gap: 1px; pointer-events: none; }
       .zzz i { font-style: normal; font-size: 9px; color: var(--faint); opacity: 0; animation: drift 2.4s ease-out infinite; }
@@ -215,7 +245,8 @@
       #petToggle { flex: 0 0 auto; font-size: 10px; }
 
       @media (prefers-reduced-motion: reduce) {
-        #pet.hop, #pet.shake, #pet.pop, .zzz i, .dot.warn { animation: none !important; }
+        #pet.hop, #pet.shake, #pet.pop, #pet.spin, #pet.squash,
+        #pet.c-rainbow #mascot, .zzz i, .dot.warn { animation: none !important; }
       }
     </style>
   </head>
@@ -387,6 +418,7 @@
       let flashT = null;
       let tick = 0;
       let blinkUntil = 0;
+      let winkUntil = 0;
 
       function renderMascot() {
         // Hidden mascot: nothing to paint, and the DOM can stay as it was until
@@ -399,7 +431,9 @@
           : STILL ? ART.a
           : (m === "busy" ? (tick % 2 ? ART.b : ART.a)
                           : (Math.floor(tick / 4) % 2 ? ART.b : ART.a));
-        const eyes = m === "ready" && Date.now() < blinkUntil ? ["--", "--"] : (EYES[m] || EYES.ready);
+        const eyes = Date.now() < winkUntil ? ["^^", "--"]
+          : m === "ready" && Date.now() < blinkUntil ? ["--", "--"]
+          : (EYES[m] || EYES.ready);
         const r = EYE_AT.row, c1 = EYE_AT.col, c2 = EYE_AT.right;
         el.mascot.className = "mascot m-" + m;
         el.mascot.textContent = src
@@ -408,7 +442,7 @@
             : line)
           .join("\n");
         // The mood also rides #pet, where it tints the halo. Animation classes
-        // (hop/shake/pop) live on the same element, so swap just the mood one.
+        // (the moves) live on the same element, so swap just the mood one.
         for (const mood of ["ready", "busy", "happy", "sad", "annoyed", "sleep", "look"]) {
           el.pet.classList.toggle("m-" + mood, mood === m);
         }
@@ -426,24 +460,69 @@
         if (flashT) clearTimeout(flashT);
         flashT = setTimeout(() => { flash = null; renderMascot(); }, ms);
       }
+      const MOVES = ["hop", "shake", "pop", "spin", "squash"];
       function pulse(cls) {
-        el.pet.classList.remove(cls);
+        el.pet.classList.remove(...MOVES);
         void el.pet.offsetWidth; // restart the animation
         el.pet.classList.add(cls);
       }
-      el.pet.addEventListener("animationend", () => el.pet.classList.remove("hop", "shake", "pop"));
+      el.pet.addEventListener("animationend", (e) => {
+        if (MOVES.includes(e.animationName)) el.pet.classList.remove(e.animationName);
+      });
 
-      // A tap is answered at once: a hop, or a pop when taps come in quick
-      // succession, plus a beaming face for a moment — the octopus forgives a
-      // sad link while the finger is on it. pointerdown rather than click, so
-      // the answer lands while the finger is still down.
-      let taps = 0, tapped = 0;
+      // A tap is answered at once, and not twice in the same way. Each reaction
+      // brings a movement, an expression and a colour of its own — one colour
+      // for every tap would read as one more state, and the rainbow is the one
+      // answer that is not a single colour at all. The reactions come out of a
+      // shuffled bag, so two taps in a row never repeat and all of them are
+      // seen before one comes back. pointerdown rather than click, so the
+      // answer lands while the finger is still down.
+      const TAP_REACTIONS = [
+        { move: "hop",    mood: "happy",   color: "#ffd166" },             // amber
+        { move: "pop",    mood: "happy",   color: "#ff8fb1" },             // rose
+        { move: "shake",  mood: "annoyed", color: "#ffa25e" },             // orange: a grumpy wiggle
+        { move: "spin",   mood: "happy",   color: "#6fe3ff" },             // sky
+        { move: "squash", mood: "happy",   color: "#c9a7ff" },             // violet
+        { move: "hop",    mood: "happy",   color: "#7bf1a8", wink: true }, // mint
+        { move: "pop",    mood: "happy",   color: "rainbow" },             // the spectrum
+      ];
+      let bag = [];
+      let lastReaction = -1;
+      function nextReaction() {
+        if (!bag.length) {
+          bag = TAP_REACTIONS.map((_, i) => i);
+          for (let i = bag.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [bag[i], bag[j]] = [bag[j], bag[i]];
+          }
+          // A fresh bag must not open with the reaction that just played.
+          if (bag[0] === lastReaction && bag.length > 1) [bag[0], bag[1]] = [bag[1], bag[0]];
+        }
+        lastReaction = bag.shift();
+        return TAP_REACTIONS[lastReaction];
+      }
+      let tintT = null;
       el.pet.addEventListener("pointerdown", () => {
-        const now = Date.now();
-        taps = now - tapped < 900 ? taps + 1 : 1;
-        tapped = now;
-        pulse(taps % 2 ? "hop" : "pop");
-        flashMood("happy", 900);
+        const r = nextReaction();
+        el.pet.classList.remove("c-tap", "c-rainbow");
+        el.pet.style.removeProperty("--tap");
+        if (tintT) clearTimeout(tintT);
+        if (r.color === "rainbow") {
+          el.pet.classList.add("c-rainbow");
+        } else {
+          el.pet.style.setProperty("--tap", r.color);
+          el.pet.classList.add("c-tap");
+        }
+        winkUntil = r.wink ? Date.now() + 900 : 0; // a new reaction owns the face at once
+        pulse(r.move);
+        flashMood(r.mood, 900);
+        // The tint is an answer, not a state: it goes when the move is over,
+        // and the standing mood colour comes back with it.
+        tintT = setTimeout(() => {
+          el.pet.classList.remove("c-tap", "c-rainbow");
+          el.pet.style.removeProperty("--tap");
+          tintT = null;
+        }, r.color === "rainbow" ? 1400 : 900);
       });
 
       // ------------------------------------------------------------ pet switch
