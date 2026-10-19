@@ -79,6 +79,17 @@ export function registerParityTools(server: McpServer, client: FigmaClient, caps
   );
 
   server.tool(
+    "figma_get_layout_tree",
+    "Absolute-geometry snapshot of a subtree in ONE call: per node — parent, size, absoluteTransform (2x3 matrix), absolute layout and render bounds, clip flag. Measured in document-absolute space, the same space a PNG export uses, so it is what you check a rebuild or an atlas against instead of one get_node per layer. The screenshot is a SEPARATE call (`atomicWithScreenshot: false`): geometry first, then capture, and compare `rev`.",
+    {
+      nodeId: figmaNodeId().optional().describe("Scene node to snapshot; defaults to the single selected node"),
+      maxNodes: z.number().int().min(1).max(5000).default(2000).describe("Truncation budget; `truncated` says when it was hit"),
+      fileKey: fileKeyParam,
+    },
+    async (a) => guard(async () => text(await call("get_layout_tree", a))),
+  );
+
+  server.tool(
     "figma_get_screenshot",
     "Render a node as PNG/JPG (returned as an image) or SVG (returned as text).",
     {

@@ -284,6 +284,33 @@ function xml(node: any, depth: number, budget: { n: number; truncated: boolean }
   return s + indent + `</${tag}>\n`;
 }
 
+// ---------------------------------------------------------------- layout snapshot
+
+/** A rectangle as four rounded numbers, or null when the node has none. */
+function bbox(v: any): Json | null {
+  return v ? { x: round(v.x), y: round(v.y), width: round(v.width), height: round(v.height) } : null;
+}
+
+/**
+ * One row of the layout snapshot.
+ *
+ * Deliberately narrower than `describe`/`fullNode`: this is the geometry the
+ * RENDERER used, not the design intent. Fields a node type does not carry are
+ * absent, never zeroed — a zero would read as a real measurement.
+ */
+function layoutEntry(n: any): Json {
+  const entry: Json = { id: n.id, parentId: n.parent ? n.parent.id : null, name: n.name, type: n.type };
+  if (n.visible === false) entry.visible = false;
+  if ("width" in n) entry.size = [round(n.width), round(n.height)];
+  if ("absoluteTransform" in n && Array.isArray(n.absoluteTransform)) {
+    entry.absoluteTransform = n.absoluteTransform.map((row: number[]) => row.map((v) => round(v)));
+  }
+  if ("absoluteBoundingBox" in n) entry.boundingBox = bbox(n.absoluteBoundingBox);
+  if ("absoluteRenderBounds" in n) entry.renderBounds = bbox(n.absoluteRenderBounds);
+  if ("clipsContent" in n && n.clipsContent) entry.clips = true;
+  return entry;
+}
+
 // ---------------------------------------------------------------- variables
 
 async function formatVar(v: Variable): Promise<Json> {
@@ -558,6 +585,66 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
     const budget = { n: 0, truncated: false };
     const tree = await fullNode(node, p.depth === undefined ? 4 : p.depth, budget);
     return { tree, nodes: budget.n, truncated: budget.truncated, page: figma.currentPage.name };
+  },
+
+  /**
+   * Absolute geometry snapshot of a subtree.
+   *
+   * The `x`/`y` our other readers return are relative to the parent — useless
+   * for checking a rebuild against a rendered PNG. This is the other coordinate
+   * space: `absoluteTransform` and the absolute boxes are the numbers the
+   * rasteriser actually used, so N nodes can be verified in one call instead of
+   * N `get_node`s.
+   *
+   * The screenshot stays a SEPARATE call, and `capture` echoes the export
+   * settings that would make the two comparable — `atomicWithScreenshot: false`
+   * says plainly that they were never taken together, instead of leaving the
+   * reader to assume they line up.
+   */
+  async get_layout_tree(p: Json) {
+    const root: any = await nodeOrSelectionOrPage(p.nodeId);
+    if (root.type === "PAGE" || root.type === "DOCUMENT") {
+      throw new Error(
+        "get_layout_tree needs a scene node: a page has no transform. " +
+          "Pass nodeId, or use get_metadata for the page skeleton.",
+      );
+    }
+    const maxNodes = Math.min(Math.max(Number(p.maxNodes) || 2000, 1), 5000);
+    const t0 = Date.now();
+    const nodes: Json[] = [];
+    const stack: any[] = [root];
+    let truncated = false;
+    while (stack.length) {
+      if (nodes.length >= maxNodes) { truncated = true; break; }
+      const n = stack.pop();
+      nodes.push(layoutEntry(n));
+      // Pushed in reverse so children are emitted in layer order.
+      if ("children" in n) for (let i = n.children.length - 1; i >= 0; i--) stack.push(n.children[i]);
+    }
+    const window = bbox(root.absoluteBoundingBox);
+    return {
+      schemaVersion: 1,
+      snapshotId: new Date().toISOString(),
+      atomicWithScreenshot: false,
+      file: { name: figma.root.name, key: (figma as any).fileKey || null },
+      page: { id: figma.currentPage.id, name: figma.currentPage.name },
+      root: { id: root.id, name: root.name, type: root.type },
+      coordinateSpace: "document-absolute",
+      truncated,
+      nodeCount: nodes.length,
+      nodes,
+      capture: {
+        window,
+        exportSettings: {
+          format: "PNG",
+          contentsOnly: true,
+          useAbsoluteBounds: true,
+          constraint: { type: "SCALE", value: 1 },
+        },
+        clipping: "Rectangles are layout AABBs; ancestor masks and painted visibility are not evaluated.",
+      },
+      ms: Date.now() - t0,
+    };
   },
 
   async get_screenshot(p: Json) {

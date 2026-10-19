@@ -79,7 +79,7 @@ try {
 
   const c = await mcpClient();
   const tools = (await c.rpc("tools/list", {})).result.tools.map((t) => t.name);
-  const expected = ["figma_whoami", "figma_get_metadata", "figma_get_design_context", "figma_get_screenshot",
+  const expected = ["figma_whoami", "figma_get_metadata", "figma_get_design_context", "figma_get_layout_tree", "figma_get_screenshot",
     "figma_get_variable_defs", "figma_get_libraries", "figma_search_design_system", "figma_get_figjam",
     "figma_download_assets", "figma_get_code_connect_map", "figma_use", "figma_upload_assets", "figma_add_code_connect_map"];
   const missing = expected.filter((n) => !tools.includes(n));
@@ -94,6 +94,18 @@ try {
     switch (env.method) {
       case "ping": return ok({ ok: true });
       case "get_metadata": return ok({ xml: '<frame id="1:2" name="Card" />\n', nodes: 1, truncated: false });
+      case "get_layout_tree": return ok({
+        schemaVersion: 1, snapshotId: "2026-10-19T00:00:00.000Z", atomicWithScreenshot: false,
+        file: { name: "Test file", key: "FILEKEY" }, page: { id: "0:1", name: "Page 1" },
+        root: { id: env.params.nodeId || "1:2", name: "Card", type: "FRAME" },
+        coordinateSpace: "document-absolute", truncated: false, nodeCount: 2,
+        nodes: [
+          { id: "1:2", parentId: "0:1", name: "Card", type: "FRAME", size: [100, 50], absoluteTransform: [[1, 0, 10], [0, 1, 20]], boundingBox: { x: 10, y: 20, width: 100, height: 50 } },
+          { id: "1:3", parentId: "1:2", name: "Label", type: "TEXT", size: [40, 12], boundingBox: { x: 14, y: 24, width: 40, height: 12 } },
+        ],
+        capture: { window: { x: 10, y: 20, width: 100, height: 50 }, exportSettings: { format: "PNG", contentsOnly: true, useAbsoluteBounds: true, constraint: { type: "SCALE", value: 1 } }, clipping: "Rectangles are layout AABBs." },
+        ms: 3,
+      });
       case "get_screenshot": return ok({ nodeId: "1:2", name: "Card", format: env.params.format, scale: env.params.scale, bytes: 70, width: 1, height: 1, base64: PNG_1x1 });
       case "export_nodes": return ok({ files: [{ nodeId: "1:2", name: "Card/Hero", format: "PNG", bytes: 70, base64: PNG_1x1 }, { nodeId: "9:9", error: "not found or not exportable" }] });
       case "use_figma":
@@ -119,6 +131,16 @@ try {
   check("screenshot caption carries the document rev",
     shot.result.content.find((x) => x.type === "text").text.includes("rev 7"),
     JSON.stringify(shot.result.content.map((x) => x.text || x.type)));
+
+  const layout = c.text(await c.rpc("tools/call", { name: "figma_get_layout_tree", arguments: { nodeId: "1:2" } }));
+  check("get_layout_tree passes absolute geometry through untouched",
+    layout.coordinateSpace === "document-absolute" && layout.nodes[1].boundingBox.x === 14 &&
+    layout.atomicWithScreenshot === false && layout.truncated === false,
+    JSON.stringify(layout).slice(0, 120));
+  const ltReq = seen.find((e) => e.method === "get_layout_tree");
+  check("get_layout_tree sends nodeId and the default truncation budget",
+    ltReq.params.nodeId === "1:2" && ltReq.params.maxNodes === 2000,
+    JSON.stringify(ltReq.params));
 
   // The plugin would answer "node not found" to a hyphenated id, which names
   // the wrong problem. The refusal has to happen at the tool edge, before the
