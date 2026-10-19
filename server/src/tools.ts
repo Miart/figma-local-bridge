@@ -5,6 +5,7 @@ import { figmaNodeId, figmaNodeIds } from "./node-id.js";
 import { fileKeyParam } from "./file-key.js";
 import { BridgeOffline } from "./websocket.js";
 import { registerParityTools } from "./parity-tools.js";
+import { registerCompareTool } from "./compare-tools.js";
 
 export interface Capabilities {
   read: boolean;
@@ -24,8 +25,9 @@ async function guard<T>(fn: () => Promise<T>): Promise<T> {
 const content = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }] });
 
 /**
- * Three tools, not ten. No create_instance / remove / append_child: primitives
- * are how an agent accidentally destroys a design file. Everything mutating is
+ * A handful of tools, not ten: ping, get_selection, inspect, compare, and one
+ * mutating command. No create_instance / remove / append_child — primitives are
+ * how an agent accidentally destroys a design file. Everything mutating is
  * funnelled through one command that validates, snapshots, mutates and verifies.
  */
 export function registerTools(server: McpServer, client: FigmaClient, caps: Capabilities) {
@@ -80,6 +82,9 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   );
 
   registerParityTools(server, client, caps);
+  // Read-only, and useful precisely when nothing should be written: registered
+  // in both modes.
+  registerCompareTool(server, client);
 
   if (!caps.write) {
     server.tool(

@@ -71,6 +71,12 @@ barrier is global. Prefer the specific tools over raw code:
 - `figma_get_selection` is answered from memory (the plugin pushes selection
   changes), so it costs no round trip. `figma_set_selection` also pans the
   viewport, which is the only way to move the user's cursor.
+- `figma_compare` checks a render against a PNG on disk (a mockup, an earlier
+  export, another node written out with `figma_download_assets`) and reports
+  **where** it differs, not just whether: differing area, bounding box, largest
+  clusters, plus a heatmap. It is how a rebuild is proven to have landed
+  instead of eyeballed — and a size mismatch is a finding, while a clean
+  2×/3×/4× ratio means you passed the wrong `scale`.
 
 ## The panel
 

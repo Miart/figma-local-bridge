@@ -8,6 +8,7 @@ import fs from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { homedir } from "node:os";
+import { encodePng, decodePng } from "../server/dist/compare.js";
 
 const PORT = Number(process.env.TEST_PORT || 8896);
 const INFO = join(homedir(), ".local/share/opencode", "figma-bridge-daemon-tools-test.json");
@@ -81,7 +82,8 @@ try {
   const tools = (await c.rpc("tools/list", {})).result.tools.map((t) => t.name);
   const expected = ["figma_whoami", "figma_get_metadata", "figma_get_design_context", "figma_get_layout_tree", "figma_get_screenshot",
     "figma_get_variable_defs", "figma_get_libraries", "figma_search_design_system", "figma_get_figjam",
-    "figma_download_assets", "figma_get_code_connect_map", "figma_use", "figma_upload_assets", "figma_add_code_connect_map"];
+    "figma_download_assets", "figma_get_code_connect_map", "figma_use", "figma_upload_assets", "figma_add_code_connect_map",
+    "figma_compare"];
   const missing = expected.filter((n) => !tools.includes(n));
   check("all parity tools are registered", missing.length === 0, "missing: " + missing.join(","));
 
@@ -159,6 +161,41 @@ try {
     first.path && fs.existsSync(first.path) && fs.readFileSync(first.path).subarray(1, 4).toString() === "PNG" && !first.path.slice(dir.length).includes("/Hero/"),
     JSON.stringify(dl));
   check("download_assets reports per-node errors", dl.files[1].error === "not found or not exportable");
+
+  // figma_compare: the render comes back through the plugin, the reference is a
+  // file on disk, and the answer is a report with a heatmap written beside it.
+  const reportOf = (r) => JSON.parse(r.result.content[0].text.slice(r.result.content[0].text.indexOf("\n\n") + 2));
+  const refSame = join(dir, "ref-same.png");
+  fs.writeFileSync(refSame, Buffer.from(PNG_1x1, "base64"));
+  const cmpSame = reportOf(await c.rpc("tools/call", { name: "figma_compare", arguments: { nodeId: "1:2", reference: refSame } }));
+  check("figma_compare calls the same render identical and writes the heatmap",
+    cmpSame.identical === true && cmpSame.different === 0 && cmpSame.ratioPercent === 0 &&
+    cmpSame.render.rev === 7 && fs.existsSync(cmpSame.heatmap),
+    JSON.stringify(cmpSame));
+
+  const refOther = join(dir, "ref-other.png");
+  fs.writeFileSync(refOther, encodePng({ width: 1, height: 1, rgba: new Uint8Array([0, 0, 255, 255]) }));
+  const cmpDiff = await c.rpc("tools/call", { name: "figma_compare", arguments: { nodeId: "1:2", reference: refOther } });
+  const diffReport = reportOf(cmpDiff);
+  check("figma_compare reports the one differing pixel and where it is",
+    diffReport.identical === false && diffReport.different === 1 && diffReport.ratioPercent === 100 &&
+    JSON.stringify(diffReport.bbox) === "[0,0,1,1]" && diffReport.clusters[0].pixels === 1,
+    JSON.stringify(diffReport));
+  check("figma_compare returns the heatmap as an MCP image block",
+    cmpDiff.result.content.some((x) => x.type === "image" && x.mimeType === "image/png"));
+  const heat = decodePng(fs.readFileSync(diffReport.heatmap));
+  check("the heatmap on disk is a readable PNG of the compared area", heat.width === 1 && heat.height === 1);
+
+  // Validation has to happen before the render, not after: a reference that is
+  // not a picture means there is nothing to compare against.
+  const seenBeforeCompare = seen.length;
+  const notPng = join(dir, "not-a-picture.txt");
+  fs.writeFileSync(notPng, "hello");
+  const cmpBad = await c.rpc("tools/call", { name: "figma_compare", arguments: { nodeId: "1:2", reference: notPng } });
+  const cmpBadMsg = String(cmpBad.error?.message ?? cmpBad.result?.content?.[0]?.text ?? JSON.stringify(cmpBad));
+  check("a non-PNG reference is refused before anything is rendered",
+    /reference must be a PNG/.test(cmpBadMsg) && seen.length === seenBeforeCompare,
+    cmpBadMsg.slice(0, 140));
 
   // figma_use now requires an explicit destructive opt-in plus a named scope;
   // see use-figma.gate.test.mjs for the refusal cases.

@@ -109,7 +109,7 @@ Run the plugin in each Figma file you want to drive — every panel connects to 
 
 ## Tools
 
-17 tools mirroring Figma's official server, plus 5 local ones — 22 in total.
+18 tools mirroring Figma's official server, plus 5 local ones — 23 in total.
 
 Every tool also accepts an optional `fileKey` to choose among several open Figma files; with one file it can be omitted, with several a call that omits it is refused and lists the connected files (`figma_ping` shows the same list).
 
@@ -141,8 +141,9 @@ The server also ships an **operating guide** — `fileKey` routing, what `rev` a
 |---|---|
 | `figma_ping` | Health check: verifies the plugin is paired, reports the active page, and lists the connected files (`fileKey` + name) |
 | `figma_get_selection` | Current selection, answered from memory — the plugin pushes selection changes, so this costs no round trip |
-| `figma_get_layout_tree` | Absolute geometry of a whole subtree in one call: per node `absoluteTransform` (2×3 matrix), absolute layout and render bounds, clip flag. Document-absolute space — the one a PNG export uses — so a rebuild (atlas, sprite sheet) can be checked against a capture without one `get_node` per layer. Geometry and screenshot stay separate calls (`atomicWithScreenshot: false`): snapshot, then capture, then compare `rev` |
+| `figma_get_layout_tree` | Absolute geometry of a whole subtree in one call: per node `absoluteTransform` (2×3 matrix), absolute layout and render bounds, clip flag. Document-absolute space — the one a PNG export uses — so a rebuild (atlas, sprite sheet) can be checked against a capture without one `get_node` per layer. Geometry and screenshot stay separate calls (`atomicWithScreenshot: false`): snapshot, then capture, then compare `rev` — and `figma_compare` for the pixels themselves |
 | `figma_inspect` | Compact structure + semantic fingerprint; `compareWith` returns `EQUIVALENT` / `DIFFERENT` / `INCONCLUSIVE` *before* you mutate |
+| `figma_compare` | Diff a live render against a PNG on disk — a mockup, an earlier export, or another node written out with `figma_download_assets`. The diff runs in the MCP server, so the document is never touched: it answers with the differing area, its bounding box and the largest clusters, and writes a heatmap PNG next to the reference. `tolerance` absorbs anti-aliasing; a size mismatch is reported rather than hidden, and a clean 2×/3×/4× ratio names the `scale` you meant |
 | `figma_replace_repeated_with_component` | Replaces repeated identical nodes with instances of one master component, in a single transactional call. Refuses unless every target is provably equivalent; try `dryRun: true` first |
 
 Not available through a plugin (cloud-only in the official server): `create_new_file`, `generate_figma_design`, `generate_diagram`, `export_video`, shaders, Weave, cloud Code Connect sync.
@@ -175,7 +176,7 @@ npm test           # rebuilds artifacts, then unit + e2e with --test-concurrency
 
 `npm test` rebuilds `server/dist` and `plugin/*.mjs` first because the tests import the built modules — a test running against a stale artifact passes on code Figma will never execute. The suites run serially (`--test-concurrency=1`): e2e tests spin up real daemons on real ports and share one token file, and parallel runs make them flaky by construction.
 
-Current suites: **172 unit checks** — 59 `node:test` cases plus 113 harness checks (`commands`, `fingerprint`, `scope`, `use-figma.gate`) — and **76 e2e checks** (`daemon` 12, `link-state` 8, `mcp` 16, `multifile` 23, `tools` 17; the per-file summaries add up to 68 because `link-state` prints its checks without one).
+Current suites: **192 unit checks** — 79 `node:test` cases plus 113 harness checks (`commands`, `fingerprint`, `scope`, `use-figma.gate`) — and **81 e2e checks** (`daemon` 12, `link-state` 8, `mcp` 16, `multifile` 23, `tools` 22; the per-file summaries add up to 73 because `link-state` prints its checks without one).
 
 ## Troubleshooting
 
