@@ -77,7 +77,7 @@
       body[data-pet="hidden"] #pet { display: none; }
       /* A soft halo that follows the mood: this is most of the "cosy". */
       #pet::before {
-        content: ""; position: absolute; inset: -14px -20px -22px -20px;
+        content: ""; position: absolute; inset: -7px -10px -11px -10px;
         border-radius: 50%; pointer-events: none;
         background: radial-gradient(closest-side, color-mix(in srgb, var(--faint) 20%, transparent), transparent 80%);
         transition: background .4s;
@@ -91,32 +91,34 @@
       #pet.m-sad::before {
         background: radial-gradient(closest-side, color-mix(in srgb, var(--err) 18%, transparent), transparent 80%);
       }
-      /* The art is one picture: tight leading (the panel's mono cell is 0.618em
-         wide, so 22px makes every cell a 13.6x22px block) and 21 cells x 10
-         lines are a 285.6x220 box — the panel is 320 wide with 10px of body
-         padding, so the picture never touches the edges. */
-      #mascot { position: relative; margin: 0; font: inherit; font-size: 22px; line-height: 1; white-space: pre; transition: color .25s; }
+      /* The art is one picture, and the font size is its only size knob: the
+         grid stays 21x10, every character just gets smaller (the panel's mono
+         cell is 0.618em wide, so 11px makes every cell a 6.8x11px block) and
+         21 cells x 10 lines are a 142.8x110 box. Halving the font rather than
+         the grid keeps the same picture — twice the resolution of a coarser
+         one would look — while the octopus takes half the height. */
+      #mascot { position: relative; margin: 0; font: inherit; font-size: 11px; line-height: 1; white-space: pre; transition: color .25s; }
       #mascot.m-ready, #mascot.m-happy, #mascot.m-look { color: var(--ok); }
       #mascot.m-busy, #mascot.m-annoyed { color: var(--warn); }
       #mascot.m-sad { color: var(--err); }
       #mascot.m-sleep { color: var(--faint); }
-      #mascot.m-ready, #mascot.m-happy { text-shadow: 0 0 10px color-mix(in srgb, var(--ok) 30%, transparent); }
+      #mascot.m-ready, #mascot.m-happy { text-shadow: 0 0 6px color-mix(in srgb, var(--ok) 30%, transparent); }
 
       /* Reactions. Each is re-added with a reflow so it can retrigger. */
       #pet.hop { animation: hop .55s ease; }
       #pet.shake { animation: shake .45s ease; }
       #pet.pop { animation: pop .35s ease; }
-      @keyframes hop { 0%, 100% { transform: translateY(0) } 35% { transform: translateY(-4px) } 70% { transform: translateY(-1px) } }
-      @keyframes shake { 0%, 100% { transform: translateX(0) } 20% { transform: translateX(-3px) } 40% { transform: translateX(3px) } 60% { transform: translateX(-2px) } 80% { transform: translateX(2px) } }
-      @keyframes pop { 0%, 100% { transform: scale(1) } 45% { transform: scale(1.07) } }
+      @keyframes hop { 0%, 100% { transform: translateY(0) } 35% { transform: translateY(-2px) } 70% { transform: translateY(-1px) } }
+      @keyframes shake { 0%, 100% { transform: translateX(0) } 20% { transform: translateX(-2px) } 40% { transform: translateX(2px) } 60% { transform: translateX(-1px) } 80% { transform: translateX(1px) } }
+      @keyframes pop { 0%, 100% { transform: scale(1) } 45% { transform: scale(1.04) } }
 
-      .zzz { position: absolute; top: 4px; right: -6px; display: flex; gap: 1px; pointer-events: none; }
-      .zzz i { font-style: normal; font-size: 11px; color: var(--faint); opacity: 0; animation: drift 2.4s ease-out infinite; }
+      .zzz { position: absolute; top: 2px; right: -3px; display: flex; gap: 1px; pointer-events: none; }
+      .zzz i { font-style: normal; font-size: 9px; color: var(--faint); opacity: 0; animation: drift 2.4s ease-out infinite; }
       .zzz i:last-child { animation-delay: 1.2s; }
       @keyframes drift {
-        0%   { opacity: 0; transform: translate(0, 4px) scale(.7); }
+        0%   { opacity: 0; transform: translate(0, 2px) scale(.7); }
         25%  { opacity: 1; }
-        100% { opacity: 0; transform: translate(4px, -7px) scale(1.05); }
+        100% { opacity: 0; transform: translate(2px, -4px) scale(1.05); }
       }
 
       .chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; max-width: 100%; min-width: 0; }

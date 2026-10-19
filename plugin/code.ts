@@ -27,7 +27,7 @@ type Json = any;
  * The panel window.
  *
  * Its height is not fixed any more: the UI measures what it rendered and asks
- * for a window that fits (figma.ui.resize). Hiding the mascot is worth ~230px,
+ * for a window that fits (figma.ui.resize). Hiding the mascot is worth ~120px,
  * the error line ~20, and neither should leave dead space behind. Width never
  * changes; the height is clamped here, because the UI cannot know Figma's
  * limits, and reseeded from clientStorage, because the first frame should
@@ -36,7 +36,7 @@ type Json = any;
 const UI_WIDTH = 320;
 const UI_MIN_H = 140;
 const UI_MAX_H = 900;
-const UI_H_OPEN = 420; // the first frame's guess; the UI reports the real height
+const UI_H_OPEN = 310; // the first frame's guess; the UI reports the real height
 
 let petHidden = false;
 
