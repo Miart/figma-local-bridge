@@ -36,7 +36,7 @@ async function guard<T>(fn: () => Promise<T>): Promise<T> {
 export function registerCompareTool(server: McpServer, client: FigmaClient) {
   server.tool(
     "figma_compare",
-    "Render a node and diff it against a PNG on disk — a mockup, an earlier export, or another node exported with figma_download_assets. Reports the differing area, its bounding box and the largest clusters, and writes a heatmap. Anti-aliasing is absorbed by `tolerance`; a size mismatch is reported, never hidden. Read-only: the document is not touched.",
+    "Render a node and diff it against a PNG on disk — a mockup, an earlier export, or another node exported with figma_download_assets. Reports the differing area, its bounding box in the reference's own pixels (top-left origin, so a box can be cropped straight out of that PNG) and the largest clusters, and writes a heatmap. Anti-aliasing is absorbed by `tolerance`; a size mismatch is reported, never hidden. Read-only: the document is not touched.",
     {
       nodeId: figmaNodeId().describe("The node to render now"),
       reference: z.string().describe("Path to the PNG to compare against"),
