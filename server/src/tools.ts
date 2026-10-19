@@ -9,6 +9,7 @@ import { registerCompareTool } from "./compare-tools.js";
 import { registerCheckpointTools } from "./checkpoint-tools.js";
 import { registerOpsTools } from "./ops-tools.js";
 import { registerExportTools } from "./export-tools.js";
+import { registerJournalTools } from "./journal-tools.js";
 
 export interface Capabilities {
   read: boolean;
@@ -97,6 +98,9 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   // Exports are reads of the document and writes of artefacts: usable with write
   // access off, which is exactly when a handoff or a game build wants them.
   registerExportTools(server, client);
+  // The journal is local and needs neither the daemon nor the plugin: it answers
+  // from a file, which is the point — it works when the live half is gone.
+  registerJournalTools(server);
 
   if (!caps.write) {
     server.tool(

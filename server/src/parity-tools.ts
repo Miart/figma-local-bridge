@@ -243,11 +243,11 @@ export function registerParityTools(server: McpServer, client: FigmaClient, caps
       allowPageWide: z.boolean().optional().default(false).describe("Run unconfined — refused by default."),
       allowGlobalChanges: z.boolean().optional().default(false).describe("Permit variables/styles/paints changes, which are not inside any subtree."),
       verbose: z.boolean().optional().default(false).describe("Return full node objects instead of the compact id/type/name form."),
-      description: z.string().optional().describe("One line on what this does (for the log)"),
+      description: z.string().optional().describe("One line on what this does — recorded in the local journal (figma_journal)"),
       timeoutMs: z.number().int().min(1000).max(110_000).default(30_000),
       fileKey: fileKeyParam,
     },
-    async ({ code, allowDestructive, scopeNodeId, allowPageWide, allowGlobalChanges, verbose, timeoutMs, fileKey }) =>
+    async ({ code, allowDestructive, scopeNodeId, allowPageWide, allowGlobalChanges, verbose, timeoutMs, description, fileKey }) =>
       guard(async () => {
         if (!caps.destructive) {
           throw new Error(
@@ -266,7 +266,7 @@ export function registerParityTools(server: McpServer, client: FigmaClient, caps
         }
         const { result: r, rev, replayed } = await callMeta<any>(
           "use_figma",
-          { code, allowDestructive, scopeNodeId, allowPageWide, allowGlobalChanges, verbose, timeoutMs, fileKey },
+          { code, allowDestructive, scopeNodeId, allowPageWide, allowGlobalChanges, verbose, timeoutMs, description, fileKey },
           timeoutMs + 15_000,
         );
         return text({

@@ -86,7 +86,8 @@ export function registerOpsTools(server: McpServer, client: FigmaClient) {
                   : null,
                 note:
                   "`queued` means the call has not started: figma_cancel can still stop it, and nothing of it has run. " +
-                  "A `running` call cannot be interrupted, and `recent` is where a call that finished after its caller gave up shows up — with the answer it returned.",
+                  "A `running` call cannot be interrupted, and `recent` is where a call that finished after its caller gave up shows up — with the answer it returned. " +
+                  "This view is the live half and dies with the processes; figma_journal has the same trail durably, including calls this process has already forgotten.",
               },
               null,
               2,
