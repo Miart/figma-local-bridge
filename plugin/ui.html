@@ -110,39 +110,38 @@
 
       /* Reactions. Each is re-added with a reflow so it can retrigger. Five
          moves, because a tap is answered with a different one every time (the
-         script draws them from a shuffled bag). */
+         script draws them from a shuffled bag). No rotation: a tilted grid of
+         characters reads as a picture, not as ASCII; the moves are small
+         shifts and squashes around the art's own frame. */
       #pet.hop { animation: hop .55s ease; }
       #pet.shake { animation: shake .45s ease; }
       #pet.pop { animation: pop .35s ease; }
-      #pet.spin { animation: spin .6s ease; }
+      #pet.nod { animation: nod .5s ease; }
       #pet.squash { animation: squash .5s ease; }
       @keyframes hop { 0%, 100% { transform: translateY(0) } 35% { transform: translateY(-2px) } 70% { transform: translateY(-1px) } }
       @keyframes shake { 0%, 100% { transform: translateX(0) } 20% { transform: translateX(-2px) } 40% { transform: translateX(2px) } 60% { transform: translateX(-1px) } 80% { transform: translateX(1px) } }
       @keyframes pop { 0%, 100% { transform: scale(1) } 45% { transform: scale(1.04) } }
-      @keyframes spin { 0%, 100% { transform: rotate(0) } 35% { transform: rotate(-8deg) } 70% { transform: rotate(6deg) } }
-      @keyframes squash { 0%, 100% { transform: scale(1, 1) } 35% { transform: scale(1.07, .93) } 65% { transform: scale(.97, 1.04) } }
+      @keyframes nod { 0%, 100% { transform: translateY(0) } 40% { transform: translateY(2px) } 70% { transform: translateY(1px) } }
+      @keyframes squash { 0%, 100% { transform: scale(1, 1) } 35% { transform: scale(1.05, .95) } 65% { transform: scale(.98, 1.02) } }
 
-      /* A tap tints the octopus and its halo, each answer with its own colour:
-         the standing mood still says what the link is doing, the tint only
-         answers the finger. One class plus --tap keeps the palette in the
-         script, next to the reactions that use it. */
+      /* A tap tints the octopus itself, each answer with its own colour: the
+         standing mood still says what the link is doing, the tint only answers
+         the finger. One class plus --tap keeps the palette in the script, next
+         to the reactions that use it. The tint adds no disc of its own: a
+         circle behind the glyphs would read as a badge, and the octopus is a
+         grid of characters. */
       #pet.c-tap #mascot { color: var(--tap, var(--ok)); text-shadow: 0 0 7px color-mix(in srgb, var(--tap, var(--ok)) 45%, transparent); }
-      #pet.c-tap::before { background: radial-gradient(closest-side, color-mix(in srgb, var(--tap, var(--ok)) 28%, transparent), transparent 80%); }
       /* The rainbow is the one answer that is not a single colour: the art is
-         text, so the gradient is the ink — the whole spectrum lies across it at
-         once, and the animation turns the palette so the colours flow. The halo
-         behind it holds the same wheel, softly. */
+         text, so the gradient is the ink. It rises from the bottom centre — the
+         same light the tentacles sit in — and the animation turns the palette,
+         so the colours flow without moving a single cell. */
       #pet.c-rainbow #mascot {
         color: transparent; -webkit-text-fill-color: transparent;
-        background: linear-gradient(90deg, #ff5f6d, #ffc371, #5ee7a0, #4facfe, #b06ab3, #ff5f6d);
+        background: radial-gradient(circle at 50% 100%, #ff5f6d, #ffc371 16%, #5ee7a0 34%, #4facfe 52%, #b06ab3 72%, #ff5f6d);
         background-size: 100% 100%;
         -webkit-background-clip: text; background-clip: text;
         text-shadow: none;
         animation: rainbow-ink 1.3s linear;
-      }
-      #pet.c-rainbow::before {
-        background: conic-gradient(from 0deg, #ff5f6d, #ffc371, #5ee7a0, #4facfe, #b06ab3, #ff5f6d);
-        opacity: .3;
       }
       @keyframes rainbow-ink { from { filter: hue-rotate(0deg) } to { filter: hue-rotate(360deg) } }
 
@@ -245,7 +244,7 @@
       #petToggle { flex: 0 0 auto; font-size: 10px; }
 
       @media (prefers-reduced-motion: reduce) {
-        #pet.hop, #pet.shake, #pet.pop, #pet.spin, #pet.squash,
+        #pet.hop, #pet.shake, #pet.pop, #pet.nod, #pet.squash,
         #pet.c-rainbow #mascot, .zzz i, .dot.warn { animation: none !important; }
       }
     </style>
@@ -460,7 +459,7 @@
         if (flashT) clearTimeout(flashT);
         flashT = setTimeout(() => { flash = null; renderMascot(); }, ms);
       }
-      const MOVES = ["hop", "shake", "pop", "spin", "squash"];
+      const MOVES = ["hop", "shake", "pop", "nod", "squash"];
       function pulse(cls) {
         el.pet.classList.remove(...MOVES);
         void el.pet.offsetWidth; // restart the animation
@@ -481,7 +480,7 @@
         { move: "hop",    mood: "happy",   color: "#ffd166" },             // amber
         { move: "pop",    mood: "happy",   color: "#ff8fb1" },             // rose
         { move: "shake",  mood: "annoyed", color: "#ffa25e" },             // orange: a grumpy wiggle
-        { move: "spin",   mood: "happy",   color: "#6fe3ff" },             // sky
+        { move: "nod",    mood: "happy",   color: "#6fe3ff" },             // sky
         { move: "squash", mood: "happy",   color: "#c9a7ff" },             // violet
         { move: "hop",    mood: "happy",   color: "#7bf1a8", wink: true }, // mint
         { move: "pop",    mood: "happy",   color: "rainbow" },             // the spectrum
