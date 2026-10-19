@@ -226,7 +226,16 @@ export function registerParityTools(server: McpServer, client: FigmaClient, caps
     "Run Plugin API JavaScript inside the open Figma file (async function body; `figma` and a capturing `console` are in scope; `return` a value to get it back). One call = one undo step. " +
       "SAFETY: arbitrary code cannot be sandboxed, so the plugin indexes the page before and after, and ROLLS BACK the call if anything outside `scopeNodeId` was created, deleted, reparented or altered, if the scope root itself disappeared, or if page-global state (variables/styles/paints) changed. " +
       "Known limits: fire-and-forget async work that lands after the diff is not covered, and edits inside an existing node are detected only by a cheap signature (type, name, child count, text length), not pixel-exact. " +
-      "Requires allowDestructive:true, and scopeNodeId unless allowPageWide:true. Prefer small calls and return the ids you create.",
+      "Requires allowDestructive:true, and scopeNodeId unless allowPageWide:true. Prefer small calls and return the ids you create. " +
+      "A third argument `flb` is a small helper set for this manifest's traps (dynamic-page mode, font loading, absolute vs parent-relative coordinates): " +
+      "`await flb.byId(id)` resolves a node id (figma.getNodeById throws in dynamic-page mode; the error says an id from another file never resolves); " +
+      "`flb.find({within, name, match, type})` / `flb.one(...)` search descendants and refuse to answer with a truncated list or an ambiguous pick; " +
+      "`flb.bbox(node, {render:true})` gives ABSOLUTE bounds (render bounds include shadows/strokes — the ones packing needs); " +
+      "`flb.clear(node)` removes children and returns what went; " +
+      "`flb.flatten(node)` detaches every instance in a subtree (outermost first) and throws rather than leave it half flat; " +
+      "`flb.grid(nodes, {parent, cell, columns, gap, origin, fit})` lays nodes out in uniform atlas cells at ABSOLUTE coordinates, optionally scaling them down to fit; " +
+      "`await flb.text(content, {parent, x, y, size, font, fills})` loads the font before writing characters. " +
+      "The write helpers refuse a target outside scopeNodeId, or on a page other than the current one (the scope guard only indexes one page), BEFORE writing anything.",
     {
       code: z.string().describe("Body of an async function. Example: `const f = figma.createFrame(); f.name='Card'; return f.id`"),
       allowDestructive: z.boolean().describe("Must be true. Acknowledges that this runs arbitrary Plugin API code."),

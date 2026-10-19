@@ -49,6 +49,11 @@ Prefer figma_inspect (compareWith) and
 figma_replace_repeated_with_component (dryRun first) over figma_use, which is
 raw Plugin API behind allowDestructive + scopeNodeId, rolls back anything
 outside the scope, and needs allowGlobalChanges for variables and styles.
+Snippets get a third argument, flb (plugin/helpers.ts): byId/find/one, bbox,
+clear, flatten, grid and text, which handle this manifest's traps —
+getNodeById throws in dynamic-page mode, writing characters needs a loaded
+font, and node.x is parent-relative while bbox() is absolute. Its write
+helpers refuse an out-of-scope or other-page target before writing.
 `;
 
 function readGuide(): string {

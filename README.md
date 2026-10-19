@@ -134,7 +134,7 @@ The server also ships an **operating guide** — `fileKey` routing, what `rev` a
 | `figma_set_selection` | Select nodes **and pan the viewport to them** — the only way to move the user's cursor |
 | `figma_get_font_inventory` | Fonts actually used by the file, with per-text-node counts |
 | `figma_list_file_components_for_code_connect` | Inventory of every component in the file |
-| `figma_use` | Arbitrary Plugin API snippet under scope protection; the answer carries `rev`, `replayed`, `ms` and `nodes` |
+| `figma_use` | Arbitrary Plugin API snippet under scope protection; the answer carries `rev`, `replayed`, `ms` and `nodes`. A third argument, `flb`, is a snippet standard library for this manifest's traps — `byId` (`getNodeById` throws in dynamic-page mode), `find`/`one`, `bbox` (absolute layout or render bounds), `clear`, `flatten` (detach every instance), `grid` (uniform atlas cells at absolute coordinates), `text` (loads the font first) — and its write helpers refuse an out-of-scope or other-page target *before* writing |
 
 **Local additions:**
 
@@ -163,7 +163,7 @@ The bridge edits real design files with an agent at the wheel, so most of the en
 - **An abandoned write does not land unseen.** Writes are chained, so a call can wait behind another write for longer than its caller is willing to wait — and when the timeout fires, the queued write would have run anyway, at a revision nobody was watching. Instead the call stays visible: `figma_ops` shows it `queued` (nothing of it has run), `running`, or finished *after* the caller gave up with the answer it returned; `figma_cancel` stops a `queued` one, answering its caller immediately with `OP_CANCELLED` and leaving `rev` untouched because the document did not move. A `running` call is refused loudly (`OP_RUNNING`) — Figma runs plugin code to completion, so any tool claiming to interrupt it would be lying.
 - **Fast-fail offline.** A call waits one 2-second grace period (`LINK_GRACE_MS`) for a reconnecting plugin, then fails with a precise reason. A request that was never sent is not retried at all.
 - **No guessing between files.** With several files connected, a call without `fileKey` is refused client-side *before* the request is sent — both the client (`server/src/figma.ts`) and the daemon (`server/src/link.ts`) check independently, and both name the connected files. A wrong file here is a wrong edit, so neither side ever "picks the most recent".
-- **Scope guard + fingerprint diff.** `figma_use` runs against a scoped, fingerprint-checked node set and is rolled back if the document drifts outside the scope. Switching pages inside a call is refused (`currentpagechange`): one call per page, or `figma_set_page` first.
+- **Scope guard + fingerprint diff.** `figma_use` runs against a scoped, fingerprint-checked node set and is rolled back if the document drifts outside the scope. Switching pages inside a call is refused (`currentpagechange`): one call per page, or `figma_set_page` first. The snippet's own helpers (`flb`) make the same judgement before a write: a target outside `scopeNodeId`, or on another page — which the one-page diff could not see — is refused at the line that caused it, not by the rollback at the end.
 - **Timeouts don't roll back.** A `Promise.race` stops waiting, but the snippet keeps running and may still write — the message says exactly that instead of pretending "(rolled back)".
 - **Stale screenshots are detectable.** Figma caches exports. `rev` travels in the caption, so identical bytes with a higher `rev` means the render is stale, not that the edit did nothing.
 - **Gated writes.** `FIGMA_BRIDGE_WRITE=0` makes the bridge read-only; `figma_use` additionally needs `FIGMA_BRIDGE_DESTRUCTIVE=1` and an explicit scope.
@@ -182,7 +182,7 @@ npm test           # rebuilds artifacts, then unit + e2e with --test-concurrency
 
 `npm test` rebuilds `server/dist` and `plugin/*.mjs` first because the tests import the built modules — a test running against a stale artifact passes on code Figma will never execute. The suites run serially (`--test-concurrency=1`): e2e tests spin up real daemons on real ports and share one token file, and parallel runs make them flaky by construction.
 
-Current suites: **306 unit checks** — 84 `node:test` cases plus 222 harness checks (`commands` 29, `fingerprint` 42, `scope` 32, `use-figma.gate` 10, `checkpoint` 57, `checkpoint-store` 52) — and **121 e2e checks** (`daemon` 12, `link-state` 8, `mcp` 16, `multifile` 23, `tools` 30, `checkpoint` 32; the per-file summaries add up to 113 because `link-state` prints its checks without one).
+Current suites: **323 unit checks** — 101 `node:test` cases plus 222 harness checks (`commands` 29, `fingerprint` 42, `scope` 32, `use-figma.gate` 10, `checkpoint` 57, `checkpoint-store` 52) — and **121 e2e checks** (`daemon` 12, `link-state` 8, `mcp` 16, `multifile` 23, `tools` 30, `checkpoint` 32; the per-file summaries add up to 113 because `link-state` prints its checks without one).
 
 ## Troubleshooting
 

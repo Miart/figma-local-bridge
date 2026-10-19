@@ -61,6 +61,53 @@ barrier is global. Prefer the specific tools over raw code:
 - Writes can be off: `FIGMA_BRIDGE_WRITE=0` leaves the mutating tools
   unregistered, and `figma_use` additionally needs `FIGMA_BRIDGE_DESTRUCTIVE=1`.
 
+## The snippet standard library (`flb`)
+
+`use_figma` runs its body with three arguments: `figma`, `console` and `flb`.
+`flb` is not a second API — it is the Plugin API with this manifest's traps
+named (`plugin/helpers.ts`), so a snippet does not rediscover them by failing:
+
+- the manifest declares `"documentAccess": "dynamic-page"`, where
+  `figma.getNodeById` **throws**. `await flb.byId(id)` uses the async form and
+  says when an id belongs to another file.
+- `flb.find({within, name, match, type})` and `flb.one(...)` search descendants
+  (`match` is a RegExp or a pattern string). Neither will answer with a silently
+  truncated list; `one` refuses an ambiguous pick and names what else matched.
+- `flb.bbox(node, {render: true})` returns **absolute** bounds. `render: true`
+  is what is actually drawn — shadows and strokes included — and that is what
+  packing sprites has to use, because layout bounds stop at the node's box. A
+  node with nothing to draw reports layout bounds and says the render bounds
+  were null.
+- `flb.clear(node)` removes the children and returns what was removed.
+- `flb.flatten(node)` detaches every instance in the subtree, outermost first
+  (Figma's own `detachInstance`, so overrides survive) — the flat-sprite step.
+  It throws if anything could not be detached instead of reporting a half-flat
+  tree.
+- `flb.grid(nodes, {parent, cell, columns, gap, origin, fit})` arranges nodes in
+  uniform cells — the atlas layout. `origin` and the returned cell boxes are
+  ABSOLUTE document coordinates; `cell` defaults to the largest render bounds;
+  `fit: true` scales sprites DOWN into their cells (never up). It refuses the
+  three cases where placement would quietly not happen: an auto-layout parent
+  (unless the children are `layoutPositioning = "ABSOLUTE"`), a node that cannot
+  be resized (an INSTANCE — flatten it first; a HUG-sized frame), and nodes
+  living in different parents.
+- `await flb.text(content, {parent, x, y, size, font, fills})` loads the font
+  before writing characters — the step whose absence reads as a font error.
+  `fills: "#ffcc00"` becomes a paint through `figma.util.solidPaint`.
+- The write helpers refuse a target **outside the declared scope**, and a node
+  on **another page** (the scope guard indexes one page), *before* writing: a
+  call that would be rolled back at the end fails at the line that caused it.
+
+An atlas, end to end, in one call:
+
+```js
+const sheet = flb.one({ name: "Atlas" });
+const sprites = flb.find({ type: "INSTANCE", match: "^sym_" }).map((s) => flb.flatten(s).root);
+flb.clear(sheet);
+const placed = flb.grid(sprites, { parent: sheet, cell: 128, columns: 4, fit: true });
+return { cells: placed.cells, resized: placed.resized, notes: placed.notes };
+```
+
 ## Reading
 
 - `figma_get_metadata` is the cheap way to find ids; `figma_inspect` gives the
