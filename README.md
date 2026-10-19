@@ -82,7 +82,8 @@ Without the plugin running, the MCP server still starts and every tool answers `
 | `FIGMA_BRIDGE_INFO_FILE` | `~/.local/share/opencode/figma-bridge-daemon.json` | State file: pid, port, `clientKey`, plugin token |
 | `FIGMA_BRIDGE_TOKEN_FILE` | `~/.local/share/opencode/figma-bridge-daemon.secret` | Persistent plugin token (`0600`) |
 | `FIGMA_BRIDGE_WRITE` | `1` | `0` — read-only: mutation tools are not even registered |
-| `FIGMA_BRIDGE_DESTRUCTIVE` | `0` | `1` — allow `figma_use` (raw Plugin API snippets) |
+| `FIGMA_BRIDGE_DESTRUCTIVE` | `0` | `1` — allow `figma_use` (raw Plugin API snippets) and a real `figma_checkpoint` restore |
+| `FIGMA_BRIDGE_CHECKPOINTS_DIR` | `~/.local/share/opencode/figma-bridge-checkpoints` | Where `figma_checkpoint` keeps its files, one directory per `fileKey` |
 
 Don't run a second bridge instance: the port is fixed, so the second daemon exits with `EADDRINUSE` (see Troubleshooting).
 
@@ -109,7 +110,7 @@ Run the plugin in each Figma file you want to drive — every panel connects to 
 
 ## Tools
 
-18 tools mirroring Figma's official server, plus 5 local ones — 23 in total.
+18 tools mirroring Figma's official server, plus 6 local ones — 24 in total.
 
 Every tool also accepts an optional `fileKey` to choose among several open Figma files; with one file it can be omitted, with several a call that omits it is refused and lists the connected files (`figma_ping` shows the same list).
 
@@ -145,6 +146,7 @@ The server also ships an **operating guide** — `fileKey` routing, what `rev` a
 | `figma_inspect` | Compact structure + semantic fingerprint; `compareWith` returns `EQUIVALENT` / `DIFFERENT` / `INCONCLUSIVE` *before* you mutate |
 | `figma_compare` | Diff a live render against a PNG on disk — a mockup, an earlier export, or another node written out with `figma_download_assets`. The diff runs in the MCP server, so the document is never touched: it answers with the differing area, its bounding box and the largest clusters, and writes a heatmap PNG next to the reference. `tolerance` absorbs anti-aliasing; a size mismatch is reported rather than hidden, and a clean 2×/3×/4× ratio names the `scale` you meant |
 | `figma_replace_repeated_with_component` | Replaces repeated identical nodes with instances of one master component, in a single transactional call. Refuses unless every target is provably equivalent; try `dryRun: true` first |
+| `figma_checkpoint` | Undo, without an undo stack: `save` describes a subtree as data (one JSON file per file, under `~/.local/share/opencode/figma-bridge-checkpoints/<fileKey>/`), `show` diffs the live subtree against it field by field, `restore` replaces the target's children from it in **one** transaction — dry run by default — and then dumps the subtree again to *verify*: `verified: true` only when that second diff is empty. Refuses a truncated dump, a `GROUP`/`INSTANCE`/page target, and unsupported node types unless `allowPartial`; a save lists what a rebuild cannot carry (instance interiors, per-run text styling, bindings) so the losses travel with the data |
 
 Not available through a plugin (cloud-only in the official server): `create_new_file`, `generate_figma_design`, `generate_diagram`, `export_video`, shaders, Weave, cloud Code Connect sync.
 
@@ -162,6 +164,7 @@ The bridge edits real design files with an agent at the wheel, so most of the en
 - **Timeouts don't roll back.** A `Promise.race` stops waiting, but the snippet keeps running and may still write — the message says exactly that instead of pretending "(rolled back)".
 - **Stale screenshots are detectable.** Figma caches exports. `rev` travels in the caption, so identical bytes with a higher `rev` means the render is stale, not that the edit did nothing.
 - **Gated writes.** `FIGMA_BRIDGE_WRITE=0` makes the bridge read-only; `figma_use` additionally needs `FIGMA_BRIDGE_DESTRUCTIVE=1` and an explicit scope.
+- **Checkpoints are measured, not promised.** `figma_checkpoint` has no undo stack to lean on (Figma's is global and one step deep), so it rebuilds a subtree from a recorded description — and says what a rebuild cannot reproduce: instance interiors, per-run text styling, variable bindings, component identity. A real rebuild needs `dryRun: false` *and* `allowDestructive: true` *and* a bridge started with destructive writes; after the write the server dumps the subtree **again** and diffs it against the checkpoint, so `verified: true` means "no field differs", and a difference nobody predicted is reported with its path instead of being called a success.
 
 ## Development
 
@@ -176,7 +179,7 @@ npm test           # rebuilds artifacts, then unit + e2e with --test-concurrency
 
 `npm test` rebuilds `server/dist` and `plugin/*.mjs` first because the tests import the built modules — a test running against a stale artifact passes on code Figma will never execute. The suites run serially (`--test-concurrency=1`): e2e tests spin up real daemons on real ports and share one token file, and parallel runs make them flaky by construction.
 
-Current suites: **192 unit checks** — 79 `node:test` cases plus 113 harness checks (`commands`, `fingerprint`, `scope`, `use-figma.gate`) — and **81 e2e checks** (`daemon` 12, `link-state` 8, `mcp` 16, `multifile` 23, `tools` 22; the per-file summaries add up to 73 because `link-state` prints its checks without one).
+Current suites: **301 unit checks** — 188 `node:test` cases plus 113 harness checks (`commands`, `fingerprint`, `scope`, `use-figma.gate`) — and **113 e2e checks** (`daemon` 12, `link-state` 8, `mcp` 16, `multifile` 23, `tools` 22, `checkpoint` 32; the per-file summaries add up to 105 because `link-state` prints its checks without one).
 
 ## Troubleshooting
 
@@ -191,6 +194,8 @@ Current suites: **192 unit checks** — 79 `node:test` cases plus 113 harness ch
 | `4413 too many files (max 16)` | The daemon already serves 16 files — close a panel |
 | `4403 bad key` | The daemon restarted with a new `clientKey` — restart your MCP client |
 | `4401 bad token` | The token in the plugin doesn't match `figma-bridge-daemon.secret` |
+| `figma_checkpoint restore` refused | Three separate gates, each with its own message: a real rebuild needs `dryRun: false`, `allowDestructive: true`, and a bridge started with `FIGMA_BRIDGE_DESTRUCTIVE=1`. Without them the default dry run still reports exactly what would be deleted and created |
+| `figma_checkpoint restore` rebuilds but `verified: false` | The second dump differs from the checkpoint: read `verification.diff` (each entry has a path and both values) and `verification.notes`, which name the differences checkpoint-v1 knows it causes (HUG sizing, per-run text) |
 
 Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the plugin is not paired.
 
@@ -200,6 +205,7 @@ Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the
 - Figma caches screenshot exports; `rev` makes stale renders visible, but there is no way to force a redraw from the Plugin API.
 - `figma_use` hands you the full plugin API: it is a notice-and-rollback guard, not a sandbox. Code that runs after the call returns (fire-and-forget promises) escapes the diff; a timeout therefore does **not** roll back and says so.
 - Figma unloads the plugin UI when the app is backgrounded. In-flight calls are cancelled immediately (instead of hanging until their timeout), and the bridge reconnects on its own when you return.
+- A checkpoint is a rebuild, not a rollback. A restored `COMPONENT` is a new component (its instances do not follow), an `INSTANCE` shows its main component's *current* content, and per-run text styling is not rebuilt. Every one of those is reported by the tool rather than hidden — see the `limitations` list in a `save` reply.
 
 ## Versions
 

@@ -78,6 +78,37 @@ barrier is global. Prefer the specific tools over raw code:
   instead of eyeballed — and a size mismatch is a finding, while a clean
   2×/3×/4× ratio means you passed the wrong `scale`.
 
+## Checkpoints — the substitute for an undo stack
+
+Figma's undo barrier is global and one step deep, so "put it back" cannot be a
+saved undo step. `figma_checkpoint` is a description plus a rebuild:
+
+- `action: "save"` records a subtree as data (`nodeId`; a page is refused) into
+  one JSON file per file key. The reply carries a `summary` and the
+  `limitations` a rebuild cannot carry — instance interiors, per-run text
+  styling, variable bindings, component identity. Read them before telling
+  anyone the subtree will come back exactly.
+- `action: "show"` diffs the live subtree against the file field by field and
+  reports the semantic fingerprint next to it. That is how "has this drifted
+  already?" gets answered before a rebuild is chosen.
+- `action: "restore"` replaces the target's children from the checkpoint in ONE
+  transaction. It is a **dry run by default** and names what would be deleted
+  and created; a real rebuild needs `dryRun: false`, `allowDestructive: true`
+  and a bridge started with `FIGMA_BRIDGE_DESTRUCTIVE=1`.
+- Afterwards the server dumps the subtree **again** and diffs it against the
+  checkpoint: `verification.verified: true` means no field differs. When it is
+  false, `verification.diff` names every field with both values and
+  `verification.notes` says which differences checkpoint-v1 knows it causes
+  (HUG sizing, per-run text). Say so — never call a rebuild "restored" when it
+  is not.
+- Refused with a reason: a truncated dump (restoring it would delete whatever
+  the dump never reached), a `GROUP` / `INSTANCE` / page target, and node types
+  checkpoint-v1 cannot rebuild — unless `allowPartial: true`, which rebuilds the
+  rest and lists every skipped node.
+- Recording is cheap: take a checkpoint before a risky rebuild of a subtree,
+  then `show` or `compare` to judge the result, and keep its `id` so a restore
+  is one call away.
+
 ## The panel
 
 The plugin panel is decoration plus status: the mascot's mood, the status line
