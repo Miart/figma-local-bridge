@@ -107,5 +107,17 @@ await build({
   logLevel: "warning",
 });
 
+// checkpoint.ts is the dump schema and the rebuild. The rebuild deletes the
+// target's children, so the thing under test must be the shipped module; the
+// tests drive it with fixtures and a stub API.
+await build({
+  entryPoints: [join(here, "checkpoint.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "checkpoint.mjs"),
+  logLevel: "warning",
+});
+
 console.log("plugin built ->", join(here, "code.js"));
-console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs");
+console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs");

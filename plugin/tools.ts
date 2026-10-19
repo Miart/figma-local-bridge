@@ -18,6 +18,9 @@
 type Json = any;
 import { indexTree, indexGlobals, enforceScope } from "./scope";
 import { current as currentRev } from "./rev";
+import { snapshot, STRICT } from "./fingerprint";
+import { DUMP_SCHEMA, LIMITATIONS, dumpSubtree, restoreSubtree } from "./checkpoint";
+import { sessionKey } from "./session-key";
 
 const NS = "figma-local-bridge";
 const MAX_NODES = 1500;
@@ -464,6 +467,7 @@ export const MUTATING_METHODS: ReadonlySet<string> = new Set([
   "add_code_connect_map",
   "set_page",
   "set_selection",
+  "checkpoint_restore",
 ]);
 
 export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
@@ -1004,6 +1008,83 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
       .map((k) => ({ font: k, nodes: counts[k] }))
       .sort((a, b) => b.nodes - a.nodes);
     return { count: fonts.length, fonts };
+  },
+
+  // -------------------------------------------------------- checkpoints
+
+  /**
+   * Describe a subtree as data (checkpoint-v1).
+   *
+   * Read-only, and deliberately explicit about its blind spots: `limitations`
+   * travels with every dump, `truncated` says the node cap cut the tail off, and
+   * `unsupported` names every node a rebuild could not produce. A page is
+   * refused as a root: "checkpoint everything" is not a scope, it is a plan to
+   * restore by deleting the page.
+   */
+  async checkpoint_dump(p: Json) {
+    const node: any = await nodeOrSelectionOrPage(p.nodeId);
+    if (node.type === "PAGE" || node.type === "DOCUMENT") {
+      throw new Error(
+        `checkpoint_dump needs one scene node — a ${node.type} is not a scope: restoring such a checkpoint would replace the whole ${node.type.toLowerCase()}. ` +
+          `Pass nodeId of the frame (or subtree root) you are about to rebuild.`,
+      );
+    }
+    const dump = await dumpSubtree(node, { maxNodes: p.maxNodes, maxDepth: p.maxDepth });
+    const fp = snapshot(node, STRICT);
+    return {
+      schema: DUMP_SCHEMA,
+      capturedAt: new Date().toISOString(),
+      rev: currentRev(),
+      file: { key: figma.fileKey || sessionKey(figma.root), name: figma.root.name },
+      page: { id: figma.currentPage.id, name: figma.currentPage.name },
+      root: { id: node.id, name: node.name, type: node.type },
+      nodes: dump.nodes,
+      truncated: dump.truncated,
+      unsupported: dump.unsupported,
+      limitations: LIMITATIONS,
+      fingerprint: {
+        hash: fp.hash,
+        appearanceHash: fp.appearanceHash,
+        geometryHash: fp.geometryHash,
+        childrenHash: fp.childrenHash,
+        geometryStatus: fp.geometryStatus,
+      },
+      dump: dump.root,
+    };
+  },
+
+  /**
+   * Rebuild the children of a node from a checkpoint (checkpoint-v1).
+   *
+   * One transaction, one undo step: the children are removed and rebuilt inside
+   * `transact`, so a failure halfway rolls the whole rebuild back. This method
+   * reports what it DID — what it removed, created, skipped and could not make
+   * exact. Whether the result matches the checkpoint is answered by dumping the
+   * subtree again and comparing, which is the caller's job: a module that
+   * verifies its own write against its own data proves nothing.
+   */
+  async checkpoint_restore(p: Json) {
+    if (!p.dump || typeof p.dump !== "object") {
+      throw new Error("checkpoint_restore needs `dump`: the subtree from a checkpoint_dump reply.");
+    }
+    if (p.allowDestructive !== true && p.dryRun !== true) {
+      throw new Error(
+        "REFUSED: checkpoint_restore deletes the target's current children and rebuilds them from the checkpoint. " +
+          "Pass allowDestructive: true to say that out loud — or dryRun: true, which only reports what would happen.",
+      );
+    }
+    const target: any = await nodeOrSelectionOrPage(p.nodeId);
+    if (target.type === "PAGE" || target.type === "DOCUMENT") {
+      throw new Error(`REFUSED: a ${target.type} cannot be a restore target — the rebuild would replace the whole ${target.type.toLowerCase()}. Pass nodeId of the frame.`);
+    }
+    return transact(async (mark) => {
+      const report = await restoreSubtree(
+        p.dump,
+        { figma, target, mark, loadFont: (f) => figma.loadFontAsync(f) },
+        { allowPartial: p.allowPartial === true, dryRun: p.dryRun === true, truncated: p.truncated === true },
+      );
+      return { target: { id: target.id, name: target.name, type: target.type }, ...report };
+    });
   },
 };
 

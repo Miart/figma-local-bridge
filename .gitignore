@@ -13,6 +13,7 @@ plugin/dispatch.mjs
 plugin/tools.mjs
 plugin/fingerprint.mjs
 plugin/session-key.mjs
+plugin/checkpoint.mjs
 
 # logs and OS junk
 *.log
