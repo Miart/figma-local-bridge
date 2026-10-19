@@ -119,5 +119,17 @@ await build({
   logLevel: "warning",
 });
 
+// helpers.ts is the snippet standard library. Every refusal in it is a promise
+// about what a snippet may touch, so the tests drive the shipped module against
+// a stub Plugin API rather than a copy of the rules.
+await build({
+  entryPoints: [join(here, "helpers.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "helpers.mjs"),
+  logLevel: "warning",
+});
+
 console.log("plugin built ->", join(here, "code.js"));
-console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs");
+console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs, helpers.mjs");

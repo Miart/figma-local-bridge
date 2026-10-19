@@ -21,6 +21,7 @@ import { current as currentRev } from "./rev";
 import { snapshot, STRICT } from "./fingerprint";
 import { DUMP_SCHEMA, LIMITATIONS, dumpSubtree, restoreSubtree } from "./checkpoint";
 import { sessionKey } from "./session-key";
+import { makeHelpers } from "./helpers";
 
 const NS = "figma-local-bridge";
 const MAX_NODES = 1500;
@@ -536,8 +537,13 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
     let timedOut = false;
     try {
       const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-      const fn = new AsyncFunction("figma", "console", p.code);
-      const codePromise = fn(figma, con);
+      // `flb` is the snippet standard library (plugin/helpers.ts): the Plugin
+      // API with this manifest's traps named — dynamic-page getters, font
+      // loading, absolute vs parent-relative coordinates, instance flattening.
+      // It is built per call so the write helpers know the declared scope and
+      // can refuse an out-of-scope target BEFORE writing it.
+      const fn = new AsyncFunction("figma", "console", "flb", p.code);
+      const codePromise = fn(figma, con, makeHelpers(figma, { scopeRootId, pageWide }));
       // A timeout leaves this promise running: it is now a zombie that can keep
       // writing. Its eventual rejection must not surface as an unhandled
       // rejection in Figma's console, where it would look unrelated to us.
