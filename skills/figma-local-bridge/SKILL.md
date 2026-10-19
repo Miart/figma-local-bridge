@@ -190,6 +190,15 @@ stopped watching, so it has its own two tools.
   plugin. OP_DONE means it already ran, and the message names the revision.
 - Both are read-only and work in a read-only bridge: cancelling only ever
   prevents a write, never causes one.
+- When the process that timed out is gone — or the plugin was reloaded, taking
+  its opId cache with it — `figma_journal` is the part of the trail that
+  survives: a local append-only file with every call this bridge sent, its
+  `send`/`ok`/`failed`/`timeout`/`retry`/`dropped`/`late` lines, the revision
+  and the target. `unsettled: true` shows only the calls that did not end
+  cleanly. It never records code, text or images — method names, target ids,
+  revisions and outcomes only — so `figma_use`'s `description` is the one place
+  a human note enters it. Edits a human makes in Figma are not in the file, and
+  neither is a call refused before sending: nothing was sent, nothing changed.
 
 ## Checkpoints — the substitute for an undo stack
 

@@ -45,6 +45,10 @@ whether it is still queued, running, or already finished and what it returned;
 figma_cancel stops a queued write before it starts — a running one cannot be
 interrupted. Neither tool writes, so both work when the bridge is read-only.
 
+The same trail outlives the process: figma_journal reads a local append-only
+file — every call sent, with timeout/dropped/late lines for the ones that did
+not end cleanly — and needs neither the daemon nor the plugin.
+
 Prefer figma_inspect (compareWith) and
 figma_replace_repeated_with_component (dryRun first) over figma_use, which is
 raw Plugin API behind allowDestructive + scopeNodeId, rolls back anything
