@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { Link, Envelope } from "./link.js";
 import { BridgeOffline, BridgeNotPaired, BridgeNotRouted } from "./websocket.js";
+import { appendJournal, journalTargets } from "./journal.js";
 
 /**
  * How long a call waits for the link before giving up.
@@ -71,6 +72,8 @@ export interface AbandonedOp {
   opId: string;
   method: string;
   file: string | undefined;
+  /** Which attempt gave up — retries reuse the opId, this names the wire call. */
+  attempt: number;
   /** How long the call was waited for before giving up. */
   waitedMs: number;
   timedOutAt: number;
@@ -252,16 +255,28 @@ export class FigmaClient {
     if (!pending) {
       // A LATE ANSWER to a call whose timeout already fired. The caller is gone,
       // so nothing is resolved — but the fact is kept: "may or may not have been
-      // applied" is precisely what figma_ops exists to settle.
+      // applied" is precisely what figma_ops exists to settle. The journal keeps
+      // it too, because this process may not live long enough to be asked.
       const abandoned = this.abandoned.get(String(env.id));
       if (abandoned) {
-        abandoned.answer = {
-          ok: env.ok === true,
-          rev: typeof env.rev === "number" ? env.rev : null,
-          ...(env.ok === true
-            ? {}
-            : { error: String(((env.error as { message?: string } | undefined) || {}).message || "plugin error") }),
-        };
+        const ok = env.ok === true;
+        const rev = typeof env.rev === "number" ? env.rev : null;
+        const error = ok
+          ? undefined
+          : String(((env.error as { message?: string } | undefined) || {}).message || "plugin error");
+        abandoned.answer = { ok, rev, ...(error ? { error } : {}) };
+        appendJournal({
+          event: "late",
+          opId: abandoned.opId,
+          method: abandoned.method,
+          file: abandoned.file ?? null,
+          attempt: abandoned.attempt,
+          afterMs: Date.now() - abandoned.timedOutAt,
+          ok,
+          rev,
+          ...(error ? { error: error.slice(0, 300) } : {}),
+          ...(env.replayed === true ? { replayed: true } : {}),
+        });
       }
       return;
     }
@@ -271,7 +286,12 @@ export class FigmaClient {
     if (env.ok) pending.resolve(env);
     else {
       const err = env.error as { message?: string } | undefined;
-      pending.reject(new Error(String((err && err.message) || "plugin error")));
+      const e = new Error(String((err && err.message) || "plugin error"));
+      // The failed call's revision belongs in the journal (a rolled-back write
+      // still moved it); the Error type has nowhere to put it, so it rides as a
+      // property, like bridgeNoRetry does.
+      (e as Error & { bridgeRev?: number | null }).bridgeRev = typeof env.rev === "number" ? env.rev : null;
+      pending.reject(e);
     }
   }
 
@@ -397,35 +417,113 @@ export class FigmaClient {
     // id and replays the recorded answer, so a call that half-ran before the
     // socket died cannot run a second time and duplicate its own work.
     const opId = crypto.randomBytes(8).toString("hex");
+    const startedAt = Date.now();
+    // Whether anything reached the wire. Only such a call can have changed the
+    // document — and only such a call appears in the journal at all.
+    const progress = { sent: 0 };
     // The retry loop swallows the first, most informative failure. Keep it: if
     // the retries run out, the operator still needs to know whether the work
     // may already be in the document.
     let firstDrop: string | null = null;
+    let attempts = 0;
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        return await this.callOnce<T>(method, payload, timeoutMs, opId, file);
+        const meta = await this.callOnce<T>(method, payload, timeoutMs, opId, file, attempt + 1, progress);
+        appendJournal({
+          event: "ok",
+          opId,
+          method,
+          file: file ?? null,
+          attempts: attempt + 1,
+          ms: Date.now() - startedAt,
+          rev: meta.rev,
+          ...(meta.replayed ? { replayed: true } : {}),
+        });
+        return meta;
       } catch (err) {
+        attempts = attempt + 1;
+        const message = String((err as Error)?.message || err);
         // Nothing was ever sent — callOnce already waited its grace. Retrying
         // now would just spend the same two seconds again and then report the
         // same state; the agent may as well learn right away. Same for a
         // failure that belongs to ONE file's slot (see failWhere): re-sending
         // cannot reach anything, and the message already tells the whole story.
-        if (err instanceof BridgeNotPaired || (err as { bridgeNoRetry?: boolean } | null)?.bridgeNoRetry) throw err;
-        const drop = err instanceof BridgeOffline || /disconnected/i.test(String((err as Error)?.message || err));
-        if (!drop) throw err;
-        if (!firstDrop) firstDrop = String((err as Error)?.message || err);
+        if (err instanceof BridgeNotPaired || (err as { bridgeNoRetry?: boolean } | null)?.bridgeNoRetry) {
+          // An attempt may have been in flight before the link went: the
+          // journal says `dropped` — no answer ever came, so the call may or
+          // may not have been applied.
+          this.journalEnd("dropped", { opId, method, file, attempts, startedAt, sent: progress.sent > 0 }, message);
+          throw err;
+        }
+        const drop = err instanceof BridgeOffline || /disconnected/i.test(message);
+        if (!drop) {
+          // The caller's OWN timer fired: `timeout` is already on disk —
+          // callOnce writes it before it rejects, so the journal and the caller
+          // agree on the moment of giving up (and a late answer can settle it).
+          // A plugin error is recorded here, with the revision it reached.
+          if (!(err as { bridgeTimeout?: boolean } | null)?.bridgeTimeout) {
+            this.journalEnd(
+              "failed",
+              { opId, method, file, attempts, startedAt, sent: progress.sent > 0 },
+              message,
+              (err as { bridgeRev?: number | null } | null)?.bridgeRev ?? null,
+            );
+          }
+          throw err;
+        }
+        if (!firstDrop) firstDrop = message;
+        // The attempt died with the link and will be retried under the same
+        // opId. Recorded only when it HAD reached the wire — an attempt rejected
+        // before sending changed nothing and stays out, like every never-sent call.
+        if (progress.sent >= attempts) {
+          appendJournal({
+            event: "retry",
+            opId,
+            method,
+            file: file ?? null,
+            attempt: attempts,
+            error: message.replace(/\s+/g, " ").slice(0, 300),
+          });
+        }
         // Wait for the plugin to pair again, then try the same call under the
         // same opId.
         await this.waitForLink(LINK_GRACE_MS);
         if (!this.connected) {
-          throw new BridgeNotPaired(
+          const why =
             `${firstDrop}\nThe plugin did not come back within ${LINK_GRACE_MS} ms, so ${method} was ` +
-              `not re-sent (op ${opId}).`,
-          );
+            `not re-sent (op ${opId}).`;
+          this.journalEnd("dropped", { opId, method, file, attempts, startedAt, sent: progress.sent > 0 }, why);
+          throw new BridgeNotPaired(why);
         }
       }
     }
-    throw new BridgeOffline(`${firstDrop}\nGave up on ${method} after 5 attempts (op ${opId}).`);
+    const why = `${firstDrop}\nGave up on ${method} after 5 attempts (op ${opId}).`;
+    this.journalEnd("dropped", { opId, method, file, attempts, startedAt, sent: progress.sent > 0 }, why);
+    throw new BridgeOffline(why);
+  }
+
+  /**
+   * The journal's terminal line for a call that got no clean answer. Every such
+   * exit goes through here; a call with nothing on the wire is skipped HERE
+   * (nothing was sent, so nothing could change) rather than by each caller.
+   */
+  private journalEnd(
+    event: "dropped" | "failed",
+    info: { opId: string; method: string; file: string | undefined; attempts: number; startedAt: number; sent: boolean },
+    error: string,
+    rev: number | null = null,
+  ) {
+    if (!info.sent) return;
+    appendJournal({
+      event,
+      opId: info.opId,
+      method: info.method,
+      file: info.file ?? null,
+      attempts: info.attempts,
+      ms: Date.now() - info.startedAt,
+      ...(event === "failed" ? { rev } : {}),
+      error: error.replace(/\s+/g, " ").slice(0, 300),
+    });
   }
 
   /**
@@ -461,6 +559,8 @@ export class FigmaClient {
     timeoutMs: number,
     opId: string,
     file: string | undefined,
+    attempt: number,
+    progress: { sent: number },
   ): Promise<CallMeta<T>> {
     await this.ensureLinked(opId, method);
 
@@ -472,23 +572,30 @@ export class FigmaClient {
           this.pending.delete(id);
           // The caller is giving up, but the plugin may not be: keep the call
           // visible so a late answer lands somewhere instead of nowhere.
+          const waitedMs = Date.now() - p.since;
           this.rememberAbandoned({
             id,
             opId,
             method,
             file,
-            waitedMs: Date.now() - p.since,
+            attempt,
+            waitedMs,
             timedOutAt: Date.now(),
             answer: null,
           });
+          // On disk too: this is the line that survives the process, and the
+          // one a `late` line may never come to settle.
+          appendJournal({ event: "timeout", opId, method, file: file ?? null, attempt, waitedMs });
         }
-        reject(
-          new Error(
-            `bridge timeout after ${timeoutMs}ms on ${method} (op ${opId}) — the plugin may still be running it. ` +
-              `figma_ops shows whether it is queued or running (and figma_cancel can stop it while it is still queued); ` +
-              `figma_ops with opId "${opId}" reports the answer if it finished after this timeout.`,
-          ),
+        const e = new Error(
+          `bridge timeout after ${timeoutMs}ms on ${method} (op ${opId}) — the plugin may still be running it. ` +
+            `figma_ops shows whether it is queued or running (and figma_cancel can stop it while it is still queued); ` +
+            `figma_ops with opId "${opId}" reports the answer if it finished after this timeout.`,
         );
+        // Marks the rejection so the retry loop does not journal it a second
+        // time as a `failed` call — `timeout` is already written above.
+        (e as Error & { bridgeTimeout?: boolean }).bridgeTimeout = true;
+        reject(e);
       }, timeoutMs);
       this.pending.set(id, {
         resolve,
@@ -506,6 +613,11 @@ export class FigmaClient {
     try {
       this.link.send({ id, method, params, opId, ...(file ? { file } : {}) });
       entry.sent = true;
+      progress.sent++;
+      // Recorded only once the request is on the wire: one that never got sent
+      // changed nothing and must not appear in the history. The whitelisted
+      // fields are targets and permissions — never the payload.
+      appendJournal({ event: "send", opId, method, file: file ?? null, attempt, ...journalTargets(params) });
     } catch (err) {
       const p = this.pending.get(id);
       if (p) {
