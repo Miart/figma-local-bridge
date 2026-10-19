@@ -25,6 +25,18 @@
  *    exists that was never made. The cache now keeps a fingerprint of the call
  *    it answered, and a mismatch is refused loudly instead of replayed.
  *
+ * 4. ABANDONED WORK. Writes are chained, so a call can sit in the queue for as
+ *    long as the write ahead of it takes. The caller, meanwhile, has its own
+ *    timeout: it gives up, the agent decides the edit failed and plans around
+ *    that — and then the queued write runs anyway, at a revision nobody is
+ *    watching. `cancel` is the way out, and it is deliberately narrow: it stops
+ *    only ops that have NOT started (Figma cannot interrupt running code from
+ *    inside the plugin), it answers the waiting caller at once instead of when
+ *    the queue reaches the corpse, and the record says OP_CANCELLED without
+ *    moving the revision, because nothing touched the document. `report` is the
+ *    view that makes this usable: what is running, what is waiting, what just
+ *    finished — the answer to "did that call that timed out ever run?".
+ *
  * Deliberately free of any `figma` reference so it can be unit-tested outside
  * the plugin sandbox (see test/dispatch.test.mjs) — same reason as scope.ts.
  */
@@ -60,6 +72,52 @@ interface Inflight {
   promise: Promise<OpRecord>;
 }
 
+/**
+ * One tracked operation. `queued` is the only state `cancel` can act on, and the
+ * only one where "nothing ran" is provable rather than hoped for.
+ */
+interface OpInfo {
+  opId: string;
+  method: string;
+  /** Call identity — kept so a cancelled op can be recorded in the cache. */
+  fp: string;
+  state: "queued" | "running" | "done" | "cancelled";
+  queuedAt: number;
+  startedAt?: number;
+  endedAt?: number;
+  rev?: number;
+  ok?: boolean;
+  error?: string;
+}
+
+/** An operation as `report` describes it. Times are the plugin's clock. */
+export interface OpSnapshot {
+  opId: string;
+  method: string;
+  state: OpInfo["state"];
+  queuedAt: number;
+  startedAt?: number;
+  endedAt?: number;
+  /** Time spent waiting for the queue, end to end. */
+  waitedMs: number;
+  /** Time the call itself took, while running or once finished. */
+  ranMs?: number;
+  rev?: number;
+  ok?: boolean;
+  error?: string;
+}
+
+export interface OpsReport {
+  running: OpSnapshot[];
+  queued: OpSnapshot[];
+  recent: OpSnapshot[];
+  /** Operations seen since the plugin started; `recent` is the tail of them. */
+  seen: number;
+  /** How many recorded answers are still available for replay. */
+  kept: number;
+  note: string;
+}
+
 export interface Reply extends OpRecord {
   id: string;
   replayed?: boolean;
@@ -79,6 +137,11 @@ export interface DispatcherOptions {
 }
 
 const DEFAULT_LIMIT = 200;
+
+/** `1.4 s` — durations are read by people, and by agents quoting them. */
+function secs(ms: number): string {
+  return (Math.max(0, ms) / 1000).toFixed(1) + " s";
+}
 
 /**
  * Identity of a logical call: its method and its arguments, with object key
@@ -100,6 +163,12 @@ function canonical(v: unknown): string {
 export class Dispatcher {
   private cache = new Map<string, Cached>();
   private inflight = new Map<string, Inflight>();
+  /** Tracked operations, oldest first; settled ones are pruned at the cap. */
+  private ops = new Map<string, OpInfo>();
+  /** Resolvers for operations still in the queue, so cancel() can answer now. */
+  private answers = new Map<string, (record: OpRecord) => void>();
+  /** Operations ever tracked, so a report can say how long the plugin has been busy. */
+  private seen = 0;
   /** Tail of the mutation queue. Never rejects — see serialised(). */
   private tail: Promise<void> = Promise.resolve();
 
@@ -128,8 +197,13 @@ export class Dispatcher {
       }
     }
 
+    const mutating = this.opts.mutating.has(req.method);
+    // Tracked BEFORE the call is dispatched, so a cancel that arrives while this
+    // is still waiting in the queue finds it. Calls without an opId are not
+    // tracked: there is no id to name them by, and no retry to protect.
+    if (opId) this.track(opId, req.method, fp, mutating);
     const work = () => this.execute(req, opId, fp);
-    const started = this.opts.mutating.has(req.method) ? this.serialised(work) : work();
+    const started = mutating ? this.serialised(opId, work) : work();
 
     if (opId) {
       this.inflight.set(opId, { method: req.method, fp, promise: started });
@@ -164,20 +238,55 @@ export class Dispatcher {
       // Nothing ran, so the document did not move: read the counter, do not
       // advance it. A fabricated bump would make the next screenshot look
       // stale-but-valid.
-      rev: this.opts.peek ? this.opts.peek() : this.opts.bump(),
+      rev: this.current(),
     };
   }
 
-  /** Chains `work` after the current tail of the mutation queue. */
-  private serialised(work: () => Promise<OpRecord>): Promise<OpRecord> {
-    // Both callbacks are `work`: the queue must move on whether the previous
+  /**
+   * Chains `work` after the current tail of the mutation queue.
+   *
+   * The queued call gets its own promise, resolved either by the work or by
+   * `cancel`. That split matters: a cancelled call has to answer its caller NOW,
+   * not when the queue finally reaches a corpse it is going to skip.
+   */
+  private serialised(opId: string, work: () => Promise<OpRecord>): Promise<OpRecord> {
+    let answer!: (record: OpRecord) => void;
+    const promise = new Promise<OpRecord>((resolve) => {
+      answer = resolve;
+    });
+    if (opId) this.answers.set(opId, answer);
+
+    const start = (): Promise<void> => {
+      const info = opId ? this.ops.get(opId) : undefined;
+      // cancel() has already answered this one; it must not run, and the queue
+      // moves straight on to whatever is behind it.
+      if (info && info.state === "cancelled") return Promise.resolve();
+      if (info) {
+        info.state = "running";
+        info.startedAt = Date.now();
+      }
+      return work().then(
+        (record) => {
+          if (opId) this.answers.delete(opId);
+          answer(record);
+        },
+        // execute() turns every failure into a record, so this is unreachable —
+        // and it stays because the alternative to an unreachable branch here is
+        // a caller that waits for an answer nobody will send.
+        (err) => {
+          if (opId) this.answers.delete(opId);
+          answer({ ok: false, error: { message: String((err && err.message) || err) }, rev: this.current() });
+        },
+      );
+    };
+
+    // Both callbacks are `start`: the queue must move on whether the previous
     // mutation succeeded or failed.
-    const next = this.tail.then(work, work);
-    this.tail = next.then(
+    this.tail = this.tail.then(start, start).then(
       () => undefined,
       () => undefined,
     );
-    return next;
+    return promise;
   }
 
   private async execute(req: Request, opId: string, fp: string): Promise<OpRecord> {
@@ -191,8 +300,193 @@ export class Dispatcher {
       // look stale-but-valid. Re-rendering is cheaper than a wrong conclusion.
       record = { ok: false, error: { message: String(err && err.message ? err.message : err) }, rev: this.opts.bump() };
     }
-    if (opId) this.remember(opId, { method: req.method, fp, record });
+    if (opId) {
+      this.remember(opId, { method: req.method, fp, record });
+      const info = this.ops.get(opId);
+      // A cancelled op never gets here (its work was not run), and a live one
+      // must stop claiming to be live: `report` is what the agent uses to decide
+      // whether a call it abandoned is still going to write.
+      if (info && info.state !== "cancelled") {
+        info.state = "done";
+        info.endedAt = Date.now();
+        info.rev = record.rev;
+        info.ok = record.ok;
+        if (!record.ok) info.error = record.error?.message;
+      }
+    }
     return record;
+  }
+
+  // ------------------------------------------------------------- operations
+
+  /**
+   * What is running, what is waiting for the queue, and what finished recently.
+   *
+   * This answers a question the bridge used to leave open: a write queued behind
+   * another write may have been abandoned by its caller (its own timeout fired)
+   * long before the queue reached it. Here it is visible — and still
+   * cancellable while its state is `queued`.
+   */
+  report(recentLimit = 10): OpsReport {
+    const now = Date.now();
+    const running: OpSnapshot[] = [];
+    const queued: OpSnapshot[] = [];
+    const recent: OpSnapshot[] = [];
+    for (const info of this.ops.values()) {
+      const snap = this.snapshot(info, now);
+      if (info.state === "running") running.push(snap);
+      else if (info.state === "queued") queued.push(snap);
+      else recent.push(snap);
+    }
+    recent.reverse(); // newest first: the last thing the plugin did is what is asked about
+    return {
+      running,
+      queued,
+      recent: recent.slice(0, Math.max(0, recentLimit)),
+      seen: this.seen,
+      kept: this.cache.size,
+      note:
+        "Only calls that carried an opId appear here — the MCP server sends one per logical call, so a fire-and-forget message never shows up. " +
+        "`queued` means the call has not started and figma_cancel can still stop it. " +
+        "A `running` call cannot be interrupted from inside the plugin: Figma runs the code to the end, and the answer is recorded when it does.",
+    };
+  }
+
+  /** The recorded answer for an opId, for settling a call whose caller gave up. */
+  answer(opId: string): OpRecord | null {
+    return this.cache.get(opId)?.record ?? null;
+  }
+
+  /**
+   * Stop an operation that has not started yet.
+   *
+   * Only `queued` is cancellable, and that is a fact about Figma rather than a
+   * preference: plugin code runs to completion, so a call that has begun cannot
+   * be taken back — pretending otherwise would leave a half-applied edit nobody
+   * is tracking. A queued call provably did nothing, so stopping it is safe, and
+   * its answer says exactly that.
+   */
+  cancel(opId: string): { opId: string; method: string; waitedMs: number; position: number } {
+    const now = Date.now();
+    const info = this.ops.get(opId);
+    if (!info) {
+      throw new Error(
+        `OP_UNKNOWN: no operation "${opId}" is tracked here, so nothing was cancelled. Live: ${this.live()}. ` +
+          `Recent: ${this.recentLine()}. A call sent without an opId cannot be named this way — check the document instead (figma_inspect).`,
+      );
+    }
+    if (info.state === "running") {
+      throw new Error(
+        `OP_RUNNING: op ${opId} (${info.method}) is running right now — ${secs(now - (info.startedAt ?? now))} in — ` +
+          `and Figma runs plugin code to the end, so it cannot be interrupted from inside the plugin. Nothing was cancelled. ` +
+          `Its answer will be recorded when it finishes: figma_ops shows it, and re-sending the same opId replays that answer instead of running the call again.`,
+      );
+    }
+    if (info.state === "done" || info.state === "cancelled") {
+      const outcome =
+        info.state === "cancelled"
+          ? "was cancelled while it was still queued, so it never ran"
+          : `finished ${secs(now - (info.endedAt ?? now))} ago at rev ${info.rev ?? "?"} (${info.ok ? "ok" : `failed: ${info.error ?? "no message"}`})`;
+      throw new Error(
+        `OP_DONE: op ${opId} (${info.method}) ${outcome} — there is nothing left to cancel. ` +
+          `If you need to know what it did, ask figma_ops for op ${opId}.`,
+      );
+    }
+
+    // Queued: it provably has not run. Answer its caller immediately — the whole
+    // point is that nobody should be waiting on work that will not happen — and
+    // record the refusal under the opId, so a retry of the same logical call
+    // replays the cancellation instead of starting it.
+    let position = 0;
+    for (const other of this.ops.values()) {
+      if (other === info) break;
+      if (other.state === "queued") position++;
+    }
+    const waitedMs = now - info.queuedAt;
+    info.state = "cancelled";
+    info.endedAt = now;
+    info.ok = false;
+    info.error = `OP_CANCELLED: op ${opId} (${info.method}) was cancelled while it was still queued — nothing of it ran.`;
+    const record: OpRecord = {
+      ok: false,
+      error: { message: info.error },
+      // Nothing ran, so the document did not move: read the counter, do not
+      // advance it (same reasoning as OPID_REUSED above).
+      rev: this.current(),
+    };
+    this.remember(opId, { method: info.method, fp: info.fp, record });
+    const answer = this.answers.get(opId);
+    if (answer) {
+      this.answers.delete(opId);
+      answer(record);
+    }
+    return { opId, method: info.method, waitedMs, position };
+  }
+
+  // ------------------------------------------------------------------ state
+
+  private track(opId: string, method: string, fp: string, mutating: boolean) {
+    const now = Date.now();
+    this.seen++;
+    this.ops.set(opId, {
+      opId,
+      method,
+      fp,
+      // A read is already running by the time we get here; a write would be
+      // lying if it said so — it has not been near the document yet.
+      state: mutating ? "queued" : "running",
+      queuedAt: now,
+      ...(mutating ? {} : { startedAt: now }),
+    });
+    const limit = this.opts.limit ?? DEFAULT_LIMIT;
+    if (this.ops.size > limit) {
+      // Settled entries only: a queued or running op is live state, and dropping
+      // one would make `report` say an edit is gone that is still coming.
+      for (const [id, info] of this.ops) {
+        if (this.ops.size <= Math.floor(limit / 2)) break;
+        if (info.state === "done" || info.state === "cancelled") this.ops.delete(id);
+      }
+    }
+  }
+
+  private snapshot(info: OpInfo, now: number): OpSnapshot {
+    const started = info.startedAt;
+    const ended = info.endedAt ?? now;
+    return {
+      opId: info.opId,
+      method: info.method,
+      state: info.state,
+      queuedAt: info.queuedAt,
+      ...(started !== undefined ? { startedAt: started } : {}),
+      ...(info.endedAt !== undefined ? { endedAt: info.endedAt } : {}),
+      waitedMs: (started ?? now) - info.queuedAt,
+      ...(started !== undefined ? { ranMs: ended - started } : {}),
+      ...(info.rev !== undefined ? { rev: info.rev } : {}),
+      ...(info.ok !== undefined ? { ok: info.ok } : {}),
+      ...(info.error !== undefined ? { error: info.error } : {}),
+    };
+  }
+
+  /** Live ops as `id (method)`, for an error that has to say what it does know. */
+  private live(): string {
+    const out: string[] = [];
+    for (const info of this.ops.values()) {
+      if (info.state === "queued" || info.state === "running") out.push(`${info.opId} (${info.method}, ${info.state})`);
+    }
+    return out.length ? out.join(", ") : "none";
+  }
+
+  private recentLine(): string {
+    const out: string[] = [];
+    for (const info of this.ops.values()) {
+      if (info.state === "done" || info.state === "cancelled") out.push(`${info.opId} (${info.method})`);
+    }
+    const tail = out.slice(-3).reverse();
+    return tail.length ? tail.join(", ") + " — the oldest entries are pruned first" : "none";
+  }
+
+  private current(): number {
+    return this.opts.peek ? this.opts.peek() : this.opts.bump();
   }
 
   private remember(opId: string, entry: Cached) {

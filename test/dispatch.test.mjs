@@ -328,3 +328,195 @@ test("every declared mutating method exists on the tool table", () => {
     assert.ok(names.has(name), `${name} is not a method in plugin/tools.ts`);
   }
 });
+
+// ------------------------------------------------------------------ ops/cancel
+//
+// Writes are chained, so a call can wait behind another write for as long as that
+// one takes — while its own caller has a timeout. The caller gives up, the agent
+// concludes the edit failed and plans around it, and then the queued write runs
+// anyway, at a revision nobody is watching.
+//
+// `cancel` is the way out and it is deliberately narrow: only what has NOT
+// started (Figma runs plugin code to completion), answered at once instead of
+// when the queue reaches the corpse, with a record that says OP_CANCELLED and a
+// revision that does not move — because nothing ran.
+//
+// `ops`/`cancel` must never be listed as mutating in the plugin: they have to run
+// WHILE a mutation is in flight, which is the only moment they are useful.
+
+/** Bump + read counter, standing in for plugin/rev.ts. */
+function revCounter() {
+  let n = 0;
+  return { bump: () => ++n, peek: () => n, set: (v) => { n = v; } };
+}
+
+/** The refusal a cancel throws, as a string — the message is the useful part. */
+function refusal(fn) {
+  try {
+    fn();
+  } catch (err) {
+    return String(err.message);
+  }
+  throw new Error("expected a refusal, got none");
+}
+
+test("cancel stops a queued write before it starts, answers its caller at once, and leaves the revision alone", async () => {
+  const log = [];
+  const rev = revCounter();
+  const hold = gate();
+  const d = new Dispatcher({
+    run: async (method) => {
+      log.push(method);
+      if (method === "use_figma") await hold.promise;
+      return { done: method };
+    },
+    mutating: new Set(["use_figma", "import_images"]),
+    bump: rev.bump,
+    peek: rev.peek,
+  });
+
+  const running = d.handle({ id: "a", method: "use_figma", opId: "op-a" });
+  const queued = d.handle({ id: "b", method: "import_images", opId: "op-b" });
+  const behind = d.handle({ id: "c", method: "import_images", opId: "op-c" });
+  await tick();
+  assert.deepEqual(log, ["use_figma"], "only the first write has started");
+
+  rev.set(40); // wherever the running write has got the document to
+  const report = d.report();
+  assert.deepEqual(report.running.map((o) => o.opId), ["op-a"]);
+  assert.equal(report.running[0].state, "running");
+  assert.equal(report.running[0].method, "use_figma");
+  assert.deepEqual(report.queued.map((o) => o.opId), ["op-b", "op-c"], "queue order is the order they were sent");
+
+  const cancelled = d.cancel("op-b");
+  assert.equal(cancelled.method, "import_images");
+  assert.equal(cancelled.position, 0, "op-b was first in line");
+
+  // The abandoned caller hears NOW — not when the queue finally reaches work
+  // that is never going to happen.
+  const rb = await queued;
+  assert.equal(rb.ok, false);
+  assert.match(rb.error.message, /OP_CANCELLED/);
+  assert.equal(rb.rev, 40, "nothing ran, so the document did not move");
+
+  hold.open();
+  const ra = await running;
+  const rc = await behind;
+  assert.deepEqual(ra.result, { done: "use_figma" });
+  assert.deepEqual(log, ["use_figma", "import_images"], "the cancelled call never ran");
+  assert.deepEqual(rc.result, { done: "import_images" }, "and the queue moved straight to the next one");
+
+  // Its answer is recorded, so a retry of that logical call replays the
+  // cancellation instead of starting the write it was cancelled from.
+  const retry = await d.handle({ id: "b2", method: "import_images", opId: "op-b" });
+  assert.equal(retry.replayed, true);
+  assert.match(retry.error.message, /OP_CANCELLED/);
+  assert.deepEqual(log, ["use_figma", "import_images"], "still not run");
+
+  const answer = d.answer("op-b");
+  assert.equal(answer.ok, false);
+  assert.equal(answer.rev, 40);
+});
+
+test("cancel refuses a running call, and that call finishes normally", async () => {
+  const log = [];
+  const hold = gate();
+  const d = new Dispatcher({
+    run: async (method) => { log.push(method); await hold.promise; return { done: method }; },
+    mutating: new Set(["use_figma"]),
+    bump: counter(),
+  });
+
+  const running = d.handle({ id: "a", method: "use_figma", opId: "op-a" });
+  await tick();
+
+  const message = refusal(() => d.cancel("op-a"));
+  assert.match(message, /OP_RUNNING/);
+  assert.match(message, /op-a \(use_figma\) is running/, "it names the operation it will not touch");
+  assert.match(message, /figma_ops/, "and where to watch it finish");
+
+  hold.open();
+  const ra = await running;
+  assert.deepEqual(ra.result, { done: "use_figma" }, "a refusal to cancel must not disturb the call");
+  assert.deepEqual(log, ["use_figma"]);
+});
+
+test("cancel says exactly which refusal it is: unknown, or already finished at a known revision", async () => {
+  const rev = revCounter();
+  const d = new Dispatcher({
+    run: async (method) => ({ done: method }),
+    mutating: new Set(["use_figma"]),
+    bump: rev.bump,
+    peek: rev.peek,
+  });
+
+  const unknown = refusal(() => d.cancel("op-nope"));
+  assert.match(unknown, /OP_UNKNOWN/);
+  assert.match(unknown, /Live: none/, "with nothing live it says so rather than guessing");
+
+  await d.handle({ id: "1", method: "use_figma", opId: "op-done" });
+  const done = refusal(() => d.cancel("op-done"));
+  assert.match(done, /OP_DONE/);
+  // This is where a caller that gave up finds out the truth: it DID run, and at
+  // which revision — not "may or may not have been applied".
+  assert.match(done, /finished .* ago at rev 1 \(ok\)/);
+  assert.match(done, /figma_ops for op op-done/);
+
+  const hold = gate();
+  const d2 = new Dispatcher({
+    run: async () => { await hold.promise; return {}; },
+    mutating: new Set(["use_figma", "import_images"]),
+    bump: rev.bump,
+    peek: rev.peek,
+  });
+  const a = d2.handle({ id: "a", method: "use_figma", opId: "op-live" });
+  const b = d2.handle({ id: "b", method: "import_images", opId: "op-wait" });
+  await tick();
+  const withLive = refusal(() => d2.cancel("op-nope"));
+  assert.match(withLive, /op-live \(use_figma, running\)/, "an unknown id is answered with what IS live");
+  assert.match(withLive, /op-wait \(import_images, queued\)/);
+  hold.open();
+  await Promise.all([a, b]);
+});
+
+test("report shows the queue and the tail of what finished, and stays bounded", async () => {
+  const rev = revCounter();
+  const d = new Dispatcher({
+    run: async (method, params) => ({ n: params.n }),
+    mutating: new Set(["use_figma"]),
+    bump: rev.bump,
+    peek: rev.peek,
+    limit: 4,
+  });
+
+  const hold = gate();
+  const blocked = new Dispatcher({
+    run: async (method) => { if (method === "use_figma") await hold.promise; return {}; },
+    mutating: new Set(["use_figma", "import_images"]),
+    bump: counter(),
+    peek: () => 7,
+  });
+  const a = blocked.handle({ id: "a", method: "use_figma", opId: "op-a" });
+  const b = blocked.handle({ id: "b", method: "import_images", opId: "op-b" });
+  await tick();
+  const live = blocked.report();
+  assert.equal(live.running[0].opId, "op-a");
+  assert.ok(live.running[0].ranMs >= 0, "a running op reports how long it has been running");
+  assert.ok(live.queued[0].waitedMs >= 0, "a queued op reports how long it has been waiting");
+  assert.equal(live.queued[0].rev, undefined, "a queued op has no revision yet — it has not touched the document");
+  hold.open();
+  await Promise.all([a, b]);
+
+  for (let i = 0; i < 10; i++) await d.handle({ id: `r${i}`, method: "get_metadata", opId: `op-${i}` });
+  const report = d.report();
+  assert.deepEqual(report.running, []);
+  assert.deepEqual(report.queued, []);
+  assert.equal(report.seen, 10, "everything that came through is counted");
+  assert.ok(report.recent.length <= 4, "the tail is bounded by the same limit as the answer cache");
+  assert.equal(report.recent[0].opId, "op-9", "newest first");
+  assert.equal(report.recent[0].state, "done");
+  assert.equal(report.recent[0].ok, true);
+  assert.equal(report.recent[0].rev, 10, "the revision the call left the document at");
+  assert.equal(report.kept, 4, "and it says how many answers are still replayable");
+  assert.match(report.note, /running.*cannot be interrupted/s, "the report states what it cannot do");
+});

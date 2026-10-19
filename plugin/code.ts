@@ -284,6 +284,52 @@ const methods: Record<string, (p: Json) => Promise<Json>> = {
     return replaceRepeatedWithComponent(p);
   },
 
+  /**
+   * What this plugin is doing right now: the call that is running, the writes
+   * waiting for the queue, and what finished recently.
+   *
+   * This is the honest answer to a question the bridge used to leave open. A
+   * write can sit in the queue behind another write; its caller has its own
+   * timeout and may have given up and moved on long before the queue reaches it.
+   * `ops` shows it — and, while its state is still `queued`, `cancel` can stop it.
+   *
+   * With `opId`, the recorded answer for that operation is included: that is how
+   * a caller that timed out finds out whether its call ever ran, and what it
+   * returned, without re-reading the document.
+   */
+  async ops(p: Json) {
+    const report = dispatcher.report(typeof p.recent === "number" ? Math.max(0, Math.min(50, p.recent)) : undefined);
+    const out: Json = { ...report, file: fileMeta() };
+    if (p.opId) {
+      const id = String(p.opId);
+      const tracked = [...report.running, ...report.queued, ...report.recent].find((o: Json) => o.opId === id) ?? null;
+      const record = dispatcher.answer(id);
+      return {
+        ...out,
+        opId: id,
+        op: tracked,
+        record: record ? { ok: record.ok, rev: record.rev, ...(record.ok ? { result: record.result } : { error: record.error }) } : null,
+        ...(tracked || record
+          ? {}
+          : {
+              lookup: `no operation "${id}" is tracked and no answer is recorded for it — it was sent without an opId, its record was pruned after ${report.kept} kept answers, or it ran in a plugin instance that has since reloaded. The document itself is the only witness left: inspect it.`,
+            }),
+      };
+    }
+    return out;
+  },
+
+  /**
+   * Stop a queued write before it starts. Refusals are the interesting half and
+   * they are honest about which one they are: `OP_RUNNING` (Figma runs plugin
+   * code to the end — nothing can interrupt it), `OP_DONE` (it already ran, and
+   * the message says at which revision), `OP_UNKNOWN` (no such id here).
+   */
+  async cancel(p: Json) {
+    if (!p.opId) throw new Error("cancel needs an opId: figma_ops lists the live ones, and a timeout error names the op it was about.");
+    return dispatcher.cancel(String(p.opId));
+  },
+
   // Figma-MCP-parity tools (use_figma, get_metadata, get_design_context, ...).
   ...toolMethods,
 };
