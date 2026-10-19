@@ -11,6 +11,7 @@
     "daemon": "node server/dist/daemon.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.plugin.json",
     "test": "npm run build:plugin && npm run build:server && node --test --test-concurrency=1 test/*.test.mjs && node --test --test-concurrency=1 test/*.e2e.mjs",
+    "smoke": "node scripts/mcp-smoke.mjs",
     "start": "node server/dist/index.js"
   },
   "dependencies": {
