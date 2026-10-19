@@ -15,6 +15,7 @@ plugin/fingerprint.mjs
 plugin/session-key.mjs
 plugin/checkpoint.mjs
 plugin/helpers.mjs
+plugin/exports.mjs
 
 # logs and OS junk
 *.log

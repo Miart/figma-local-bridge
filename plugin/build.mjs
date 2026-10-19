@@ -131,5 +131,17 @@ await build({
   logLevel: "warning",
 });
 
+// exports.ts is the arithmetic behind an atlas manifest, a 9-slice descriptor
+// and a list of states. Every number in it is a promise about a FILE, so the
+// tests drive the shipped module with fixtures rather than a copy.
+await build({
+  entryPoints: [join(here, "exports.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "exports.mjs"),
+  logLevel: "warning",
+});
+
 console.log("plugin built ->", join(here, "code.js"));
-console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs, helpers.mjs");
+console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs, helpers.mjs, exports.mjs");

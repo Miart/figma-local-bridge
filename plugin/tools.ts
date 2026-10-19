@@ -22,6 +22,7 @@ import { snapshot, STRICT } from "./fingerprint";
 import { DUMP_SCHEMA, LIMITATIONS, dumpSubtree, restoreSubtree } from "./checkpoint";
 import { sessionKey } from "./session-key";
 import { makeHelpers } from "./helpers";
+import { atlasManifest, nineSliceDescriptor, pngSize, stateList } from "./exports";
 
 const NS = "figma-local-bridge";
 const MAX_NODES = 1500;
@@ -31,6 +32,45 @@ const MAX_NODES = 1500;
 const round = (n: number) => Math.round(n * 100) / 100;
 const isMixed = (v: any) => v === figma.mixed;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Exports are capped at 4x on the plugin side (Figma's own dialog goes to 4x). */
+const clampScale = (v: any, dflt: number) => Math.min(Math.max(Number(v) || dflt, 0.1), 4);
+
+/** A plain absolute box, or null when the node has none (empty frames, lines). */
+function box4(b: any): { x: number; y: number; width: number; height: number } | null {
+  if (!b) return null;
+  return { x: round(b.x), y: round(b.y), width: round(b.width), height: round(b.height) };
+}
+
+/**
+ * Which box the exported image actually is, when a node has a stroke.
+ *
+ * `absoluteBoundingBox` includes strokes; `absoluteTransform` + `width`/`height`
+ * is the node's own box. Figma exports one of the two depending on the node, and
+ * a rect computed against the wrong origin is off by the stroke width — the
+ * kind of error that survives review because everything still looks plausible.
+ * The exported file's own size decides which; when neither matches, the bounding
+ * box is used and the caller is warned that the rects may be offset.
+ */
+function exportBasis(node: any, size: { width: number; height: number } | null, scale: number) {
+  const bbox = box4(node.absoluteBoundingBox);
+  const t = node.absoluteTransform;
+  const nodeBox = t && node.width && node.height
+    ? { x: round(t[0][2]), y: round(t[1][2]), width: round(node.width), height: round(node.height) }
+    : null;
+  if (!bbox && !nodeBox) throw new Error(`"${node.name}" has no bounds to export`);
+  if (!bbox) return { box: nodeBox!, basis: "nodeBox" as const };
+  if (!nodeBox) return { box: bbox, basis: "boundingBox" as const };
+  const same =
+    Math.abs(bbox.x - nodeBox.x) < 0.01 && Math.abs(bbox.y - nodeBox.y) < 0.01 &&
+    Math.abs(bbox.width - nodeBox.width) < 0.01 && Math.abs(bbox.height - nodeBox.height) < 0.01;
+  if (same || !size) return { box: bbox, basis: "boundingBox" as const };
+  const fitsBbox = Math.round(bbox.width * scale) === size.width && Math.round(bbox.height * scale) === size.height;
+  const fitsNode = Math.round(nodeBox.width * scale) === size.width && Math.round(nodeBox.height * scale) === size.height;
+  if (fitsNode && !fitsBbox) return { box: nodeBox, basis: "nodeBox" as const };
+  return { box: bbox, basis: "boundingBox" as const, ambiguous: true };
+}
+
 
 function hex(c: RGB | RGBA, opacity?: number): string {
   const h = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, "0");
@@ -737,6 +777,181 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
       out.push({ nodeId: id, name: node.name, format, bytes: bytes.length, base64: figma.base64Encode(bytes) });
     }
     return { files: out };
+  },
+
+  /**
+   * A sprite sheet plus the rects that describe it, in one call.
+   *
+   * The sheet is exported as ONE image and the manifest describes THAT image:
+   * the PNG's IHDR is read, the rects are computed in the file's pixels, and
+   * anything that makes the sheet unsliceable (overlapping rects, sprites off
+   * the image, drawing that bleeds out of its own cell, names that repeat) comes
+   * back named. Nothing is repacked and nothing is guessed — the layout is the
+   * designer's, the numbers are the file's.
+   */
+  async export_atlas(p: Json) {
+    const sheet: any = await nodeOrSelectionOrPage(p.nodeId);
+    if (!("exportAsync" in sheet)) throw new Error(sheet.type + " cannot be exported");
+    if (!("children" in sheet)) throw new Error(sheet.type + " has no children to describe as sprites");
+    if (!sheet.children.length) {
+      throw new Error(`"${sheet.name}" has no children — an atlas of nothing would be an empty manifest`);
+    }
+    const scale = clampScale(p.scale, 1);
+    const bytes: Uint8Array = await sheet.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: scale } });
+    const size = pngSize(bytes);
+    const b = exportBasis(sheet, size, scale);
+    const skipped: Json[] = [];
+    const sprites: Json[] = [];
+    for (const c of sheet.children as any[]) {
+      const box = box4(c.absoluteBoundingBox);
+      if (!box) { skipped.push({ id: c.id, name: c.name, type: c.type, why: "no bounds (empty)" }); continue; }
+      sprites.push({ id: c.id, name: c.name, box, render: box4(c.absoluteRenderBounds), visible: c.visible !== false });
+    }
+    const manifest = atlasManifest({
+      sheetId: sheet.id,
+      sheetName: sheet.name,
+      sheet: b.box,
+      sprites,
+      scale,
+      exportSize: size,
+      basis: b.ambiguous ? "unmatched" : b.basis,
+    });
+    return {
+      nodeId: sheet.id,
+      name: sheet.name,
+      format: "PNG",
+      scale,
+      bytes: bytes.length,
+      exportSize: size,
+      skipped,
+      manifest,
+      rev: currentRev(),
+      base64: figma.base64Encode(bytes),
+    };
+  },
+
+  /**
+   * The insets of a 9-slice sprite, either given or read from a child layer
+   * named exactly `9slice` — the rectangle the designer drew where the middle
+   * should stretch. One PNG plus the descriptor, whose numbers are checked
+   * against the file that was produced.
+   */
+  async export_9slice(p: Json) {
+    const node: any = await nodeOrSelectionOrPage(p.nodeId);
+    if (!("exportAsync" in node)) throw new Error(node.type + " cannot be exported");
+    if (!(node.width > 0) || !(node.height > 0)) throw new Error(`"${node.name}" has no size to slice`);
+    const scale = clampScale(p.scale, 1);
+    const insets = p.insets
+      ? { top: Number(p.insets.top), right: Number(p.insets.right), bottom: Number(p.insets.bottom), left: Number(p.insets.left) }
+      : null;
+    if (insets && [insets.top, insets.right, insets.bottom, insets.left].some((v) => !Number.isFinite(v) || v < 0)) {
+      throw new Error("insets must be four non-negative numbers {top, right, bottom, left}, in design pixels");
+    }
+    const children: any[] = "children" in node ? node.children : [];
+    const guide = children.find((c) => c.name === "9slice") ?? null;
+    // The frame's own box, not its bounding box: the guides are laid out inside
+    // the frame, and a stroke would shift every inset by half of it.
+    const t = node.absoluteTransform;
+    const nodeBox = t ? { x: round(t[0][2]), y: round(t[1][2]), width: round(node.width), height: round(node.height) } : null;
+    const sheetBox = nodeBox ?? box4(node.absoluteBoundingBox);
+    const guideBox = guide ? box4(guide.absoluteBoundingBox) : null;
+    const bytes: Uint8Array = await node.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: scale } });
+    const size = pngSize(bytes);
+    const descriptor = nineSliceDescriptor({
+      width: node.width,
+      height: node.height,
+      insets,
+      guide: !insets && guideBox && sheetBox ? { sheet: sheetBox, guide: guideBox } : null,
+      scale,
+      exportSize: size,
+    });
+    return {
+      nodeId: node.id,
+      name: node.name,
+      format: "PNG",
+      scale,
+      bytes: bytes.length,
+      exportSize: size,
+      guide: guide ? { id: guide.id, name: guide.name, ignored: !!insets } : null,
+      descriptor,
+      rev: currentRev(),
+      base64: figma.base64Encode(bytes),
+    };
+  },
+
+  /**
+   * The states of a button (or of any component) as separate files, plus what
+   * each file is called.
+   *
+   * A COMPONENT_SET names its variants by property; a frame names them by layer
+   * name. Both are facts of the document, so neither is guessed: the tool refuses
+   * when a set declares several properties and the caller did not say which one
+   * names the states, because "State=hover" and "Size=L" are both plausible and
+   * one of them would be a lie.
+   */
+  async export_ui_states(p: Json) {
+    const node: any = await nodeOrSelectionOrPage(p.nodeId);
+    if (node.type === "PAGE" || node.type === "DOCUMENT") {
+      throw new Error(`export_ui_states needs a frame or a component set, not a ${node.type}`);
+    }
+    if (!("children" in node) || !node.children.length) {
+      throw new Error(`"${node.name}" has no children to export as states`);
+    }
+    const format = String(p.format || "PNG").toUpperCase();
+    if (format !== "PNG" && format !== "SVG") throw new Error("format must be PNG or SVG");
+    const scale = clampScale(p.scale, 1);
+    const declared =
+      node.type === "COMPONENT_SET" && node.variantGroupProperties ? Object.keys(node.variantGroupProperties) : null;
+    const list = stateList({
+      nodeType: node.type,
+      variantPropertyNames: declared,
+      property: p.property ? String(p.property) : null,
+      children: node.children.map((c: any) => ({
+        id: c.id,
+        name: c.name,
+        type: c.type,
+        width: c.width,
+        height: c.height,
+        visible: c.visible !== false,
+        variantProperties: c.variantProperties ?? null,
+      })),
+    });
+    const files: Json[] = [];
+    for (const st of list.states) {
+      const child: any = await figma.getNodeByIdAsync(st.id);
+      if (!child) { files.push({ key: st.key, id: st.id, error: "node not found" }); continue; }
+      if (!("exportAsync" in child)) { files.push({ key: st.key, id: st.id, error: child.type + " cannot be exported" }); continue; }
+      try {
+        const settings: any = { format };
+        if (format === "PNG") settings.constraint = { type: "SCALE", value: scale };
+        const bytes: Uint8Array = await child.exportAsync(settings);
+        files.push({
+          key: st.key,
+          id: st.id,
+          name: child.name,
+          format,
+          scale,
+          bytes: bytes.length,
+          exportSize: format === "PNG" ? pngSize(bytes) : null,
+          expected: format === "PNG" ? { width: Math.round(st.width * scale), height: Math.round(st.height * scale) } : null,
+          ...(format === "SVG" ? { text: decodeUtf8(bytes) } : { base64: figma.base64Encode(bytes) }),
+        });
+      } catch (err: any) {
+        files.push({ key: st.key, id: st.id, name: child.name, error: String(err && err.message ? err.message : err) });
+      }
+    }
+    return {
+      nodeId: node.id,
+      name: node.name,
+      type: node.type,
+      property: list.property,
+      format,
+      scale,
+      states: list.states,
+      files,
+      warnings: list.warnings,
+      rev: currentRev(),
+    };
   },
 
   async import_images(p: Json) {
