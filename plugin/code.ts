@@ -94,6 +94,7 @@ import { toolMethods, MUTATING_METHODS } from "./tools";
 import { snapshot, compare, explain, STRICT, COMPONENTIZE } from "./fingerprint";
 import { bump, current } from "./rev";
 import { Dispatcher } from "./dispatch";
+import { sessionKey } from "./session-key";
 
 const CAPS = { write: true };
 
@@ -128,15 +129,15 @@ const MUTATING = new Set<string>([...MUTATING_METHODS, "replace_repeated_with_co
  * Identity of the file this panel serves.
  *
  * figma.fileKey is undefined until the file is first saved, so an unsaved file
- * gets a session key instead. The daemon routes requests by this key and uses it
- * to tell two open Figma windows apart; the key never reaches Figma itself.
- * Computed at handshake time, so a file saved mid-session reports its real key
- * the next time the plugin reloads.
+ * answers to a session key kept on the document itself (see session-key.ts) —
+ * stable across reloads, which is the whole point: minted per run, it went
+ * stale under every agent that had just read it. The daemon routes requests by
+ * this key and uses it to tell two open Figma windows apart; the key never
+ * reaches Figma itself, and a file saved mid-session reports its real key from
+ * the next reload on.
  */
-const UNSAVED_KEY = "unsaved-" + Math.random().toString(36).slice(2, 10);
-
 function fileMeta(): Json {
-  return { key: figma.fileKey || UNSAVED_KEY, name: figma.root.name };
+  return { key: figma.fileKey || sessionKey(figma.root), name: figma.root.name };
 }
 
 function announce(): void {

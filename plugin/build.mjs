@@ -95,5 +95,17 @@ await build({
   logLevel: "warning",
 });
 
+// session-key.ts holds the key an unsaved file answers to. The unit test pins
+// the contract it exists for — "a plugin reload keeps the key" — so the shipped
+// module is built here rather than copied.
+await build({
+  entryPoints: [join(here, "session-key.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "session-key.mjs"),
+  logLevel: "warning",
+});
+
 console.log("plugin built ->", join(here, "code.js"));
-console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs");
+console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs");
