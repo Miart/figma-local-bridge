@@ -20,6 +20,8 @@ interface Pending {
   timer: NodeJS.Timeout;
   /** False until the request is on the wire; tells "never sent" from "maybe ran". */
   sent: boolean;
+  /** When this attempt began waiting — what `figma_ops` reports as the wait. */
+  since: number;
   /** Logical call this attempt belongs to, for the drop message. */
   opId: string;
   method: string;
@@ -46,6 +48,36 @@ export interface SelectionState {
   at: number;
 }
 
+/** A call this client is still waiting for. */
+export interface ClientOp {
+  opId: string;
+  method: string;
+  file: string | undefined;
+  waitedMs: number;
+  /** False while the request is still being written to the socket. */
+  sent: boolean;
+}
+
+/**
+ * A call whose caller gave up — its own timeout fired — and, if it ever arrived,
+ * the answer that came back afterwards.
+ *
+ * Kept because it is the difference between "may or may not have been applied"
+ * and a fact. The plugin may be finishing the very write the caller abandoned;
+ * `figma_ops` reports it, and while the plugin still has it queued `figma_cancel`
+ * can stop it before it writes.
+ */
+export interface AbandonedOp {
+  opId: string;
+  method: string;
+  file: string | undefined;
+  /** How long the call was waited for before giving up. */
+  waitedMs: number;
+  timedOutAt: number;
+  /** Filled in when the late envelope arrives; null if it never did. */
+  answer: { ok: boolean; rev: number | null; error?: string } | null;
+}
+
 /** One connected Figma file, as the daemon reports it. */
 export interface FileInfo {
   fileKey: string;
@@ -63,6 +95,11 @@ const describeFiles = (files: FileInfo[]) =>
  */
 export class FigmaClient {
   private pending = new Map<string, Pending>();
+  /**
+   * Calls that timed out, by transport id, newest last. Bounded: this is a
+   * diagnostic trail for "what happened to the op that timed out?", not a log.
+   */
+  private abandoned = new Map<string, AbandonedOp & { id: string }>();
   /**
    * Most recent selection per file — the plugin pushes selectionchange, so this
    * is answered from memory. Key `` "" `` holds pushes that carry no file
@@ -212,7 +249,22 @@ export class FigmaClient {
     if (env.id === null || env.id === undefined) return;
 
     const pending = this.pending.get(String(env.id));
-    if (!pending) return;
+    if (!pending) {
+      // A LATE ANSWER to a call whose timeout already fired. The caller is gone,
+      // so nothing is resolved — but the fact is kept: "may or may not have been
+      // applied" is precisely what figma_ops exists to settle.
+      const abandoned = this.abandoned.get(String(env.id));
+      if (abandoned) {
+        abandoned.answer = {
+          ok: env.ok === true,
+          rev: typeof env.rev === "number" ? env.rev : null,
+          ...(env.ok === true
+            ? {}
+            : { error: String(((env.error as { message?: string } | undefined) || {}).message || "plugin error") }),
+        };
+      }
+      return;
+    }
     clearTimeout(pending.timer);
     this.pending.delete(String(env.id));
 
@@ -230,6 +282,36 @@ export class FigmaClient {
   /** Connected Figma files, as the daemon last reported them. */
   get files(): FileInfo[] {
     return this.connectedFiles;
+  }
+
+  /** Calls this client is still waiting for, newest last. */
+  inFlightOps(): ClientOp[] {
+    const now = Date.now();
+    const out: ClientOp[] = [];
+    for (const p of this.pending.values()) {
+      out.push({ opId: p.opId, method: p.method, file: p.file, waitedMs: now - p.since, sent: p.sent });
+    }
+    return out;
+  }
+
+  /** Calls whose timeout fired, and any answer that arrived afterwards. */
+  abandonedOps(): AbandonedOp[] {
+    return [...this.abandoned.values()].map(({ id: _id, ...rest }) => rest);
+  }
+
+  /**
+   * Remember a call nobody is waiting for any more. The transport id stays the
+   * key, because that is what a late envelope carries — the opId is the caller's
+   * name for the call and is what a tool or a cancel refers to.
+   */
+  private rememberAbandoned(entry: AbandonedOp & { id: string }) {
+    this.abandoned.set(entry.id, entry);
+    const limit = 20;
+    while (this.abandoned.size > limit) {
+      const oldest = this.abandoned.keys().next().value;
+      if (oldest === undefined) break;
+      this.abandoned.delete(oldest);
+    }
   }
 
   /**
@@ -385,14 +467,35 @@ export class FigmaClient {
     const id = crypto.randomBytes(8).toString("hex");
     const promise = new Promise<Envelope>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`bridge timeout after ${timeoutMs}ms on ${method} (op ${opId})`));
+        const p = this.pending.get(id);
+        if (p) {
+          this.pending.delete(id);
+          // The caller is giving up, but the plugin may not be: keep the call
+          // visible so a late answer lands somewhere instead of nowhere.
+          this.rememberAbandoned({
+            id,
+            opId,
+            method,
+            file,
+            waitedMs: Date.now() - p.since,
+            timedOutAt: Date.now(),
+            answer: null,
+          });
+        }
+        reject(
+          new Error(
+            `bridge timeout after ${timeoutMs}ms on ${method} (op ${opId}) — the plugin may still be running it. ` +
+              `figma_ops shows whether it is queued or running (and figma_cancel can stop it while it is still queued); ` +
+              `figma_ops with opId "${opId}" reports the answer if it finished after this timeout.`,
+          ),
+        );
       }, timeoutMs);
       this.pending.set(id, {
         resolve,
         reject,
         timer,
         sent: false,
+        since: Date.now(),
         opId,
         method,
         file,

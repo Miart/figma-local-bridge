@@ -97,7 +97,7 @@ try {
   const list = await rpc("tools/list", {});
   const names = (list.result?.tools || []).map((t) => t.name);
   check("tool surface is present", names.length >= 20, `${names.length} tools`);
-  for (const want of ["figma_ping", "figma_inspect", "figma_get_design_context", "figma_use"]) {
+  for (const want of ["figma_ping", "figma_inspect", "figma_get_design_context", "figma_use", "figma_checkpoint", "figma_ops", "figma_cancel"]) {
     check(`${want} is exposed`, names.includes(want));
   }
   // The invariant the whole design rests on: no primitives.

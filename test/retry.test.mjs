@@ -189,3 +189,85 @@ test("every logical call gets its own opId", async () => {
   assert.deepEqual(await a, { nodeId: "1:1" });
   assert.deepEqual(await b, { nodeId: "1:2" });
 });
+
+// A call whose timeout fires is the dangerous kind of unknown: the plugin may be
+// running it right now, or waiting to run it behind another write. The old code
+// dropped the pending entry and forgot the call entirely, so the answer — the
+// one thing that settles it — vanished. These pin the trail instead.
+
+test("a timed-out call stays visible, and its late answer is recorded", async () => {
+  const { link, client } = paired();
+
+  const pending = client.call("use_figma", { code: "figma.createFrame()" }, 30);
+  await tick();
+  const sent = link.sent[0];
+
+  await assert.rejects(pending, (err) => {
+    assert.match(err.message, /bridge timeout after 30ms/);
+    assert.match(err.message, new RegExp(`op ${sent.opId}`), "the opId is the handle for everything that follows");
+    assert.match(err.message, /figma_ops/, "and the message says how to settle it");
+    assert.match(err.message, /figma_cancel/, "including stopping it while it is still queued");
+    return true;
+  });
+
+  const abandoned = client.abandonedOps();
+  assert.equal(abandoned.length, 1, "the call is not forgotten");
+  assert.equal(abandoned[0].opId, sent.opId);
+  assert.equal(abandoned[0].method, "use_figma");
+  assert.equal(abandoned[0].answer, null, "nothing has come back yet, and it says so");
+  assert.ok(abandoned[0].waitedMs >= 30, "it remembers how long it waited");
+
+  // The plugin finishes the write the caller gave up on, a moment too late.
+  link.emit({ id: sent.id, ok: true, rev: 412, result: { created: 3 } });
+  const settled = client.abandonedOps()[0];
+  assert.deepEqual(settled.answer, { ok: true, rev: 412 }, "the late answer is kept, not dropped on the floor");
+});
+
+test("a late failure is recorded as a failure, with the plugin's own message", async () => {
+  const { link, client } = paired();
+
+  const pending = client.call("replace_repeated_with_component", { ids: ["1:1"] }, 20);
+  await tick();
+  const sent = link.sent[0];
+  await assert.rejects(pending, /bridge timeout/);
+
+  link.emit({ id: sent.id, ok: false, rev: 9, error: { message: "TARGETS_NOT_EQUIVALENT" } });
+  assert.deepEqual(client.abandonedOps()[0].answer, { ok: false, rev: 9, error: "TARGETS_NOT_EQUIVALENT" });
+});
+
+test("a call in flight is listed with its op, its file and how long it has been waiting", async () => {
+  const { link, client } = paired();
+
+  const pending = client.call("use_figma", { code: "x" }, 5000);
+  await tick();
+
+  const inFlight = client.inFlightOps();
+  assert.equal(inFlight.length, 1);
+  assert.equal(inFlight[0].method, "use_figma");
+  assert.equal(inFlight[0].opId, link.sent[0].opId);
+  assert.equal(inFlight[0].sent, true, "it is on the wire, so a timeout would mean \"may have run\"");
+  assert.ok(inFlight[0].waitedMs >= 0);
+
+  link.emit({ id: link.sent[0].id, ok: true, result: {} });
+  await pending;
+  assert.deepEqual(client.inFlightOps(), [], "and it leaves the list once answered");
+  assert.deepEqual(client.abandonedOps(), [], "an answered call is not an abandoned one");
+});
+
+test("the abandoned trail is bounded — newest kept, oldest dropped", async () => {
+  const { link, client } = paired();
+
+  for (let i = 0; i < 25; i++) {
+    // Each one really times out before the next starts, or nothing is abandoned.
+    await assert.rejects(client.call("get_metadata", { nodeId: "1:1" }, 5), /bridge timeout/);
+  }
+
+  const abandoned = client.abandonedOps();
+  assert.equal(abandoned.length, 20, "a trail, not a log");
+  assert.equal(abandoned[abandoned.length - 1].opId, link.sent[link.sent.length - 1].opId, "the newest call is still there");
+  assert.notEqual(abandoned[0].opId, link.sent[0].opId, "the oldest fell off the end");
+
+  // An envelope nobody asked for must not throw or start answering anything.
+  link.emit({ id: "not-a-request-we-know", ok: true, rev: 1 });
+  assert.equal(client.abandonedOps().length, 20);
+});

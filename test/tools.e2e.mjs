@@ -83,7 +83,7 @@ try {
   const expected = ["figma_whoami", "figma_get_metadata", "figma_get_design_context", "figma_get_layout_tree", "figma_get_screenshot",
     "figma_get_variable_defs", "figma_get_libraries", "figma_search_design_system", "figma_get_figjam",
     "figma_download_assets", "figma_get_code_connect_map", "figma_use", "figma_upload_assets", "figma_add_code_connect_map",
-    "figma_compare", "figma_checkpoint"];
+    "figma_compare", "figma_checkpoint", "figma_ops", "figma_cancel"];
   const missing = expected.filter((n) => !tools.includes(n));
   check("all parity tools are registered", missing.length === 0, "missing: " + missing.join(","));
 
@@ -117,6 +117,31 @@ try {
         return ok({ ok: true, result: { id: "5:5" }, logs: ["hello"], changed: true, ms: { code: 12, index: 345, total: 360 }, nodes: { before: 3, after: 4 } },
           env.params.code.includes("replayed") ? { replayed: true, rev: 8 } : undefined);
       case "import_images": return ok({ created: env.params.files.map((f) => ({ name: f.name, bytes: Buffer.from(f.base64, "base64").length })) });
+      case "ops": {
+        const report = {
+          file: { key: "FILEKEY", name: "Test file" },
+          running: [{ opId: "op-run", method: "use_figma", state: "running", queuedAt: 1000, startedAt: 1000, waitedMs: 0, ranMs: 1200 }],
+          queued: [{ opId: "op-wait", method: "import_images", state: "queued", queuedAt: 1500, waitedMs: 900 }],
+          recent: [{ opId: "op-done", method: "get_metadata", state: "done", queuedAt: 100, startedAt: 100, endedAt: 180, waitedMs: 0, ranMs: 80, rev: 6, ok: true }],
+          seen: 3,
+          kept: 3,
+          note: "Only calls that carried an opId appear here.",
+        };
+        if (env.params.opId) {
+          return ok({
+            ...report,
+            opId: env.params.opId,
+            op: report.recent[0],
+            record: { ok: true, rev: 6, result: { nodes: 1 } },
+          });
+        }
+        return ok(report);
+      }
+      case "cancel":
+        if (env.params.opId === "op-run") {
+          return fail("OP_RUNNING: op op-run (use_figma) is running right now — 1.2 s in — and Figma runs plugin code to the end.");
+        }
+        return ok({ opId: env.params.opId, method: "import_images", waitedMs: 900, position: 0 });
       default: return fail("unhandled " + env.method);
     }
   });
@@ -230,7 +255,43 @@ try {
   const upSvg = await c.rpc("tools/call", { name: "figma_upload_assets", arguments: { paths: [svg] } });
   check("upload_assets rejects SVG with a pointer to figma_use", JSON.stringify(upSvg.result?.content ?? upSvg.error).includes("unsupported image type"));
 
+  // figma_ops / figma_cancel: half the answer is the plugin's queue, half is what
+  // THIS session is still waiting for. Both halves have to be in the reply, and
+  // the cancel has to pass the plugin's refusal through instead of pretending.
+  const opsReqBefore = seen.length;
+  const ops = c.text(await c.rpc("tools/call", { name: "figma_ops", arguments: {} }));
+  check("figma_ops merges the plugin's queue with this session's own calls",
+    ops.plugin.running[0].opId === "op-run" && ops.plugin.queued[0].state === "queued" &&
+    ops.plugin.recent[0].rev === 6 && Array.isArray(ops.thisClient.inFlight) && Array.isArray(ops.thisClient.abandoned) &&
+    ops.file.key === "FILEKEY",
+    JSON.stringify(ops).slice(0, 200));
+  const opsReq = seen[opsReqBefore];
+  check("figma_ops passes opId and recent through to the plugin", opsReq.method === "ops" && opsReq.params.recent === 10 && opsReq.params.opId === undefined);
+
+  const opsOne = c.text(await c.rpc("tools/call", { name: "figma_ops", arguments: { opId: "op-done", recent: 3 } }));
+  check("figma_ops reports a finished op's recorded answer — the thing a caller that timed out never saw",
+    opsOne.opId === "op-done" && opsOne.record.ok === true && opsOne.record.rev === 6 && opsOne.record.result.nodes === 1,
+    JSON.stringify(opsOne).slice(0, 200));
+  check("figma_ops hoists the asked-about op instead of burying it", opsOne.op.opId === "op-done");
+  check("figma_ops does not invent a lookup note when the op is known", opsOne.lookup === undefined, JSON.stringify(opsOne.lookup));
+
+  const cancelOk = c.text(await c.rpc("tools/call", { name: "figma_cancel", arguments: { opId: "op-wait" } }));
+  check("figma_cancel reports the stop, where it was in the queue, and the revision it did not move",
+    cancelOk.cancelled === true && cancelOk.opId === "op-wait" && cancelOk.position === 0 && cancelOk.waitedMs === 900 && cancelOk.rev === 7,
+    JSON.stringify(cancelOk));
+
+  const cancelBad = await c.rpc("tools/call", { name: "figma_cancel", arguments: { opId: "op-run" } });
+  const cancelBadMsg = String(cancelBad.error?.message ?? cancelBad.result?.content?.[0]?.text ?? JSON.stringify(cancelBad));
+  check("a running call refuses to be cancelled, and the plugin's reason is what the agent sees",
+    /OP_RUNNING/.test(cancelBadMsg) && /running right now/.test(cancelBadMsg), cancelBadMsg.slice(0, 140));
+
   plugin.close();
+  await sleep(250);
+  const opsOffline = c.text(await c.rpc("tools/call", { name: "figma_ops", arguments: {} }));
+  check("figma_ops still answers with what this session knows when the plugin is gone",
+    opsOffline.plugin === null && typeof opsOffline.pluginError === "string" && Array.isArray(opsOffline.thisClient.inFlight),
+    JSON.stringify(opsOffline).slice(0, 160));
+
   c.kill(); daemon.kill();
   try { fs.unlinkSync(INFO); } catch {}
   process.stdout.write(`\n${pass}/${pass + fail} passed\n`);

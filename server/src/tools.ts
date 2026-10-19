@@ -7,6 +7,7 @@ import { BridgeOffline } from "./websocket.js";
 import { registerParityTools } from "./parity-tools.js";
 import { registerCompareTool } from "./compare-tools.js";
 import { registerCheckpointTools } from "./checkpoint-tools.js";
+import { registerOpsTools } from "./ops-tools.js";
 
 export interface Capabilities {
   read: boolean;
@@ -89,6 +90,9 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   // Same reasoning: save/show/list/drop and the dry run are read-only. Only a
   // real rebuild writes, and it checks `caps.destructive` at call time.
   registerCheckpointTools(server, client, caps);
+  // "What is still running, and can I stop it?" — the read half is read-only,
+  // and the cancel half only ever prevents a write, so both belong here too.
+  registerOpsTools(server, client);
 
   if (!caps.write) {
     server.tool(
