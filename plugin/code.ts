@@ -23,7 +23,62 @@ declare const __html__: string;
 
 type Json = any;
 
-figma.showUI(__html__, { width: 320, height: 470, themeColors: true });
+/**
+ * The panel window.
+ *
+ * Its height is not fixed any more: the UI measures what it rendered and asks
+ * for a window that fits (figma.ui.resize). Hiding the mascot is worth ~230px,
+ * the error line ~20, and neither should leave dead space behind. Width never
+ * changes; the height is clamped here, because the UI cannot know Figma's
+ * limits, and reseeded from clientStorage, because the first frame should
+ * already be the right size instead of jumping on every reload.
+ */
+const UI_WIDTH = 320;
+const UI_MIN_H = 140;
+const UI_MAX_H = 900;
+const UI_H_OPEN = 420; // the first frame's guess; the UI reports the real height
+
+let petHidden = false;
+
+/**
+ * Fit the window to a height the panel measured.
+ *
+ * Figma applies these asynchronously, and a request that lands while an earlier
+ * one is still in flight can be overridden by it — which is what "hide the pet
+ * a few times and the window stops shrinking" turned out to be: the last
+ * request was correct, the window just kept the height of a resize that was
+ * already on its way. So the same height is re-asserted once, shortly after,
+ * unless a newer request has arrived in the meantime.
+ */
+let fitTimer: ReturnType<typeof setTimeout> | null = null;
+let fitHeight = 0;
+
+function fitWindow(h: number): void {
+  fitHeight = h;
+  figma.ui.resize(UI_WIDTH, h);
+  if (fitTimer) clearTimeout(fitTimer);
+  fitTimer = setTimeout(() => {
+    fitTimer = null;
+    if (fitHeight === h) figma.ui.resize(UI_WIDTH, h);
+  }, 200);
+}
+
+// Shown synchronously, before the first await: the manifest already declares a
+// UI file, and creating ours after an await made Figma tear down that first UI
+// and build a second one — two instances booting, two sockets, and a window
+// whose size came from the manifest rather than from these options.
+figma.showUI(__html__, { width: UI_WIDTH, height: UI_H_OPEN, themeColors: true });
+
+// The mascot switch cannot be known synchronously (clientStorage is async), so
+// the panel starts with the mascot and this push hides it a moment later. The
+// UI re-measures after hiding, and the window follows on its own.
+figma.clientStorage.getAsync("flb.petHidden").then(
+  (stored) => {
+    petHidden = !!stored;
+    post({ event: "pet", hidden: petHidden });
+  },
+  () => {},
+);
 
 function post(m: Json): void {
   try {
@@ -256,6 +311,9 @@ figma.ui.onmessage = async (envelope: Json) => {
 
   if (msg.uiReady) {
     announce();
+    // Belt and braces for the body attribute openUi() injected: if that replace
+    // ever misses (a UI with no plain <body> tag), the push still gets there.
+    post({ event: "pet", hidden: petHidden });
     // The UI sandbox has no localStorage; hand the saved token back.
     figma.clientStorage.getAsync("flb.token").then(
       (token) => post({ event: "token", token: token || "" }),
@@ -265,6 +323,21 @@ figma.ui.onmessage = async (envelope: Json) => {
   }
   if (msg.saveToken !== undefined) {
     figma.clientStorage.setAsync("flb.token", String(msg.saveToken)).catch(() => {});
+    return;
+  }
+  if (msg.savePetHidden !== undefined) {
+    petHidden = !!msg.savePetHidden;
+    figma.clientStorage.setAsync("flb.petHidden", petHidden).catch(() => {});
+    return;
+  }
+  // The UI measured its own content. Clamp and fit the window to it.
+  if (typeof msg.uiHeight === "number" && isFinite(msg.uiHeight)) {
+    const h = Math.max(UI_MIN_H, Math.min(UI_MAX_H, Math.round(msg.uiHeight)));
+    try {
+      fitWindow(h);
+    } catch (e) {
+      console.log("resize failed", e);
+    }
     return;
   }
   if (msg.pluginReady !== undefined) {
