@@ -352,7 +352,8 @@ export function registerExportTools(server: McpServer, client: FigmaClient) {
     "Write a web handoff bundle for one frame: preview.png (1x), an optional preview@Nx.png, spec.json with every layer's absolute box, text, " +
       "paints and effects, tokens.json and tokens.css (colours, fonts, text classes, spacing), a README that states what the bundle does NOT carry, " +
       "and handoff.json with hashes and counts. One call writes one folder and every file is re-read from disk. Read-only for the document — it works " +
-      "with write access off. Refuses above 2,500 nodes or 8 MiB per preview instead of truncating. This is a specification, not generated production HTML.",
+      "with write access off. Refuses above 2,500 nodes or 8 MiB per preview instead of truncating; font availability is checked within a time budget, " +
+      "and a font the check could not confirm is reported as unchecked, not assumed present. This is a specification, not generated production HTML.",
     {
       nodeId: figmaNodeId().optional().describe("The frame, component or section to hand off; defaults to the single selected node"),
       scale: z.number().min(1).max(4).default(2).describe("Scale of the second preview (preview@Nx.png); 1 means only preview.png"),
@@ -520,7 +521,7 @@ export function registerExportTools(server: McpServer, client: FigmaClient) {
           images: images.map(({ path, ...rest }) => rest),
           files: files.map(({ path, ...rest }) => rest),
           counts: r.counts ?? null,
-          fonts: { missing: r.missingFonts ?? [] },
+          fonts: { missing: r.missingFonts ?? [], unchecked: r.uncheckedFonts ?? [] },
           verification: {
             nodesInSpec: r.spec.nodes.length,
             countsMatchSpec: r.counts?.nodes === r.spec.nodes.length,
@@ -539,7 +540,7 @@ export function registerExportTools(server: McpServer, client: FigmaClient) {
           files: files.filter((f) => f.name !== "handoff.json").map(({ path, ...rest }) => rest),
           images: images.map(({ path, ...rest }) => rest),
           counts: r.counts ?? null,
-          fonts: { missing: r.missingFonts ?? [] },
+          fonts: { missing: r.missingFonts ?? [], unchecked: r.uncheckedFonts ?? [] },
           rev: r.rev ?? null,
           nodeId: r.nodeId,
           name: r.name,

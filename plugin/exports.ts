@@ -670,6 +670,8 @@ export interface HandoffInput {
   scale: number;
   previews: HandoffPreviewFact[];
   missingFonts?: string[];
+  /** Font styles the time-boxed check could not confirm either way. */
+  uncheckedFonts?: string[];
   fontCheck?: HandoffFontCheck | null;
   rev?: number | null;
 }
@@ -1192,6 +1194,14 @@ export function webHandoff(input: HandoffInput): HandoffBundle {
     warnings.push(
       `${missing.length} font style(s) could not be loaded: ${missing.slice(0, 6).join(", ")}${missing.length > 6 ? ", …" : ""} — ` +
         `the tokens name them, but a browser without them will substitute`,
+    );
+  }
+  const unchecked = input.uncheckedFonts ?? [];
+  if (unchecked.length) {
+    warnings.push(
+      `${unchecked.length} font style(s) were not confirmed within the check's time budget: ` +
+        `${unchecked.slice(0, 6).join(", ")}${unchecked.length > 6 ? ", …" : ""} — ` +
+        `the tokens name them; whether this machine can render them is unknown`,
     );
   }
   if (input.fontCheck && input.fontCheck.skipped > 0) {

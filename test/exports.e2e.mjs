@@ -207,6 +207,7 @@ try {
             (other ? "" : `- ${warning}\n`),
           counts: { nodes: 2, colors: 1, fonts: 1, textStyles: 1, spacing: 0 },
           missingFonts: other ? [] : ["Inter Display Bold"],
+          uncheckedFonts: other ? [] : ["Stolzl Medium"],
           warnings: other ? [] : [warning],
           previews: lying
             ? [{ scale: 1, width: 200, height: 100, basis: "boundingBox", base64: png(100, 50) }]
@@ -373,6 +374,13 @@ try {
     "the reply points at the README and the manifest",
     handoff.entry === join(hdir, "README.md") && handoff.manifest === join(hdir, "handoff.json"),
     JSON.stringify({ entry: handoff.entry, manifest: handoff.manifest }),
+  );
+  check(
+    "a font the check could not confirm is carried as unchecked, next to the missing one",
+    handoff.fonts.unchecked.includes("Stolzl Medium") &&
+      hManifest.fonts.unchecked.includes("Stolzl Medium") &&
+      handoff.fonts.missing.includes("Inter Display Bold"),
+    JSON.stringify({ reply: handoff.fonts, manifest: hManifest.fonts }),
   );
 
   // A bundle belongs to one node; the same folder for another node would mix

@@ -496,6 +496,15 @@ function plain(v: any, depth = 0, verbose = false): any {
 const MAX_HANDOFF_NODES = 2500;
 /** Two PNGs travel in one reply; this keeps the message and the files sane. */
 const MAX_HANDOFF_PREVIEW = 8 * 1024 * 1024;
+/**
+ * Font availability is checked, not assumed — but `loadFontAsync` on a font the
+ * machine does not have is a network round trip that can take minutes, so the
+ * check is time-boxed. A style that does not answer within the per-font limit
+ * (and the overall budget) is reported as UNCHECKED, which is a different fact
+ * from "missing": the README says which one it is instead of implying presence.
+ */
+const FONT_CHECK_ONE_MS = 2_000;
+const FONT_CHECK_BUDGET_MS = 12_000;
 
 function handoffFont(f: any): Json | null {
   return f && typeof f.family === "string" && typeof f.style === "string" ? { family: f.family, style: f.style } : null;
@@ -1248,17 +1257,33 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
     const fonts = handoffFonts(facts);
 
     // Availability is a fact about the person opening the bundle, not about the
-    // document: a font can be in the file and absent from the machine. Capped,
-    // because loadFontAsync is a round trip per style.
+    // document: a font can be in the file and absent from the machine. Capped
+    // (loadFontAsync is a round trip per style) and time-boxed (a round trip for
+    // a font this machine does not have can take minutes). "Could not be loaded"
+    // and "was not confirmed in time" are reported separately.
     const checkCap = 64;
     const missingFonts: string[] = [];
-    const checked = fonts.slice(0, checkCap);
-    for (const f of checked) {
-      try {
-        await figma.loadFontAsync({ family: f.family, style: f.style } as FontName);
-      } catch {
-        missingFonts.push(`${f.family} ${f.style}`);
+    const uncheckedFonts: string[] = [];
+    const candidates = fonts.slice(0, checkCap);
+    const deadline = Date.now() + FONT_CHECK_BUDGET_MS;
+    let answered = 0;
+    for (const f of candidates) {
+      const label = `${f.family} ${f.style}`;
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        uncheckedFonts.push(label);
+        continue;
       }
+      const attempt = figma
+        .loadFontAsync({ family: f.family, style: f.style } as FontName)
+        .then(() => "ok" as const, () => "missing" as const);
+      const raced = await Promise.race([
+        attempt,
+        new Promise<"unchecked">((resolve) => setTimeout(() => resolve("unchecked"), Math.min(FONT_CHECK_ONE_MS, left))),
+      ]);
+      if (raced === "missing") missingFonts.push(label);
+      else if (raced === "unchecked") uncheckedFonts.push(label);
+      else answered++;
     }
 
     const previewAt = async (s: number): Promise<Json> => {
@@ -1300,7 +1325,8 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
       scale,
       previews,
       missingFonts,
-      fontCheck: { checked: checked.length, skipped: Math.max(0, fonts.length - checkCap) },
+      uncheckedFonts,
+      fontCheck: { checked: answered, skipped: Math.max(0, fonts.length - checkCap) },
       rev,
     });
 
@@ -1316,6 +1342,7 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
       ...bundle,
       previews,
       missingFonts,
+      uncheckedFonts,
     };
   },
 

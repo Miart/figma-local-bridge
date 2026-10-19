@@ -208,6 +208,14 @@ test("handoff: a missing font stays in the tokens and is named in the README", (
   assert.match(b.readme, /will substitute/);
 });
 
+test("handoff: a font the time-boxed check could not confirm is called unchecked, not present", () => {
+  const b = bundle([textNode()], { uncheckedFonts: ["Stolzl Medium"] });
+  assert.equal(b.tokens.fonts["inter-bold"].weight, 700);
+  assert.match(b.warnings.join(" "), /not confirmed within the check's time budget: Stolzl Medium/);
+  assert.match(b.readme, /whether this machine can render them is unknown/);
+  assert.doesNotMatch(b.warnings.join(" "), /could not be loaded/);
+});
+
 test("handoff: percent line-height and letter-spacing keep their units", () => {
   const b = bundle([
     textNode({

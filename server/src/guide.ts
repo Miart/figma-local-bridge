@@ -67,7 +67,8 @@ guess which variant property names them, reporting byte-identical states) and
 figma_export_web_handoff (previews, spec.json, tokens.json/css and a README that
 names the limits: production HTML, image fills as files, gradient tokens,
 embedded fonts, masks/effects not applied by the CSS, paragraph spacing/vertical
-alignment; missing fonts are listed, not assumed). All only read the document,
+alignment; missing fonts are listed, not assumed, and a font whose check
+ran past the time budget is called unchecked). All only read the document,
 so they work with writes off.
 `;
 

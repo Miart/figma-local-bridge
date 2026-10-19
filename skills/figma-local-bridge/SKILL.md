@@ -164,7 +164,11 @@ hashes and counts, every file is re-read from disk, and one call owns one
 folder — it refuses to reuse it for another node. Above 2,500 nodes or 8 MiB per
 preview it refuses rather than truncating; lower the scale or pick a smaller
 frame. A font that the document uses but the machine cannot load is listed in
-the README; it is not assumed present.
+the README; it is not assumed present. That check is time-boxed (2 s per
+style, 12 s in total), because loading a font this machine does not have is a
+network round trip that can take minutes: a style that does not answer in time
+is listed separately as **unchecked** — whether the machine can render it is
+unknown, and the bundle says so instead of implying either way.
 
 All four are reads of the document (usable with `FIGMA_BRIDGE_WRITE=0`), and
 their files go to `outDir`, a temp directory by default.
