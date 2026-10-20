@@ -905,6 +905,103 @@ const errors = async (fn) => {
 }
 
 {
+  // A direct instance override can change text range by range. The override is
+  // a full snapshot of every run, so the replay has to use the same range
+  // setters as a rebuilt TEXT node — base fields alone would flatten it.
+  const segments = [
+    {
+      start: 0, end: 1,
+      fontName: { family: "Inter", style: "Bold" }, fontSize: 24,
+      fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: 1 }],
+      textCase: "ORIGINAL", textDecoration: "NONE",
+      lineHeight: { unit: "PIXELS", value: 28 }, letterSpacing: { unit: "PIXELS", value: 1 },
+      hyperlink: null, textStyleId: "S:first", fillStyleId: "S:fill-first",
+      boundVariables: { fontSize: { type: "VARIABLE_ALIAS", id: "V:size-first" } },
+    },
+    {
+      start: 1, end: 2,
+      fontName: { family: "Inter", style: "Regular" }, fontSize: 12,
+      fills: [{ type: "SOLID", color: { r: 0, g: 0, b: 1 }, opacity: 1 }],
+      textCase: "UPPER", textDecoration: "UNDERLINE",
+      lineHeight: { unit: "AUTO" }, letterSpacing: { unit: "PERCENT", value: 0 },
+      hyperlink: { type: "URL", value: "https://example.com" },
+      textStyleId: "S:second", fillStyleId: "S:fill-second",
+      boundVariables: { fontSize: { type: "VARIABLE_ALIAS", id: "V:size-second" } },
+    },
+  ];
+  const label = node("TEXT", { name: "Label", characters: "AB" });
+  const main = node("COMPONENT", { name: "Chip", key: "K3", id: "9:9", children: [label] });
+  const srcInstance = main.createInstance();
+  const srcLabel = srcInstance.children[0];
+  srcLabel.characters = "AB";
+  srcLabel.fontName = Symbol("mixed");
+  srcLabel.fontSize = Symbol("mixed");
+  srcLabel.fills = Symbol("mixed");
+  srcLabel.lineHeight = Symbol("mixed");
+  srcLabel.letterSpacing = Symbol("mixed");
+  srcLabel.hyperlink = Symbol("mixed");
+  srcLabel.getStyledTextSegments = () => segments;
+  srcInstance.overrides = [{
+    id: srcLabel.id,
+    overriddenFields: [
+      "characters", "fontName", "fontSize", "fills", "lineHeight", "letterSpacing",
+      "textCase", "textDecoration", "hyperlink", "textStyleId", "fillStyleId",
+    ],
+  }];
+  const src = node("FRAME", { name: "Card", children: [srcInstance] });
+  const { root } = await dumpSubtree(src);
+  const rec = root.children[0].state.instance.overrides[0];
+  check("instances: per-run text styling is captured with the override",
+    rec.state.text.textRuns.length === 2 && rec.state.text.textRuns[1].font.style === "Regular" &&
+    rec.state.text.textRuns[0].textStyleId === "S:first");
+
+  const figma = fakeFigma([main], {
+    styles: [
+      { id: "S:first", name: "text/first", fontName: { family: "Inter", style: "Bold" } },
+      { id: "S:second", name: "text/second", fontName: { family: "Inter", style: "Regular" } },
+      { id: "S:fill-first", name: "fill/first" },
+      { id: "S:fill-second", name: "fill/second" },
+    ],
+    variables: [
+      { id: "V:size-first", name: "size/first" },
+      { id: "V:size-second", name: "size/second" },
+    ],
+  });
+  const target = node("FRAME");
+  const loaded = [];
+  const report = await restoreSubtree(root, ctxFor(figma, target, {
+    loadFont: async (f) => { loaded.push(`${f.family}/${f.style}`); },
+  }), {});
+  const restored = target.children[0].children[0];
+  const ops = restored.rangeOps || [];
+  const bound = restored.boundOps || [];
+  check("instances: per-run fonts are loaded and range fonts are replayed",
+    loaded.includes("Inter/Bold") && loaded.includes("Inter/Regular") &&
+    ops.some((o) => o.field === "font" && o.start === 0 && o.end === 1 && o.value.style === "Bold") &&
+    ops.some((o) => o.field === "font" && o.start === 1 && o.end === 2 && o.value.style === "Regular"));
+  check("instances: per-run size, fills, case, decoration, spacing and hyperlink are replayed",
+    ops.some((o) => o.field === "fontSize" && o.value === 24) &&
+    ops.some((o) => o.field === "fills" && o.value[0].color.b === 1) &&
+    ops.some((o) => o.field === "textCase" && o.value === "UPPER") &&
+    ops.some((o) => o.field === "textDecoration" && o.value === "UNDERLINE") &&
+    ops.some((o) => o.field === "lineHeight" && o.value.value === 28) &&
+    ops.some((o) => o.field === "letterSpacing" && o.value.value === 1) &&
+    ops.some((o) => o.field === "hyperlink" && o.value && o.value.value === "https://example.com"));
+  check("instances: per-run text and fill style links are re-linked",
+    report.stylesRestored.some((s) => s.field === "textStyleId" && s.id === "S:first") &&
+    report.stylesRestored.some((s) => s.field === "fillStyleId" && s.id === "S:fill-second") &&
+    ops.some((o) => o.field === "textStyleId" && o.value === "S:first") &&
+    ops.some((o) => o.field === "fillStyleId" && o.value === "S:fill-second"));
+  check("instances: per-run variable bindings are re-linked",
+    report.bindingsRestored.some((b) => b.field === "fontSize" && b.id === "V:size-first") &&
+    report.bindingsRestored.some((b) => b.field === "fontSize" && b.id === "V:size-second") &&
+    bound.some((o) => o.field === "fontSize" && o.variable.id === "V:size-second"));
+  check("instances: the per-run replay is not reported as a loss",
+    !report.notes.some((n) => /ranges are not reapplied/.test(n)) &&
+    !report.notes.some((n) => /no per-run data/.test(n)));
+}
+
+{
   // The target is a different node type than the checkpoint describes: the
   // children still come back, and the report says the root's own state was not.
   const figma = fakeFigma();

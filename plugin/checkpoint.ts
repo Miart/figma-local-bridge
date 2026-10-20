@@ -12,7 +12,8 @@
  *     component properties and direct per-layer overrides re-applied — the
  *     interior's STRUCTURE is the main component's current structure;
  *   - the runs themselves (font, size, fills, style links, variable bindings,
- *     case, decoration, line height, letter spacing and hyperlink) are;
+ *     case, decoration, line height, letter spacing and hyperlink) are saved
+ *     and rebuilt;
  *   - style ids, node-level variable bindings and explicit modes travel in
  *     `meta` and are re-linked by id when they still exist; every one that does
  *     not is reported instead of passing as restored;
@@ -37,7 +38,7 @@ export const MAX_DEPTH = 40;
  */
 export const LIMITATIONS: readonly string[] = [
   "an INSTANCE's interior STRUCTURE is its main component's current structure; direct per-layer overrides are captured and re-applied, but a layer added to or removed from the main component is not described by the checkpoint",
-  "a direct instance override that changed per-run text styling is captured with the layer snapshot; restore reapplies the base text fields and names the ranges it cannot replay",
+  "a direct instance override that changed per-run text styling is captured with the layer snapshot and replayed range by range; a per-run style link or variable binding that the override REMOVED is not cleared from the main component's current run",
   "text runs are rebuilt (font, size, fills, text/fill style links, variable bindings, case, decoration, line height, letter spacing and hyperlink)",
   "style ids are re-linked when the style still exists; node-level and run-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
@@ -1281,7 +1282,7 @@ const TEXT_OVERRIDE_FIELDS = new Set([
   "characters", "fontName", "fontSize", "lineHeight", "letterSpacing",
   "textCase", "textDecoration", "paragraphSpacing", "paragraphIndent",
   "hyperlink", "textAlignHorizontal", "textAlignVertical", "textAutoResize",
-  "textRangeFills",
+  "fills", "textStyleId", "fillStyleId", "textRangeFills",
 ]);
 
 const LAYOUT_OVERRIDE_FIELDS = new Set([
@@ -1311,6 +1312,8 @@ async function applyTextOverride(
 ): Promise<void> {
   const text = state.text || {};
   const font = text.font && text.font !== "mixed" ? text.font : null;
+  const runs = textRunsOf(text);
+  const replayRuns = runs.length > 0 && anyField(fields, TEXT_OVERRIDE_FIELDS);
   if (font && ctx.loadFont) {
     try {
       await ctx.loadFont(font);
@@ -1320,6 +1323,9 @@ async function applyTextOverride(
       report.notes.push(`${path}: font "${key}" is not available — the font override was not restored`);
     }
   }
+  // Every run font must be loaded before the character setter and the range
+  // setters; the base font alone is not enough for mixed text.
+  const runFontReady = replayRuns ? await loadTextRunFonts(runs, ctx, report, path) : [];
   const soft = (what: string, fn: () => void) => {
     try {
       fn();
@@ -1340,7 +1346,9 @@ async function applyTextOverride(
   if (fields.has("paragraphIndent") && typeof text.paragraphIndent === "number") soft("paragraph indent", () => { target.paragraphIndent = text.paragraphIndent; });
   if (fields.has("hyperlink")) {
     if (text.hyperlink === "mixed") {
-      report.notes.push(`${path}: hyperlinks are mixed and the checkpoint has no per-run data; the hyperlink override was not restored`);
+      if (!runs.length) {
+        report.notes.push(`${path}: hyperlinks are mixed and the checkpoint has no per-run data; the hyperlink override was not restored`);
+      }
     } else {
       soft("hyperlink", () => { target.hyperlink = text.hyperlink ?? null; });
     }
@@ -1348,9 +1356,7 @@ async function applyTextOverride(
   if (fields.has("textAlignHorizontal") && Array.isArray(text.align)) soft("horizontal align", () => { target.textAlignHorizontal = text.align[0]; });
   if (fields.has("textAlignVertical") && Array.isArray(text.align)) soft("vertical align", () => { target.textAlignVertical = text.align[1]; });
   if (fields.has("textAutoResize") && text.autoResize) soft("auto resize", () => { target.textAutoResize = text.autoResize; });
-  if (Array.isArray(text.textRuns) && text.textRuns.length && anyField(fields, TEXT_OVERRIDE_FIELDS)) {
-    report.notes.push(`${path}: the instance override carries per-run text styling; the base fields are restored, but the ranges are not reapplied`);
-  }
+  if (replayRuns) await applyTextRunValues(target, runs, runFontReady, ctx, report, path);
 }
 
 /**
@@ -1639,12 +1645,111 @@ async function applyRunBindings(
   }
 }
 
+/** Valid run ranges from a text state; malformed entries are ignored here and named by the caller. */
+function textRunsOf(text: Dict): Dict[] {
+  return Array.isArray(text.textRuns)
+    ? text.textRuns.filter((r: any) => r && Number.isInteger(r.start) && Number.isInteger(r.end) && r.end > r.start)
+    : [];
+}
+
+async function loadTextRunFonts(
+  runs: Dict[],
+  ctx: RestoreContext,
+  report: RestoreReport,
+  path: string,
+): Promise<boolean[]> {
+  const ready: boolean[] = runs.map(() => true);
+  if (!ctx.loadFont) return ready;
+  for (let i = 0; i < runs.length; i++) {
+    const f = runs[i].font;
+    if (!f) continue;
+    try {
+      await ctx.loadFont(f);
+    } catch {
+      ready[i] = false;
+      const key = `${f.family} ${f.style}`;
+      if (!report.fontsUnavailable.includes(key)) report.fontsUnavailable.push(key);
+      report.notes.push(`${path}: run ${i} font "${key}" is not available — that run's font was not restored`);
+    }
+  }
+  return ready;
+}
+
+/**
+ * Replay one text state's ranges. This is shared by a rebuilt TEXT node and by
+ * a direct instance override: both are snapshots of every run, so the same
+ * values (style links, font, size, fills, case, decoration, line height,
+ * letter spacing, hyperlink and variable bindings) go back the same way.
+ */
+async function applyTextRunValues(
+  node: any,
+  runs: Dict[],
+  runFontReady: boolean[],
+  ctx: RestoreContext,
+  report: RestoreReport,
+  path: string,
+): Promise<void> {
+  const length = typeof node.characters === "string" ? node.characters.length : 0;
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i];
+    const start = Number(run.start);
+    const end = Number(run.end);
+    if (start >= length || end > length) {
+      report.notes.push(`${path}: run ${i} range ${start}..${end} is outside the restored text (${length} characters)`);
+      continue;
+    }
+    const runSoft = (what: string, fn: () => void) => {
+      try {
+        fn();
+      } catch (e) {
+        report.notes.push(`${path}: run ${i} ${what} not restored: ${msg(e)}`);
+      }
+    };
+    await applyRunStyleLinks(node, run, start, end, ctx, report, path, i);
+    if (run.font && runFontReady[i] && typeof node.setRangeFontName === "function") {
+      runSoft("font", () => { node.setRangeFontName(start, end, run.font); });
+    }
+    if (run.fontSize !== undefined && typeof node.setRangeFontSize === "function") {
+      runSoft("font size", () => { node.setRangeFontSize(start, end, Number(run.fontSize)); });
+    }
+    if (run.fills !== undefined && typeof node.setRangeFills === "function") {
+      runSoft("fills", () => {
+        try {
+          node.setRangeFills(start, end, run.fills);
+        } catch {
+          const stripped = run.fills.map((p: any) => {
+            if (!p || typeof p !== "object") return p;
+            const { boundVariables, ...rest } = p;
+            return rest;
+          });
+          node.setRangeFills(start, end, stripped);
+          report.bindingsDropped.push(`${path}.state.text.textRuns[${i}].fills`);
+        }
+      });
+    }
+    if (run.textCase !== undefined && typeof node.setRangeTextCase === "function") {
+      runSoft("text case", () => { node.setRangeTextCase(start, end, run.textCase); });
+    }
+    if (run.textDecoration !== undefined && typeof node.setRangeTextDecoration === "function") {
+      runSoft("text decoration", () => { node.setRangeTextDecoration(start, end, run.textDecoration); });
+    }
+    if (run.lineHeight !== undefined && typeof node.setRangeLineHeight === "function") {
+      runSoft("line height", () => { node.setRangeLineHeight(start, end, run.lineHeight); });
+    }
+    if (run.letterSpacing !== undefined && typeof node.setRangeLetterSpacing === "function") {
+      runSoft("letter spacing", () => { node.setRangeLetterSpacing(start, end, run.letterSpacing); });
+    }
+    if (run.hyperlink !== undefined && typeof node.setRangeHyperlink === "function") {
+      runSoft("hyperlink", () => { node.setRangeHyperlink(start, end, run.hyperlink); });
+    }
+    await applyRunBindings(node, run, start, end, ctx, report, path, i);
+  }
+}
+
 async function applyText(node: any, text: Dict, ctx: RestoreContext, report: RestoreReport, path: string): Promise<void> {
   if (!text) return;
   const fallback = ctx.fallbackFont ?? { family: "Inter", style: "Regular" };
-  const runs: Dict[] = Array.isArray(text.textRuns)
-    ? text.textRuns.filter((r: any) => r && Number.isInteger(r.start) && Number.isInteger(r.end) && r.end > r.start)
-    : [];
+  const runs = textRunsOf(text);
   const hasRuns = runs.length > 0;
   const firstRun = hasRuns ? runs[0] : null;
   const recordedFont = text.font && text.font !== "mixed" ? text.font : null;
@@ -1669,21 +1774,7 @@ async function applyText(node: any, text: Dict, ctx: RestoreContext, report: Res
       report.notes.push(`${path}: this text uses MIXED fonts and the checkpoint has no run data; the characters come back in ${fallback.family} ${fallback.style}`);
     }
   }
-  const runFontReady: boolean[] = runs.map(() => true);
-  if (ctx.loadFont) {
-    for (let i = 0; i < runs.length; i++) {
-      const f = runs[i].font;
-      if (!f) continue;
-      try {
-        await ctx.loadFont(f);
-      } catch {
-        runFontReady[i] = false;
-        const key = `${f.family} ${f.style}`;
-        if (!report.fontsUnavailable.includes(key)) report.fontsUnavailable.push(key);
-        report.notes.push(`${path}: run ${i} font "${key}" is not available — that run's font was not restored`);
-      }
-    }
-  }
+  const runFontReady = await loadTextRunFonts(runs, ctx, report, path);
   // Characters need *some* loaded font even when every run carries its own:
   // the character setter runs before the ranges are applied. If the recorded
   // base font is unavailable, fall back for the base and let the run fonts
@@ -1725,63 +1816,7 @@ async function applyText(node: any, text: Dict, ctx: RestoreContext, report: Res
     }
   }
 
-  if (hasRuns) {
-    const length = typeof node.characters === "string" ? node.characters.length : 0;
-    for (let i = 0; i < runs.length; i++) {
-      const run = runs[i];
-      const start = Number(run.start);
-      const end = Number(run.end);
-      if (start >= length || end > length) {
-        report.notes.push(`${path}: run ${i} range ${start}..${end} is outside the restored text (${length} characters)`);
-        continue;
-      }
-      const runSoft = (what: string, fn: () => void) => {
-        try {
-          fn();
-        } catch (e) {
-          report.notes.push(`${path}: run ${i} ${what} not restored: ${msg(e)}`);
-        }
-      };
-      await applyRunStyleLinks(node, run, start, end, ctx, report, path, i);
-      if (run.font && runFontReady[i] && typeof node.setRangeFontName === "function") {
-        runSoft("font", () => { node.setRangeFontName(start, end, run.font); });
-      }
-      if (run.fontSize !== undefined && typeof node.setRangeFontSize === "function") {
-        runSoft("font size", () => { node.setRangeFontSize(start, end, Number(run.fontSize)); });
-      }
-      if (run.fills !== undefined && typeof node.setRangeFills === "function") {
-        runSoft("fills", () => {
-          try {
-            node.setRangeFills(start, end, run.fills);
-          } catch {
-            const stripped = run.fills.map((p: any) => {
-              if (!p || typeof p !== "object") return p;
-              const { boundVariables, ...rest } = p;
-              return rest;
-            });
-            node.setRangeFills(start, end, stripped);
-            report.bindingsDropped.push(`${path}.state.text.textRuns[${i}].fills`);
-          }
-        });
-      }
-      if (run.textCase !== undefined && typeof node.setRangeTextCase === "function") {
-        runSoft("text case", () => { node.setRangeTextCase(start, end, run.textCase); });
-      }
-      if (run.textDecoration !== undefined && typeof node.setRangeTextDecoration === "function") {
-        runSoft("text decoration", () => { node.setRangeTextDecoration(start, end, run.textDecoration); });
-      }
-      if (run.lineHeight !== undefined && typeof node.setRangeLineHeight === "function") {
-        runSoft("line height", () => { node.setRangeLineHeight(start, end, run.lineHeight); });
-      }
-      if (run.letterSpacing !== undefined && typeof node.setRangeLetterSpacing === "function") {
-        runSoft("letter spacing", () => { node.setRangeLetterSpacing(start, end, run.letterSpacing); });
-      }
-      if (run.hyperlink !== undefined && typeof node.setRangeHyperlink === "function") {
-        runSoft("hyperlink", () => { node.setRangeHyperlink(start, end, run.hyperlink); });
-      }
-      await applyRunBindings(node, run, start, end, ctx, report, path, i);
-    }
-  }
+  if (hasRuns) await applyTextRunValues(node, runs, runFontReady, ctx, report, path);
 
   if (Array.isArray(text.align)) {
     soft("alignment", () => {

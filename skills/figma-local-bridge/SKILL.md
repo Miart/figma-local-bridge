@@ -374,9 +374,13 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   `overridesMissing` and skipped — never applied to whatever now sits at that
   index. `overridesRestored` counts the ones that landed, and a field this
   version cannot rebuild is named in `overridesUnsupported` instead of being
-  dropped. A direct override that changed per-run text styling is restored at
-  the base level; the ranges it cannot replay are named in the notes. The
-  interior's structure itself is still the main component's current structure.
+  dropped. A direct override that changed per-run text styling is replayed
+  range by range: every run font is loaded before the character setter, then
+  sizes, fills, text/fill style links, variable bindings, case, decoration,
+  line height, letter spacing and hyperlinks go back through the range setters.
+  A per-run style link or variable binding the override removed is not cleared
+  from the main component's current run. The interior's structure itself is
+  still the main component's current structure.
 - Style ids, node-level variable bindings and explicit variable modes travel in
   `meta`; per-run text bindings and style ids travel inside the runs. Restore
   re-links a style, variable, collection or mode when it still exists and
