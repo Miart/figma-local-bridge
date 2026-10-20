@@ -9,14 +9,16 @@
  * font/style BEFORE writing, so a typo in op 9 cannot leave ops 1-8 applied
  * without the caller being told.
  *
- * Targets are nodeId or stable key. A key is the better identity: ids change
- * when a node is recreated, keys are stored in pluginData and survive.
+ * Targets and move destinations are nodeId or stable key. A key is the better
+ * identity: ids change when a node is recreated, keys are stored in pluginData
+ * and survive. The destination is fingerprinted with the targets, so a reparent
+ * cannot land in a parent that changed after the dry run.
  */
 
 import {
   KEY_DATA, PROTECTED_DATA, parseColor, fontSpec, hyperlinkFromSpec, applyContainerLayout, applyChildLayout,
 } from "./ui-build";
-import { snapshot, STRICT } from "./fingerprint";
+import { snapshot, STRICT, hashString } from "./fingerprint";
 
 export const BATCH_SCHEMA = "batch-v1";
 export const MAX_OPS = 200;
@@ -186,13 +188,111 @@ function stableKeyForClone(ctx: any, newKey: string): any | null {
   return hits[0] || null;
 }
 
-function reparentPreflight(target: any, parent: any, index: number): void {
-  if (!parent || !("appendChild" in parent)) throw new Error(`op[${index}] reparent: parent cannot accept children`);
-  if (parent.type === "INSTANCE") throw new Error(`op[${index}] reparent: an INSTANCE cannot accept children`);
-  if (parent.id === target.id) throw new Error(`op[${index}] reparent: a node cannot be its own parent`);
+async function destinationOf(ctx: any, op: Json, index: number, fallback: any): Promise<any> {
+  const hasId = op.parentId !== undefined && op.parentId !== null && String(op.parentId) !== "";
+  const hasKey = op.parentKey !== undefined && op.parentKey !== null && String(op.parentKey) !== "";
+  if (hasId && hasKey) throw new Error(`op[${index}] ${op.op}: give parentId or parentKey, not both`);
+  if (!hasId && !hasKey) {
+    if (fallback) return fallback;
+    throw new Error(`op[${index}] ${op.op}: parentId or parentKey is required`);
+  }
+  if (hasKey) {
+    const hits = byKey(ctx, String(op.parentKey));
+    if (!hits.length) throw new Error(`op[${index}] ${op.op}: no parent with key "${op.parentKey}" on the current page`);
+    if (hits.length > 1) {
+      throw new Error(`op[${index}] ${op.op}: parent key "${op.parentKey}" is ambiguous (${hits.map((n) => n.id).join(", ")})`);
+    }
+    return hits[0];
+  }
+  const n = await ctx.getNodeByIdAsync(String(op.parentId));
+  if (!n) throw new Error(`op[${index}] ${op.op}: parent not found: ${op.parentId}`);
+  if (n.removed === true) throw new Error(`op[${index}] ${op.op}: parent ${op.parentId} has been removed`);
+  return n;
+}
+
+function componentAncestor(node: any): any | null {
+  let p = node;
+  while (p) {
+    if (p.type === "COMPONENT") return p;
+    p = p.parent;
+  }
+  return null;
+}
+
+function destinationWarning(parent: any): string | null {
+  const component = componentAncestor(parent);
+  return component
+    ? `destination is inside COMPONENT "${component.name}"; this edits the component definition, not an instance`
+    : null;
+}
+
+/**
+ * The semantic snapshot deliberately excludes layout props: it answers "is this
+ * the same local tree", not "would a child land in the same place". A move
+ * destination needs the second question, so its fingerprint adds the container
+ * layout that decides flow, padding, clipping and order.
+ */
+function destinationFingerprint(parent: any): string {
+  const layout = {
+    layoutMode: parent.layoutMode ?? null,
+    layoutWrap: parent.layoutWrap ?? null,
+    primaryAxisSizingMode: parent.primaryAxisSizingMode ?? null,
+    counterAxisSizingMode: parent.counterAxisSizingMode ?? null,
+    primaryAxisAlignItems: parent.primaryAxisAlignItems ?? null,
+    counterAxisAlignItems: parent.counterAxisAlignItems ?? null,
+    itemSpacing: parent.itemSpacing ?? null,
+    counterAxisSpacing: parent.counterAxisSpacing ?? null,
+    paddingLeft: parent.paddingLeft ?? null,
+    paddingRight: parent.paddingRight ?? null,
+    paddingTop: parent.paddingTop ?? null,
+    paddingBottom: parent.paddingBottom ?? null,
+    itemReverseZIndex: parent.itemReverseZIndex ?? null,
+    strokesIncludedInLayout: parent.strokesIncludedInLayout ?? null,
+    clipsContent: parent.clipsContent ?? null,
+    layoutSizingHorizontal: parent.layoutSizingHorizontal ?? null,
+    layoutSizingVertical: parent.layoutSizingVertical ?? null,
+    layoutGrids: parent.layoutGrids ?? null,
+    gridRowCount: parent.gridRowCount ?? null,
+    gridColumnCount: parent.gridColumnCount ?? null,
+    gridRowGap: parent.gridRowGap ?? null,
+    gridColumnGap: parent.gridColumnGap ?? null,
+  };
+  return hashString(`${snapshot(parent, STRICT).hash}|${JSON.stringify(layout)}`);
+}
+
+function insertionIndex(target: any, parent: any, index: number, requested: any): number {
+  const children = Array.isArray(parent.children) ? parent.children : [];
+  const sameParent = target.parent && target.parent.id === parent.id;
+  const max = children.length - (sameParent ? 1 : 0);
+  if (requested === undefined || requested === null) return max;
+  const at = Number(requested);
+  if (!Number.isInteger(at) || at < 0) throw new Error(`op[${index}] reparent: index must be a non-negative integer`);
+  if (at > max) {
+    throw new Error(
+      `op[${index}] reparent: index ${at} is out of range for ${parent.type} "${parent.name}" (0..${Math.max(0, max)})`,
+    );
+  }
+  return at;
+}
+
+function reparentPreflight(target: any, parent: any, index: number, opName = "reparent"): void {
+  if (!parent || !("appendChild" in parent) || !("insertChild" in parent)) {
+    throw new Error(`op[${index}] ${opName}: parent cannot accept children`);
+  }
+  if (target.type === "PAGE" || target.type === "DOCUMENT") {
+    throw new Error(`op[${index}] ${opName}: a ${target.type} cannot be moved`);
+  }
+  if (parent.type === "DOCUMENT") throw new Error(`op[${index}] ${opName}: DOCUMENT cannot be a destination`);
+  if (parent.type === "COMPONENT_SET") {
+    throw new Error(`op[${index}] ${opName}: a COMPONENT_SET only accepts COMPONENT variants; use a component, frame or page`);
+  }
+  if (parent.id === target.id) throw new Error(`op[${index}] ${opName}: a node cannot be its own parent`);
   let p = parent;
   while (p) {
-    if (p.id === target.id) throw new Error(`op[${index}] reparent: cannot move a node inside its own descendant`);
+    if (p.id === target.id) throw new Error(`op[${index}] ${opName}: cannot move a node inside its own descendant`);
+    if (p.type === "INSTANCE") {
+      throw new Error(`op[${index}] ${opName}: destination is inside an INSTANCE; its interior is an override, not a normal layer tree`);
+    }
     p = p.parent;
   }
 }
@@ -294,29 +394,56 @@ async function planOp(ctx: any, op: Json, index: number): Promise<Json> {
         throw new Error(`op[${index}] duplicate: newKey must be a non-empty string with no whitespace`);
       }
       if (!("clone" in target)) throw new Error(`op[${index}] duplicate: ${target.id} cannot be cloned`);
-      if (target.parent && target.parent.type === "INSTANCE") {
-        throw new Error(`op[${index}] duplicate: a layer inside an instance cannot be cloned independently`);
+      let tp = target.parent;
+      while (tp) {
+        if (tp.type === "INSTANCE") {
+          throw new Error(`op[${index}] duplicate: a layer inside an instance cannot be cloned independently`);
+        }
+        tp = tp.parent;
       }
+      const parent = await destinationOf(ctx, op, index, target.parent);
+      if (!parent) throw new Error(`op[${index}] duplicate: source has no parent; give parentId or parentKey`);
+      plan.parent = targetRef(parent);
       const existing = stableKeyForClone(ctx, op.newKey);
       if (existing) {
         plan.status = "noop";
         plan.existingNodeId = existing.id;
         plan.warnings.push(`newKey "${op.newKey}" already exists; duplicate is a no-op`);
-      }
-      if (op.parentId) {
-        const parent = await ctx.getNodeByIdAsync(String(op.parentId));
-        reparentPreflight(existing || target, parent, index);
-        plan.parent = targetRef(parent);
+        if (existing.parent && existing.parent.id !== parent.id) {
+          plan.existingParent = targetRef(existing.parent);
+          plan.warnings.push(
+            `newKey "${op.newKey}" already exists under ${existing.parent.name || existing.parent.id}; duplicate is a no-op and did not move it`,
+          );
+        }
+      } else {
+        protect(parent);
+        reparentPreflight(target, parent, index, "duplicate");
+        const warning = destinationWarning(parent);
+        if (warning) plan.warnings.push(warning);
+        if ("layoutMode" in parent && parent.layoutMode !== "NONE") {
+          plan.warnings.push("destination uses auto-layout; the clone will join the layout flow");
+        }
       }
       break;
     }
     case "reparent": {
-      if (!op.parentId) throw new Error(`op[${index}] reparent: parentId is required`);
-      const parent = await ctx.getNodeByIdAsync(String(op.parentId));
+      const parent = await destinationOf(ctx, op, index, null);
+      protect(parent);
+      if (target.parent && target.parent.id !== parent.id) protect(target.parent);
       reparentPreflight(target, parent, index);
       plan.parent = targetRef(parent);
-      if (target.parent && "layoutMode" in parent && parent.layoutMode !== "NONE") {
-        plan.warnings.push("target parent uses auto-layout; the node will be positioned absolutely");
+      plan.sameParent = !!(target.parent && target.parent.id === parent.id);
+      plan.index = insertionIndex(target, parent, index, op.index);
+      const warning = destinationWarning(parent);
+      if (warning) plan.warnings.push(warning);
+      if (plan.sameParent) {
+        plan.warnings.push("reorders within the current parent; layoutPositioning is unchanged");
+      } else if ("layoutMode" in parent && parent.layoutMode !== "NONE") {
+        plan.warnings.push(
+          op.preserveAbsolute === false
+            ? "destination uses auto-layout; the node will join the layout flow"
+            : "destination uses auto-layout; the node will be positioned ABSOLUTE to keep its canvas position",
+        );
       }
       break;
     }
@@ -395,8 +522,8 @@ async function applyOp(ctx: any, op: Json, target: any, plan: Json): Promise<Jso
       if (plan.status === "noop" && plan.existingNodeId) {
         return { ...plan, status: "noop", nodeId: plan.existingNodeId };
       }
-      let parent = op.parentId ? await ctx.getNodeByIdAsync(String(op.parentId)) : target.parent;
-      if (!parent) throw new Error(`duplicate: source has no parent and no parentId was given`);
+      const parent = plan.parent?.id ? await ctx.getNodeByIdAsync(String(plan.parent.id)) : target.parent;
+      if (!parent) throw new Error(`duplicate: destination parent ${plan.parent?.id ?? "(none)"} is gone`);
       const clone = target.clone();
       clone.setPluginData(KEY_DATA, op.newKey);
       rekeyClone(clone, op.newKey);
@@ -409,13 +536,16 @@ async function applyOp(ctx: any, op: Json, target: any, plan: Json): Promise<Jso
       return { ...plan, status: "created", nodeId: clone.id, sourceNodeId: target.id };
     }
     case "reparent": {
-      const parent = await ctx.getNodeByIdAsync(String(op.parentId));
-      if (!parent) throw new Error(`reparent: parent ${op.parentId} not found`);
-      const before = op.preserveAbsolute !== false ? target.absoluteBoundingBox : null;
-      if ("layoutPositioning" in target && "layoutMode" in parent && parent.layoutMode !== "NONE") {
-        target.layoutPositioning = "ABSOLUTE";
+      const parent = await ctx.getNodeByIdAsync(String(plan.parent?.id ?? op.parentId));
+      if (!parent) throw new Error(`reparent: destination parent ${plan.parent?.id ?? op.parentId} not found`);
+      const preserveAbsolute = op.preserveAbsolute !== false;
+      const sameParent = !!(target.parent && target.parent.id === parent.id);
+      const before = preserveAbsolute ? target.absoluteBoundingBox : null;
+      if (!sameParent && "layoutPositioning" in target && "layoutMode" in parent && parent.layoutMode !== "NONE") {
+        target.layoutPositioning = preserveAbsolute ? "ABSOLUTE" : "AUTO";
       }
-      parent.insertChild(Number(op.index ?? parent.children.length), target);
+      const at = Number.isInteger(plan.index) ? plan.index : (Array.isArray(parent.children) ? parent.children.length : 0);
+      parent.insertChild(at, target);
       if (before && target.absoluteBoundingBox) {
         const after = target.absoluteBoundingBox;
         target.x += before.x - after.x;
@@ -450,6 +580,31 @@ export async function runBatch(ctx: any, params: Json): Promise<Json> {
         fingerprints[n.id] = snapshot(n, STRICT).hash;
       }
     }
+  }
+
+  // A destination is part of the plan: a reparent into a frame whose layout or
+  // children changed is not the move that was reviewed. The parent hash rides
+  // in the same fingerprints map as the targets, so passing the dry-run map
+  // guards both ends of the move.
+  const parentFingerprints = new Map<string, string>();
+  for (const p of plan) {
+    if (!p.parent || !p.parent.id) continue;
+    const n = await ctx.getNodeByIdAsync(p.parent.id);
+    if (!n || n.removed === true) {
+      throw new Error(`op[${p.index}] ${p.op}: destination parent ${p.parent.id} disappeared during planning`);
+    }
+    if (n.type === "PAGE") {
+      p.parent.fingerprint = null;
+      continue;
+    }
+    let h = parentFingerprints.get(n.id);
+    if (!h) {
+      h = destinationFingerprint(n);
+      parentFingerprints.set(n.id, h);
+    }
+    p.parent.fingerprint = h;
+    fingerprints[n.id] = h;
+    targets.set(n.id, n);
   }
 
   if (params.expectedFingerprints && isObj(params.expectedFingerprints)) {

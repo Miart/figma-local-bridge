@@ -100,10 +100,22 @@ half a design applied.
   transaction. Targets are `nodeId` or stable `key`. Ops: `set_text`,
   `set_name`/`rename`, `set_fill`, `set_stroke`, `resize`, `move`,
   `set_visible`, `set_opacity`, `set_rotation`, `set_layout`, `set_variant`,
-  `set_constraints`, `duplicate`, `reparent`. Every target, font, paint style
-  and variant property is resolved first; a failed op rolls the whole batch
-  back unless `stopOnError:false`, which reports the exact failure and what
-  did apply.
+  `set_constraints`, `duplicate`, `reparent`. `duplicate` and `reparent` take
+  a destination `parentId` or `parentKey`; the key is resolved on the current
+  page. The dry run returns the resolved destination and adds its non-page
+  fingerprint to the same `fingerprints` map as the targets — pass that whole
+  map on apply, or a changed destination is not guarded. A `reparent.index` is
+  the final child index; omitted appends. Reordering inside the current parent
+  keeps `layoutPositioning`; moving into auto-layout uses `ABSOLUTE` when
+  preserving the canvas position (default) and `AUTO` with
+  `preserveAbsolute:false`. A destination inside an `INSTANCE` or
+  `COMPONENT_SET` is refused; inside a `COMPONENT` it is reported as an edit
+  to the component definition. Moving into or out of a protected parent is
+  refused, because that changes the parent's children. A duplicate whose
+  `newKey` already exists is a no-op and reports an existing node under a
+  different parent. Every target, destination, font, paint style and variant
+  property is resolved first; a failed op rolls the whole batch back unless
+  `stopOnError:false`, which reports the exact failure and what did apply.
 
 ## Swapping an instance's component
 
@@ -192,7 +204,9 @@ The safe sequence for build, patch, batch and swap:
 A batch cannot target a node created by an earlier `duplicate` in the same
 batch — its key does not exist at plan time. Split that into two calls.
 `figma_build` / `figma_patch` do not implicitly move a keyed node to another
-parent; use `batch` with `reparent` when a move is intended.
+parent; use `batch` with `reparent`, `parentKey` and (when order matters) a
+final `index`. Pass the destination fingerprint from the dry run with the
+target fingerprints.
 
 To bring a hand-made tree into this language, `figma_export_build_spec`
 returns a spec that `figma_build` accepts. It keeps keys that already exist,

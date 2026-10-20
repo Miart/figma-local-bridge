@@ -221,10 +221,15 @@ try {
           ops: env.params.ops.map((op, index) => ({
             index, op: op.op,
             target: { id: "1:2", name: "Card", type: "FRAME", key: "hud" },
+            parent: op.parentKey || op.parentId ? {
+              id: op.parentKey ? "1:3" : op.parentId,
+              name: "Box", type: "FRAME", key: op.parentKey || "",
+              fingerprint: op.parentKey ? "fp-parent" : null,
+            } : undefined,
             status: env.params.dryRun === false ? "updated" : "planned",
             nodeId: env.params.dryRun === false ? "1:2" : undefined,
           })),
-          fingerprints: { "1:2": "fp-test" },
+          fingerprints: env.params.ops.some((op) => op.parentKey) ? { "1:2": "fp-test", "1:3": "fp-parent" } : { "1:2": "fp-test" },
           applied: env.params.dryRun === false ? env.params.ops.length : 0,
           failed: 0,
           warnings: [],
@@ -456,6 +461,18 @@ try {
   check("figma_batch_edit applies the same ops with the dry-run planId",
     batchApplied.status === "applied" && batchApplied.failed === 0 && batchApplied.planId === batchDry.planId,
     JSON.stringify(batchApplied).slice(0, 200));
+
+  const keyedSeenBefore = seen.length;
+  const keyedDry = c.text(await c.rpc("tools/call", {
+    name: "figma_batch_edit",
+    arguments: { ops: [{ op: "reparent", key: "hud/score#0", parentKey: "hud/box#2", index: 0 }] },
+  }));
+  const keyedReq = seen[keyedSeenBefore];
+  check("figma_batch_edit resolves a keyed destination and fingerprints it",
+    keyedReq.params.ops[0].parentKey === "hud/box#2" && keyedReq.params.ops[0].index === 0 &&
+      keyedDry.ops[0].parent?.id === "1:3" && keyedDry.ops[0].parent.fingerprint === "fp-parent" &&
+      keyedDry.fingerprints["1:3"] === "fp-parent",
+    JSON.stringify(keyedDry).slice(0, 220));
 
   const batchSeenMismatch = seen.length;
   const batchMismatch = await c.rpc("tools/call", {

@@ -173,15 +173,27 @@ const opSchema = z.discriminatedUnion("op", [
     ...targetFields,
     newKey: z.string().min(1).max(160).describe("Stable key for the clone. Re-running with the same key is a no-op."),
     name: z.string().optional(),
-    parentId: figmaNodeId("parentId").optional(),
+    parentId: figmaNodeId("parentId").optional().describe("Destination parent id; mutually exclusive with parentKey"),
+    parentKey: z
+      .string()
+      .min(1)
+      .max(160)
+      .optional()
+      .describe("Destination parent stable key, resolved on the current page; preferred over parentId"),
     x: z.number().optional(),
     y: z.number().optional(),
   }),
   z.object({
     op: z.literal("reparent"),
     ...targetFields,
-    parentId: figmaNodeId("parentId"),
-    index: z.number().int().min(0).optional(),
+    parentId: figmaNodeId("parentId").optional().describe("Destination parent id; mutually exclusive with parentKey"),
+    parentKey: z
+      .string()
+      .min(1)
+      .max(160)
+      .optional()
+      .describe("Destination parent stable key, resolved on the current page; preferred over parentId"),
+    index: z.number().int().min(0).optional().describe("Final child index; omitted means append"),
     preserveAbsolute: z.boolean().optional().describe("Keep the node at the same on-canvas position (default true)"),
   }),
 ]);
@@ -192,7 +204,9 @@ export function registerBatchTools(server: McpServer, client: FigmaClient, caps:
     "Apply many small edits to many targets in ONE undo transaction, after resolving every target, font, style and component property in a dry run. " +
       "Targets are nodeId or stable key; a key is the better identity because it survives node re-creation. " +
       "Ops: set_text, set_name/rename, set_fill, set_stroke, resize, move, set_visible, set_opacity, set_rotation, set_layout, set_variant, set_constraints, duplicate, reparent. " +
-      "dryRun defaults to TRUE and returns per-op plans plus a fingerprint per target; apply with dryRun:false and the same expectedFingerprints. " +
+      "duplicate and reparent accept a destination parentId or parentKey; the key is resolved on the current page. " +
+      "dryRun defaults to TRUE and returns per-op plans plus a fingerprint per target and per non-page destination; apply with dryRun:false and the same expectedFingerprints. " +
+      "A reparent index is the final child index; omitted appends. A same-parent reorder keeps layoutPositioning unchanged. " +
       "A failed op rolls the whole batch back unless stopOnError:false, which reports partial success and exactly which op failed.",
     {
       ops: z.array(opSchema).min(1).max(200).describe("Operations, applied in order"),

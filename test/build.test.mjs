@@ -1228,9 +1228,13 @@ test("batch applies all ops in one transaction and guards each target fingerprin
       { op: "resize", key: bar.getPluginData(KEY_DATA), width: 120, height: 12 },
       { op: "rename", key: bar.getPluginData(KEY_DATA), name: "Progress" },
       { op: "set_rotation", key: bar.getPluginData(KEY_DATA), rotation: 30 },
-      { op: "reparent", key: score.getPluginData(KEY_DATA), parentId: box.id },
+      { op: "reparent", key: score.getPluginData(KEY_DATA), parentKey: box.getPluginData(KEY_DATA) },
     ],
   });
+  assert.equal(dry.ops[5].parent.id, box.id);
+  assert.equal(dry.ops[5].parent.key, box.getPluginData(KEY_DATA));
+  assert.equal(dry.ops[5].index, 0);
+  assert.ok(dry.fingerprints[box.id]);
   const applied = await runBatch(ctx, {
     dryRun: false,
     expectedFingerprints: dry.fingerprints,
@@ -1240,7 +1244,7 @@ test("batch applies all ops in one transaction and guards each target fingerprin
       { op: "resize", key: bar.getPluginData(KEY_DATA), width: 120, height: 12 },
       { op: "rename", key: bar.getPluginData(KEY_DATA), name: "Progress" },
       { op: "set_rotation", key: bar.getPluginData(KEY_DATA), rotation: 30 },
-      { op: "reparent", key: score.getPluginData(KEY_DATA), parentId: box.id },
+      { op: "reparent", key: score.getPluginData(KEY_DATA), parentKey: box.getPluginData(KEY_DATA) },
     ],
   });
   assert.equal(applied.status, "applied");
@@ -1269,18 +1273,108 @@ test("batch applies all ops in one transaction and guards each target fingerprin
   assert.equal(before, "42");
 });
 
+test("batch refuses a keyed reparent when the destination changed", async () => {
+  const { ctx, root, score, box } = await batchFixture();
+  const ops = [{ op: "reparent", key: score.getPluginData(KEY_DATA), parentKey: box.getPluginData(KEY_DATA), index: 0 }];
+  const dry = await runBatch(ctx, { dryRun: true, ops });
+  assert.ok(dry.fingerprints[box.id]);
+
+  box.opacity = 0.5;
+  const refused = await runBatch(ctx, {
+    dryRun: false,
+    expectedFingerprints: dry.fingerprints,
+    ops,
+  });
+  assert.equal(refused.status, "refused");
+  assert.equal(refused.reason, "FINGERPRINT_MISMATCH");
+  assert.equal(score.parent, root);
+  assert.ok(refused.mismatch.some((m) => m.nodeId === box.id));
+});
+
+test("batch fingerprints destination layout, not only its subtree", async () => {
+  const { ctx, root, score, box } = await batchFixture();
+  const ops = [{ op: "reparent", key: score.getPluginData(KEY_DATA), parentKey: box.getPluginData(KEY_DATA) }];
+  const dry = await runBatch(ctx, { dryRun: true, ops });
+  box.layoutMode = "VERTICAL";
+  const refused = await runBatch(ctx, {
+    dryRun: false,
+    expectedFingerprints: dry.fingerprints,
+    ops,
+  });
+  assert.equal(refused.status, "refused");
+  assert.equal(refused.reason, "FINGERPRINT_MISMATCH");
+  assert.equal(score.parent, root);
+  assert.ok(refused.mismatch.some((m) => m.nodeId === box.id));
+});
+
+test("batch reorders a keyed node inside an auto-layout parent without making it absolute", async () => {
+  const { ctx, root, score, bar, box } = await batchFixture();
+  root.layoutMode = "HORIZONTAL";
+  const ops = [{ op: "reparent", key: box.getPluginData(KEY_DATA), parentKey: root.getPluginData(KEY_DATA), index: 0 }];
+  const dry = await runBatch(ctx, { dryRun: true, ops });
+  assert.equal(dry.ops[0].sameParent, true);
+  assert.equal(dry.ops[0].index, 0);
+  assert.match(dry.ops[0].warnings.join(" "), /reorders within the current parent/);
+  assert.ok(dry.fingerprints[root.id]);
+
+  const applied = await runBatch(ctx, {
+    dryRun: false,
+    expectedFingerprints: dry.fingerprints,
+    ops,
+  });
+  assert.equal(applied.status, "applied");
+  assert.deepEqual(root.children.map((n) => n.name), ["Box", "Score", "Bar"]);
+  assert.equal(box.layoutPositioning, "AUTO");
+  assert.equal(score.name, "Score");
+  assert.equal(bar.name, "Bar");
+});
+
+test("batch joins an auto-layout destination when preserveAbsolute is false", async () => {
+  const { ctx, root, score, box } = await batchFixture();
+  box.layoutMode = "VERTICAL";
+  const ops = [{
+    op: "reparent",
+    key: score.getPluginData(KEY_DATA),
+    parentKey: box.getPluginData(KEY_DATA),
+    preserveAbsolute: false,
+  }];
+  const dry = await runBatch(ctx, { dryRun: true, ops });
+  assert.match(dry.ops[0].warnings.join(" "), /will join the layout flow/);
+  const applied = await runBatch(ctx, {
+    dryRun: false,
+    expectedFingerprints: dry.fingerprints,
+    ops,
+  });
+  assert.equal(applied.status, "applied");
+  assert.equal(score.parent, box);
+  assert.equal(score.layoutPositioning, "AUTO");
+  assert.equal(root.children.includes(score), false);
+});
+
 test("batch duplicate is idempotent by newKey and rekeys its descendants", async () => {
-  const { ctx, root, box } = await batchFixture();
+  const { ctx, root, score, box } = await batchFixture();
   const first = await runBatch(ctx, {
     dryRun: false,
-    ops: [{ op: "duplicate", key: box.getPluginData(KEY_DATA), newKey: "hud/box-copy", name: "Box copy" }],
+    ops: [{ op: "duplicate", key: box.getPluginData(KEY_DATA), newKey: "hud/box-copy", name: "Box copy", parentKey: root.getPluginData(KEY_DATA) }],
   });
   assert.equal(first.status, "applied");
   assert.equal(first.ops[0].status, "created");
+  assert.equal(first.ops[0].parent.id, root.id);
+  assert.equal(first.ops[0].parent.key, root.getPluginData(KEY_DATA));
+  assert.ok(first.ops[0].parent.fingerprint);
   const copy = ctx.metrics.byId.get(first.ops[0].nodeId);
   assert.equal(copy.name, "Box copy");
   assert.equal(copy.getPluginData(KEY_DATA), "hud/box-copy");
   assert.equal(copy.parent, root);
+
+  const intoBox = await runBatch(ctx, {
+    dryRun: false,
+    ops: [{ op: "duplicate", key: score.getPluginData(KEY_DATA), newKey: "hud/score-copy", parentKey: box.getPluginData(KEY_DATA) }],
+  });
+  assert.equal(intoBox.status, "applied");
+  assert.equal(intoBox.ops[0].parent.id, box.id);
+  const scoreCopy = ctx.metrics.byId.get(intoBox.ops[0].nodeId);
+  assert.equal(scoreCopy.parent, box);
 
   const again = await runBatch(ctx, {
     dryRun: true,
@@ -1289,6 +1383,14 @@ test("batch duplicate is idempotent by newKey and rekeys its descendants", async
   assert.equal(again.ops[0].status, "noop");
   assert.equal(again.ops[0].existingNodeId, copy.id);
   assert.equal(root.children.filter((c) => c.getPluginData(KEY_DATA) === "hud/box-copy").length, 1);
+
+  const elsewhere = await runBatch(ctx, {
+    dryRun: true,
+    ops: [{ op: "duplicate", key: score.getPluginData(KEY_DATA), newKey: "hud/score-copy", parentKey: root.getPluginData(KEY_DATA) }],
+  });
+  assert.equal(elsewhere.ops[0].status, "noop");
+  assert.equal(elsewhere.ops[0].existingParent.id, box.id);
+  assert.match(elsewhere.ops[0].warnings.join(" "), /did not move it/);
 });
 
 test("batch refuses a protected target and an unknown key during preflight", async () => {
