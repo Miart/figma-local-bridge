@@ -18,7 +18,7 @@ import { runBatch } from "../plugin/batch.mjs";
 let seq = 0;
 const nextId = () => `${++seq}:${seq}`;
 
-function makeCtx() {
+function makeCtx({ textStyles = [], paintStyles = [], localVariables = [] } = {}) {
   const byId = new Map();
   const fonts = [];
   let undos = 0;
@@ -118,6 +118,8 @@ function makeCtx() {
     getRangeAllFontNames() { return this.fontName ? [this.fontName] : []; },
     setRangeFontName(start, end, value) { (this.rangeOps ||= []).push({ field: "font", start, end, value }); },
     setRangeFontSize(start, end, value) { (this.rangeOps ||= []).push({ field: "fontSize", start, end, value }); },
+    setRangeTextStyleIdAsync(start, end, value) { return Promise.resolve((this.rangeOps ||= []).push({ field: "textStyleId", start, end, value })); },
+    setRangeFillStyleIdAsync(start, end, value) { return Promise.resolve((this.rangeOps ||= []).push({ field: "fillStyleId", start, end, value })); },
     setRangeFills(start, end, value) { (this.rangeOps ||= []).push({ field: "fills", start, end, value }); },
     setRangeTextCase(start, end, value) { (this.rangeOps ||= []).push({ field: "textCase", start, end, value }); },
     setRangeTextDecoration(start, end, value) { (this.rangeOps ||= []).push({ field: "textDecoration", start, end, value }); },
@@ -143,11 +145,11 @@ function makeCtx() {
     commitUndo() { undos++; },
     triggerUndo() { triggers++; },
     getNodeByIdAsync(id) { return Promise.resolve(byId.get(id) || null); },
-    async getLocalTextStylesAsync() { return []; },
-    async getLocalPaintStylesAsync() { return []; },
+    async getLocalTextStylesAsync() { return textStyles; },
+    async getLocalPaintStylesAsync() { return paintStyles; },
     async getLocalEffectStylesAsync() { return []; },
     variables: {
-      async getLocalVariablesAsync() { return []; },
+      async getLocalVariablesAsync() { return localVariables; },
       setBoundVariableForPaint(p) { return p; },
     },
     createFrame() { const n = defaults("FRAME"); byId.set(n.id, n); return n; },
@@ -220,11 +222,13 @@ test("text runs are ordered, bounded and text-only", () => {
   const text = normalizeTree({
     type: "TEXT", text: "Hello",
     runs: [
-      { start: 0, end: 2, font: "Inter/Bold", fontSize: 24, fills: "#ff0000", textCase: "UPPER", hyperlink: null },
+      { start: 0, end: 2, font: "Inter/Bold", fontSize: 24, textStyle: " body/bold ", fillStyle: " accent ", textCase: "UPPER", hyperlink: null },
       { start: 2, end: 5, lineHeight: 20, letterSpacing: 1, textDecoration: "UNDERLINE" },
     ],
   });
   assert.deepEqual(text.root.spec.runs[0].font, { family: "Inter", style: "Bold" });
+  assert.equal(text.root.spec.runs[0].textStyle, "body/bold");
+  assert.equal(text.root.spec.runs[0].fillStyle, "accent");
   assert.deepEqual(text.root.spec.runs[1].lineHeight, { unit: "PIXELS", value: 20 });
   assert.equal(text.root.spec.runs[0].hyperlink, null);
 
@@ -237,6 +241,9 @@ test("text runs are ordered, bounded and text-only", () => {
   ] }), /ordered and non-overlapping/);
   assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1 }] }), /at least one/);
   assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, font: " " }] }), /font/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, textStyle: " " }] }), /textStyle/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, fillStyle: " " }] }), /fillStyle/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, fillStyle: "a", fills: "#fff" }] }), /not both/);
   assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, textCase: "SHOUT" }] }), /textCase/);
 });
 
@@ -326,6 +333,41 @@ test("build applies text runs without flattening the base style", async () => {
   assert.ok(label.rangeOps.some((op) => op.field === "letterSpacing" && op.value.value === 1));
   assert.ok(label.rangeOps.some((op) => op.field === "hyperlink" && op.value.value === "https://example.com"));
   assert.ok(label.rangeOps.some((op) => op.field === "font" && op.start === 3 && op.end === 6 && op.value.style === "Italic"));
+});
+
+test("text runs link and clear local styles by range", async () => {
+  const ctx = makeCtx({
+    textStyles: [{ id: "S:text-bold", name: "body/bold", type: "TEXT", fontName: { family: "Inter", style: "Bold" } }],
+    paintStyles: [{ id: "S:accent", name: "accent/solid", type: "PAINT", paints: [] }],
+  });
+  const spec = {
+    buildId: "runs/styles",
+    root: {
+      type: "FRAME", name: "Styled runs", size: { width: 200, height: 40 },
+      children: [{
+        type: "TEXT", name: "Label", key: "runs/styles/label", text: "Hello",
+        font: "Inter/Regular",
+        runs: [
+          { start: 0, end: 2, textStyle: "body/bold", fillStyle: "accent/solid" },
+          { start: 2, end: 5, textStyle: null, fillStyle: null, fontSize: 18 },
+        ],
+      }],
+    },
+  };
+
+  const dry = await runBuild(ctx, { ...spec, dryRun: true });
+  assert.equal(dry.status, "dry_run");
+  assert.ok(dry.fonts.includes("Inter/Bold"));
+  assert.ok(dry.styles.text.includes("body/bold"));
+  assert.ok(dry.styles.paint.includes("accent/solid"));
+
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.status, "applied");
+  const label = ctx.currentPage.children[0].children[0];
+  assert.ok(label.rangeOps.some((op) => op.field === "textStyleId" && op.start === 0 && op.end === 2 && op.value === "S:text-bold"));
+  assert.ok(label.rangeOps.some((op) => op.field === "fillStyleId" && op.start === 0 && op.end === 2 && op.value === "S:accent"));
+  assert.ok(label.rangeOps.some((op) => op.field === "textStyleId" && op.start === 2 && op.end === 5 && op.value === ""));
+  assert.ok(label.rangeOps.some((op) => op.field === "fillStyleId" && op.start === 2 && op.end === 5 && op.value === ""));
 });
 
 test("build carries rotation, per-corner radii, stroke shape and text formatting", async () => {

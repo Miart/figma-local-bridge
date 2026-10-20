@@ -252,7 +252,10 @@ async function textRunsFor(
   ctx: any,
   segments: any[],
   baseFills: any[] | null,
+  baseTextStyleId: string,
+  baseFillStyleId: string,
   vars: Map<string, any>,
+  styles: Map<string, any>,
   warnings: string[],
   path: string,
 ): Promise<any[]> {
@@ -262,15 +265,29 @@ async function textRunsFor(
   const baseCase = String(base.textCase || "ORIGINAL");
   const baseDecoration = String(base.textDecoration || "NONE");
   const runs: any[] = [];
-  let styleIdsDiffer = false;
-  let fillStyleIdsDiffer = false;
 
   for (let i = 1; i < segments.length; i++) {
     const seg = segments[i];
     const at = `${path}.runs[${i - 1}]`;
     const run: any = { start: seg.start, end: seg.end };
     let changed = false;
+    const segTextStyleId = typeof seg.textStyleId === "string" ? seg.textStyleId : "";
+    const segFillStyleId = typeof seg.fillStyleId === "string" ? seg.fillStyleId : "";
 
+    if (segTextStyleId !== baseTextStyleId) {
+      if (!segTextStyleId) {
+        run.textStyle = null;
+        changed = true;
+      } else {
+        const style = await styleInfo(ctx, segTextStyleId, styles);
+        if (style) {
+          run.textStyle = style.name;
+          changed = true;
+        } else {
+          warnings.push(`${at}: text style id ${segTextStyleId} no longer resolves; the run keeps literal styling`);
+        }
+      }
+    }
     const font = compactFont(seg.fontName);
     if (font && !same(font, baseFont)) { run.font = font; changed = true; }
     if (Number.isFinite(Number(seg.fontSize)) && Number(seg.fontSize) !== Number(base.fontSize)) {
@@ -278,7 +295,29 @@ async function textRunsFor(
       changed = true;
     }
     const segFills = await paintsToSpec(ctx, seg.fills, vars, warnings, `${at}.fills`);
-    if (segFills && baseFills && !same(segFills, baseFills)) { run.fills = segFills; changed = true; }
+    const fillsDiffer = !!segFills && !!baseFills && !same(segFills, baseFills);
+    if (segFillStyleId !== baseFillStyleId) {
+      if (!segFillStyleId) {
+        run.fillStyle = null;
+        if (fillsDiffer) run.fills = segFills;
+        changed = true;
+      } else {
+        const style = await styleInfo(ctx, segFillStyleId, styles);
+        if (style) {
+          run.fillStyle = style.name;
+          changed = true;
+        } else {
+          warnings.push(`${at}: fill style id ${segFillStyleId} no longer resolves; the run keeps literal fills`);
+          if (fillsDiffer) {
+            run.fills = segFills;
+            changed = true;
+          }
+        }
+      }
+    } else if (fillsDiffer) {
+      run.fills = segFills;
+      changed = true;
+    }
     const textCase = String(seg.textCase || "ORIGINAL");
     if (textCase !== baseCase) { run.textCase = textCase; changed = true; }
     const decoration = String(seg.textDecoration || "NONE");
@@ -293,16 +332,7 @@ async function textRunsFor(
         warnings.push(`${at}: the text hyperlink points at node ${link.value}; a NODE link is file-local and will not resolve in another file`);
       }
     }
-    if (!same(seg.textStyleId ?? "", base.textStyleId ?? "")) styleIdsDiffer = true;
-    if (!same(seg.fillStyleId ?? "", base.fillStyleId ?? "")) fillStyleIdsDiffer = true;
     if (changed) runs.push(run);
-  }
-
-  if (styleIdsDiffer) {
-    warnings.push(`${path}: text style ids vary across runs; per-run text style links are not representable, so literal run styling was exported`);
-  }
-  if (fillStyleIdsDiffer) {
-    warnings.push(`${path}: fill style ids vary across runs; per-run fill style links are not representable, so literal run fills were exported`);
   }
   return runs;
 }
@@ -545,21 +575,27 @@ async function exportNode(
   if (node.strokesIncludedInLayout === true) spec.strokesIncludedInLayout = true;
 
   let baseFillsSpec: any[] | null = null;
+  let baseTextStyleId = "";
+  let baseFillStyleId = "";
   if (textSegments) {
-    const style = await styleInfo(ctx, node.fillStyleId, state.styles);
+    const base = textSegments[0];
+    baseTextStyleId = typeof base.textStyleId === "string"
+      ? base.textStyleId
+      : (typeof node.textStyleId === "string" ? node.textStyleId : "");
+    baseFillStyleId = typeof base.fillStyleId === "string"
+      ? base.fillStyleId
+      : (typeof node.fillStyleId === "string" ? node.fillStyleId : "");
+    const style = await styleInfo(ctx, baseFillStyleId, state.styles);
     if (style) spec.fillStyle = style.name;
-    else {
-      if (node.fillStyleId && !isMixed(node.fillStyleId)) {
-        state.warnings.push(`${path}: fill style id ${node.fillStyleId} no longer resolves; exported literal paints instead`);
-      }
-      baseFillsSpec = await paintsToSpec(ctx, textSegments[0].fills, state.vars, state.warnings, `${path}.fills`);
-      if (baseFillsSpec) spec.fills = baseFillsSpec;
-      else state.warnings.push(`${path}: the base run's fills could not be read and were omitted`);
+    else if (baseFillStyleId) {
+      state.warnings.push(`${path}: fill style id ${baseFillStyleId} no longer resolves; exported literal paints instead`);
     }
     // The style carries the base paints; the literal version is still needed to
     // decide which later runs differ from them.
-    if (!baseFillsSpec) {
-      baseFillsSpec = await paintsToSpec(ctx, textSegments[0].fills, state.vars, state.warnings, `${path}.fills`);
+    baseFillsSpec = await paintsToSpec(ctx, base.fills, state.vars, state.warnings, `${path}.fills`);
+    if (!style) {
+      if (baseFillsSpec) spec.fills = baseFillsSpec;
+      else state.warnings.push(`${path}: the base run's fills could not be read and were omitted`);
     }
   } else {
     const fills = await paintsFor(ctx, node, "fills", state.styles, state.vars, state.warnings, path);
@@ -588,8 +624,12 @@ async function exportNode(
 
   if (node.type === "TEXT") {
     spec.text = typeof node.characters === "string" ? node.characters : "";
-    const style = await styleInfo(ctx, node.textStyleId, state.styles);
+    const textStyleId = textSegments ? baseTextStyleId : node.textStyleId;
+    const style = await styleInfo(ctx, textStyleId, state.styles);
     if (style) spec.textStyle = style.name;
+    else if (textStyleId && (textSegments || !isMixed(textStyleId))) {
+      state.warnings.push(`${path}: text style id ${textStyleId} no longer resolves; exported literal text styling instead`);
+    }
     if (textSegments) {
       const base = textSegments[0];
       const baseFont = compactFont(base.fontName);
@@ -612,14 +652,11 @@ async function exportNode(
           state.warnings.push(`${path}: the text hyperlink points at node ${baseLink.value}; a NODE link is file-local and will not resolve in another file`);
         }
       }
-      const runs = await textRunsFor(ctx, textSegments, baseFillsSpec, state.vars, state.warnings, path);
+      const runs = await textRunsFor(
+        ctx, textSegments, baseFillsSpec, baseTextStyleId, baseFillStyleId,
+        state.vars, state.styles, state.warnings, path,
+      );
       if (runs.length) spec.runs = runs;
-      if (isMixed(node.textStyleId)) {
-        state.warnings.push(`${path}: text style ids are mixed across runs; per-run text style links are not representable, so literal run styling was exported`);
-      }
-      if (isMixed(node.fillStyleId)) {
-        state.warnings.push(`${path}: fill style ids are mixed across runs; per-run fill style links are not representable, so literal run fills were exported`);
-      }
     } else {
       if (isObj(node.fontName)) {
         if (!style || (style.fontName && (style.fontName.family !== node.fontName.family || style.fontName.style !== node.fontName.style))) {

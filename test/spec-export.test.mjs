@@ -271,16 +271,21 @@ test("mixed fonts and per-run styling export as text runs", async () => {
       fontName: { family: "Inter", style: "Bold" }, fontSize: 24, fills: red,
       textCase: "ORIGINAL", textDecoration: "NONE",
       lineHeight: { unit: "AUTO" }, letterSpacing: { unit: "PERCENT", value: 0 },
-      hyperlink: null, textStyleId: "S:first", fillStyleId: "S:fill-first",
+      hyperlink: null, textStyleId: "S:text-base", fillStyleId: "",
     },
     {
       characters: " World", start: 5, end: 11,
       fontName: { family: "Inter", style: "Regular" }, fontSize: 16, fills: blue,
       textCase: "UPPER", textDecoration: "UNDERLINE",
       lineHeight: { unit: "PIXELS", value: 20 }, letterSpacing: { unit: "PIXELS", value: 1 },
-      hyperlink: { type: "URL", value: "https://example.com" }, textStyleId: "S:second", fillStyleId: "S:fill-second",
+      hyperlink: { type: "URL", value: "https://example.com" }, textStyleId: "S:text-emphasis", fillStyleId: "S:fill-emphasis",
     },
   ];
+  const styles = new Map([
+    ["S:text-base", { id: "S:text-base", name: "text/base", type: "TEXT", fontName: { family: "Inter", style: "Bold" } }],
+    ["S:text-emphasis", { id: "S:text-emphasis", name: "text/emphasis", type: "TEXT", fontName: { family: "Inter", style: "Regular" } }],
+    ["S:fill-emphasis", { id: "S:fill-emphasis", name: "fill/emphasis", type: "PAINT" }],
+  ]);
   const title = node("TEXT", { name: "Mixed", characters: "Hello World", segments });
   title.fontName = Symbol("mixed");
   title.fontSize = Symbol("mixed");
@@ -291,8 +296,9 @@ test("mixed fonts and per-run styling export as text runs", async () => {
   title.textDecoration = Symbol("mixed");
   title.hyperlink = Symbol("mixed");
 
-  const report = await runExportSpec(makeCtx(), { nodeId: title.id });
-  assert.deepEqual(report.spec.font, { family: "Inter", style: "Bold" });
+  const report = await runExportSpec(makeCtx({ styles }), { nodeId: title.id });
+  assert.equal(report.spec.textStyle, "text/base");
+  assert.equal(report.spec.font, undefined);
   assert.equal(report.spec.fontSize, 24);
   assert.deepEqual(report.spec.fills, [{ color: "#ff0000" }]);
   assert.equal(report.spec.runs.length, 1);
@@ -301,19 +307,21 @@ test("mixed fonts and per-run styling export as text runs", async () => {
   assert.equal(run.end, 11);
   assert.deepEqual(run.font, { family: "Inter", style: "Regular" });
   assert.equal(run.fontSize, 16);
-  assert.deepEqual(run.fills, [{ color: "#0000ff" }]);
+  assert.equal(run.textStyle, "text/emphasis");
+  assert.equal(run.fillStyle, "fill/emphasis");
+  assert.equal(run.fills, undefined);
   assert.equal(run.textCase, "UPPER");
   assert.equal(run.textDecoration, "UNDERLINE");
   assert.deepEqual(run.lineHeight, { unit: "PIXELS", value: 20 });
   assert.deepEqual(run.letterSpacing, { unit: "PIXELS", value: 1 });
   assert.deepEqual(run.hyperlink, { type: "URL", value: "https://example.com" });
-  assert.equal(report.warnings.some((w) => /MIXED fonts|mixed across runs/.test(w)), false);
-  assert.ok(report.warnings.some((w) => /text style ids vary across runs/.test(w)));
-  assert.ok(report.warnings.some((w) => /fill style ids vary across runs/.test(w)));
+  assert.equal(report.warnings.some((w) => /MIXED fonts|mixed across runs|per-run .*not representable/.test(w)), false);
 
   const normalized = normalizeTree(report.spec);
   assert.equal(normalized.root.spec.runs.length, 1);
   assert.deepEqual(normalized.root.spec.runs[0].font, { family: "Inter", style: "Regular" });
+  assert.equal(normalized.root.spec.runs[0].textStyle, "text/emphasis");
+  assert.equal(normalized.root.spec.runs[0].fillStyle, "fill/emphasis");
 });
 
 test("variables, derived keys and unsupported nodes are named", async () => {

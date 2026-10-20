@@ -255,11 +255,26 @@ export function textRunsFromSpec(value: any, path: string, text: string): Json[]
       normalized.fontSize = validateNumber(run.fontSize, `${at}.fontSize`, { positive: true });
       fields++;
     }
+    if (run.textStyle !== undefined) {
+      if (run.textStyle !== null && (typeof run.textStyle !== "string" || !run.textStyle.trim())) {
+        throw new Error(`${at}.textStyle must be a non-empty style name/id, or null to clear the link`);
+      }
+      normalized.textStyle = run.textStyle === null ? null : run.textStyle.trim();
+      fields++;
+    }
     if (run.fills !== undefined) {
       if (!(typeof run.fills === "string" || isObj(run.fills) || Array.isArray(run.fills))) {
         throw new Error(`${at}.fills must be a colour string, a paint object or an array of paints`);
       }
       normalized.fills = run.fills;
+      fields++;
+    }
+    if (run.fillStyle !== undefined) {
+      if (run.fillStyle !== null && (typeof run.fillStyle !== "string" || !run.fillStyle.trim())) {
+        throw new Error(`${at}.fillStyle must be a non-empty style name/id, or null to clear the link`);
+      }
+      if (run.fills !== undefined) throw new Error(`${at}: use fillStyle or fills, not both — the style link and literal paints would disagree`);
+      normalized.fillStyle = run.fillStyle === null ? null : run.fillStyle.trim();
       fields++;
     }
     if (run.textCase !== undefined) {
@@ -286,7 +301,7 @@ export function textRunsFromSpec(value: any, path: string, text: string): Json[]
       normalized.hyperlink = hyperlinkFromSpec(run.hyperlink, `${at}.hyperlink`);
       fields++;
     }
-    if (!fields) throw new Error(`${at}: a run needs at least one of font, fontSize, fills, textCase, textDecoration, lineHeight, letterSpacing or hyperlink`);
+    if (!fields) throw new Error(`${at}: a run needs at least one of font, fontSize, textStyle, fills, fillStyle, textCase, textDecoration, lineHeight, letterSpacing or hyperlink`);
     out.push(normalized);
   });
   return out;
@@ -638,6 +653,25 @@ async function collectResources(ctx: any, root: NormalizedNode): Promise<Resourc
       if (Array.isArray(s.runs)) {
         s.runs.forEach((run: Json, i: number) => {
           if (run.font !== undefined) addFont(res, run.font, `${n.key}.runs[${i}]`);
+          if (run.textStyle !== undefined && run.textStyle !== null) {
+            const ref = String(run.textStyle);
+            const st = findStyle(textStyles, ref);
+            if (!st) res.blocking.push(`${n.key}.runs[${i}]: text style "${ref}" not found`);
+            else {
+              res.textStyles.set(ref, st);
+              addFont(res, st.fontName, `${n.key}.runs[${i}] text style "${st.name}"`);
+              if (!res.styleNames.text.includes(st.name)) res.styleNames.text.push(st.name);
+            }
+          }
+          if (run.fillStyle !== undefined && run.fillStyle !== null) {
+            const ref = String(run.fillStyle);
+            const st = findStyle(paintStyles, ref, "paint");
+            if (!st) res.blocking.push(`${n.key}.runs[${i}]: paint style "${ref}" not found`);
+            else {
+              res.paintStyles.set(ref, st);
+              if (!res.styleNames.paint.includes(st.name)) res.styleNames.paint.push(st.name);
+            }
+          }
           collectPaints(res, run.fills, `${n.key}.runs[${i}].fills`);
         });
       }
@@ -1566,7 +1600,8 @@ async function applyTextRuns(ctx: any, node: any, spec: Json, res: Resources, wh
   }
   const length = typeof node.characters === "string" ? node.characters.length : 0;
   let previousEnd = 0;
-  runs.forEach((run: Json, i: number) => {
+  for (let i = 0; i < runs.length; i++) {
+    const run: Json = runs[i];
     const start = Number(run.start);
     const end = Number(run.end);
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > length) {
@@ -1574,15 +1609,34 @@ async function applyTextRuns(ctx: any, node: any, spec: Json, res: Resources, wh
     }
     if (i > 0 && start < previousEnd) throw new Error(`${where}.runs[${i}]: runs overlap`);
     previousEnd = end;
+
+    // A style is the base for this range; literal fields below are the
+    // overrides. `null` clears a style inherited from the node.
+    if (run.textStyle !== undefined) {
+      if (typeof node.setRangeTextStyleIdAsync !== "function") {
+        throw new Error(`${where}.runs[${i}]: this host cannot link a text style to a range`);
+      }
+      const style = run.textStyle === null ? null : res.textStyles.get(String(run.textStyle));
+      if (run.textStyle !== null && !style) throw new Error(`${where}.runs[${i}]: text style "${run.textStyle}" was not resolved`);
+      await node.setRangeTextStyleIdAsync(start, end, style ? style.id : "");
+    }
     if (run.font !== undefined) node.setRangeFontName(start, end, run.font);
     if (run.fontSize !== undefined) node.setRangeFontSize(start, end, Number(run.fontSize));
+    if (run.fillStyle !== undefined) {
+      if (typeof node.setRangeFillStyleIdAsync !== "function") {
+        throw new Error(`${where}.runs[${i}]: this host cannot link a paint style to a range`);
+      }
+      const style = run.fillStyle === null ? null : res.paintStyles.get(String(run.fillStyle));
+      if (run.fillStyle !== null && !style) throw new Error(`${where}.runs[${i}]: paint style "${run.fillStyle}" was not resolved`);
+      await node.setRangeFillStyleIdAsync(start, end, style ? style.id : "");
+    }
     if (run.fills !== undefined) node.setRangeFills(start, end, paintsFromSpec(ctx, run.fills, res));
     if (run.textCase !== undefined) node.setRangeTextCase(start, end, run.textCase);
     if (run.textDecoration !== undefined) node.setRangeTextDecoration(start, end, run.textDecoration);
     if (run.lineHeight !== undefined) node.setRangeLineHeight(start, end, run.lineHeight);
     if (run.letterSpacing !== undefined) node.setRangeLetterSpacing(start, end, run.letterSpacing);
     if (run.hyperlink !== undefined) node.setRangeHyperlink(start, end, run.hyperlink);
-  });
+  }
 }
 
 async function applyTextProps(ctx: any, node: any, spec: Json, res: Resources, where: string): Promise<void> {

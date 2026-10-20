@@ -102,7 +102,9 @@ const textRunSchema = z
     end: z.number().int().positive().describe("End character offset (exclusive)"),
     font: fontSchema.optional(),
     fontSize: z.number().positive().optional(),
+    textStyle: z.string().min(1).nullable().optional().describe("Local text style name or id for this range; null clears the link"),
     fills: z.union([paintSchema, z.array(paintSchema)]).optional(),
+    fillStyle: z.string().min(1).nullable().optional().describe("Local paint style name or id for this range; null clears the link"),
     textCase: z.enum(["ORIGINAL", "UPPER", "LOWER", "TITLE", "SMALL_CAPS", "SMALL_CAPS_FORCED"]).optional(),
     textDecoration: z.enum(["NONE", "UNDERLINE", "STRIKETHROUGH"]).optional(),
     lineHeight: z.union([z.number(), z.object({ unit: z.string(), value: z.number() })]).optional(),
@@ -148,7 +150,7 @@ const buildNodeSchema: z.ZodType<any> = z.lazy(() =>
         .max(200)
         .optional()
         .describe(
-          "TEXT only. Ordered, non-overlapping character ranges with per-run font, size, fills, case, decoration, line height, letter spacing or hyperlink. Omitted fields inherit the node's base text properties.",
+          "TEXT only. Ordered, non-overlapping character ranges with per-run font, size, text style, fills, fill style, case, decoration, line height, letter spacing or hyperlink. Omitted fields inherit the node's base text properties.",
         ),
 
       fills: z.union([paintSchema, z.array(paintSchema)]).optional(),

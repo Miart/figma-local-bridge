@@ -11,9 +11,9 @@
  *   - an INSTANCE comes back as an instance of its main component, with
  *     component properties re-applied — the overridden leaves inside it are not
  *     captured, so it shows the main component's current content;
- *   - per-run text variable bindings and per-run style links are not rebuilt;
- *     the runs themselves (font, size, fills, case, decoration, line height,
- *     letter spacing and hyperlink) are;
+ *   - per-run text variable bindings are not rebuilt; the runs themselves
+ *     (font, size, fills, style links, case, decoration, line height, letter
+ *     spacing and hyperlink) are;
  *   - style ids, node-level variable bindings and explicit modes travel in
  *     `meta` and are re-linked by id when they still exist; every one that does
  *     not is reported instead of passing as restored;
@@ -38,7 +38,7 @@ export const MAX_DEPTH = 40;
  */
 export const LIMITATIONS: readonly string[] = [
   "instance interiors are not captured: a restored INSTANCE shows its main component's current content (component properties are re-applied)",
-  "text runs are rebuilt (font, size, fills, case, decoration, line height, letter spacing and hyperlink); per-run variable bindings and per-run style links are not",
+  "text runs are rebuilt (font, size, fills, text/fill style links, case, decoration, line height, letter spacing and hyperlink); per-run variable bindings are not",
   "style ids are re-linked when the style still exists; node-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
   "per-range text bindings are not rebuilt; a single binding across the whole text is restored",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
@@ -232,6 +232,8 @@ function readTextRun(seg: any): Dict {
   if (seg.letterSpacing && !isMixedValue(seg.letterSpacing)) out.letterSpacing = copy(seg.letterSpacing);
   if (seg.hyperlink === null) out.hyperlink = null;
   else if (seg.hyperlink && !isMixedValue(seg.hyperlink)) out.hyperlink = copy(seg.hyperlink);
+  if (typeof seg.textStyleId === "string" && seg.textStyleId) out.textStyleId = seg.textStyleId;
+  if (typeof seg.fillStyleId === "string" && seg.fillStyleId) out.fillStyleId = seg.fillStyleId;
   return out;
 }
 
@@ -255,7 +257,7 @@ function readText(node: any): Dict {
   try {
     const segs = node.getStyledTextSegments([
       "fontName", "fontSize", "fills", "textCase", "textDecoration",
-      "lineHeight", "letterSpacing", "hyperlink",
+      "lineHeight", "letterSpacing", "hyperlink", "textStyleId", "fillStyleId",
     ]);
     if (Array.isArray(segs) && segs.length > 1) {
       t.runs = segs.length;
@@ -331,23 +333,6 @@ function readMeta(node: any): Dict | undefined {
   }
   if (styles.length) meta.styles = styles;
   if (Object.keys(styleIds).length) meta.styleIds = styleIds;
-  if (node.type === "TEXT" && typeof node.getStyledTextSegments === "function") {
-    try {
-      const segs = node.getStyledTextSegments(["textStyleId", "fillStyleId"]);
-      if (Array.isArray(segs) && segs.length > 1) {
-        const textStyleIds = [...new Set(segs.map((s: any) => s.textStyleId).filter((id: any) => typeof id === "string" && id))];
-        const fillStyleIds = [...new Set(segs.map((s: any) => s.fillStyleId).filter((id: any) => typeof id === "string" && id))];
-        if (textStyleIds.length > 1 || fillStyleIds.length > 1) {
-          meta.textRunStyles = {
-            ...(textStyleIds.length > 1 ? { textStyleIds } : {}),
-            ...(fillStyleIds.length > 1 ? { fillStyleIds } : {}),
-          };
-        }
-      }
-    } catch {
-      /* style ids are optional; the run values are still recorded */
-    }
-  }
   if (node.type === "COMPONENT" || node.type === "COMPONENT_SET") {
     try {
       if (node.key) meta.componentKey = node.key;
@@ -544,8 +529,8 @@ export async function restoreSubtree(dump: DumpNode, ctx: RestoreContext, opts: 
   }
 
   if (dump.type === target.type) {
-    await applyFinal(target, dump.state, ctx, report, "$", true, dump.meta);
-    await applyStyleLinks(target, dump.meta?.styleIds, ctx, report, "$");
+    await applyFinal(target, dump.state, ctx, report, "$", true);
+    await applyStyleLinks(target, dump.meta?.styleIds, ctx, report, "$", dump.state);
     await applyVariableBindings(target, dump.meta?.variableBindings, dump.state, ctx, report, "$");
   }
   return report;
@@ -568,8 +553,8 @@ async function buildNode(d: DumpNode, parent: any, ctx: RestoreContext, report: 
     for (let i = 0; i < kids.length; i++) {
       await buildNode(kids[i], node, ctx, report, `${path}.children[${i}]`, opts);
     }
-    await applyFinal(node, d.state, ctx, report, path, false, d.meta);
-    await applyStyleLinks(node, d.meta?.styleIds, ctx, report, path);
+    await applyFinal(node, d.state, ctx, report, path, false);
+    await applyStyleLinks(node, d.meta?.styleIds, ctx, report, path, d.state);
     await applyVariableBindings(node, d.meta?.variableBindings, d.state, ctx, report, path);
     report.created++;
     return node;
@@ -611,8 +596,8 @@ async function buildGroup(d: DumpNode, parent: any, ctx: RestoreContext, report:
     group.name = d.name;
     await applyVariableModes(group, d.meta?.variableModes, ctx, report, path);
     applyLayout(group, d.state, report, path);
-    await applyFinal(group, d.state, ctx, report, path, false, d.meta);
-    await applyStyleLinks(group, d.meta?.styleIds, ctx, report, path);
+    await applyFinal(group, d.state, ctx, report, path, false);
+    await applyStyleLinks(group, d.meta?.styleIds, ctx, report, path, d.state);
     await applyVariableBindings(group, d.meta?.variableBindings, d.state, ctx, report, path);
     report.created++;
     return group;
@@ -716,7 +701,7 @@ function ownsSize(node: any, state: Dict): boolean {
 }
 
 /** Phase B: size, position and appearance. `isRoot` keeps the target where it is. */
-async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: RestoreReport, path: string, isRoot: boolean, meta?: Dict): Promise<void> {
+async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: RestoreReport, path: string, isRoot: boolean): Promise<void> {
   const soft = (what: string, fn: () => void) => {
     try {
       fn();
@@ -776,7 +761,7 @@ async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: R
   if (state.visible === false) soft("visibility", () => { node.visible = false; });
   if (state.locked === true) soft("locked", () => { node.locked = true; });
 
-  if (node.type === "TEXT") await applyText(node, state.text, ctx, report, path, meta);
+  if (node.type === "TEXT") await applyText(node, state.text, ctx, report, path);
   if (node.type === "INSTANCE" && state.instance?.properties) applyInstanceProperties(node, state.instance.properties, report, path);
   if (node.type === "VECTOR" && state.vector) {
     // setVectorNetworkAsync is the only way back into a vector: the network is
@@ -943,7 +928,7 @@ async function applyVariableBindings(node: any, bindings: Dict | undefined, stat
     if (!aliases.length) continue;
     // Text fields are per-range arrays. One alias (or the same alias on every
     // range) can be applied to the whole text; several different ones cannot,
-    // because the runs themselves are not rebuilt.
+    // because a single setBoundVariable call has no range to target.
     const ids = [...new Set(aliases.map((a) => a.id))];
     if (ids.length > 1) {
       report.bindingsMissing.push({
@@ -976,10 +961,16 @@ async function applyVariableBindings(node: any, bindings: Dict | undefined, stat
  * so a style the file no longer owns leaves a correct-looking node with no
  * link — and this is reported rather than presented as a full restore.
  */
-async function applyStyleLinks(node: any, ids: Dict | undefined, ctx: RestoreContext, report: RestoreReport, path: string): Promise<void> {
+async function applyStyleLinks(node: any, ids: Dict | undefined, ctx: RestoreContext, report: RestoreReport, path: string, state?: Dict): Promise<void> {
   if (!ids) return;
   for (const [field, id] of Object.entries(ids)) {
     if (!(field in node)) continue;
+    // When the checkpoint carries run-level style ids, those links are applied
+    // per range; a whole-node text/fill style here would flatten them again.
+    if (field === "textStyleId" || field === "fillStyleId") {
+      const runs = state?.text?.textRuns;
+      if (Array.isArray(runs) && runs.some((r: any) => typeof r?.[field] === "string" && r[field])) continue;
+    }
     const styleId = String(id);
     try {
       const style = ctx.figma.getStyleByIdAsync ? await ctx.figma.getStyleByIdAsync(styleId) : null;
@@ -1012,7 +1003,63 @@ function applyInstanceProperties(node: any, props: Dict, report: RestoreReport, 
   }
 }
 
-async function applyText(node: any, text: Dict, ctx: RestoreContext, report: RestoreReport, path: string, meta?: Dict): Promise<void> {
+async function applyRunStyleLinks(
+  node: any,
+  run: Dict,
+  start: number,
+  end: number,
+  ctx: RestoreContext,
+  report: RestoreReport,
+  path: string,
+  i: number,
+): Promise<void> {
+  const api = ctx.figma;
+  for (const [field, method] of [
+    ["textStyleId", "setRangeTextStyleIdAsync"],
+    ["fillStyleId", "setRangeFillStyleIdAsync"],
+  ] as Array<[string, string]>) {
+    const id = run[field];
+    if (typeof id !== "string" || !id) continue;
+    const at = `${path}.runs[${i}]`;
+    const missing = (why: string) => report.stylesMissing.push({ path: at, field, id, why });
+    if (typeof api.getStyleByIdAsync !== "function") {
+      missing("the style API is not available in this session");
+      continue;
+    }
+    let style: any = null;
+    try {
+      style = await api.getStyleByIdAsync(id);
+    } catch (e) {
+      missing(msg(e));
+      continue;
+    }
+    if (!style) {
+      missing("the style no longer exists in this file");
+      continue;
+    }
+    // A text style cannot be applied before its font is loaded.
+    if (field === "textStyleId" && style.fontName && ctx.loadFont) {
+      try {
+        await ctx.loadFont(style.fontName);
+      } catch (e) {
+        missing(`the style's font is not available (${msg(e)})`);
+        continue;
+      }
+    }
+    if (typeof node[method] !== "function") {
+      missing(`a ${node.type} cannot link this style to a character range`);
+      continue;
+    }
+    try {
+      await node[method](start, end, style.id || id);
+      report.stylesRestored.push({ path: at, field, id: style.id || id });
+    } catch (e) {
+      missing(msg(e));
+    }
+  }
+}
+
+async function applyText(node: any, text: Dict, ctx: RestoreContext, report: RestoreReport, path: string): Promise<void> {
   if (!text) return;
   const fallback = ctx.fallbackFont ?? { family: "Inter", style: "Regular" };
   const runs: Dict[] = Array.isArray(text.textRuns)
@@ -1042,15 +1089,6 @@ async function applyText(node: any, text: Dict, ctx: RestoreContext, report: Res
       report.notes.push(`${path}: this text uses MIXED fonts and the checkpoint has no run data; the characters come back in ${fallback.family} ${fallback.style}`);
     }
   }
-  if (hasRuns && meta?.textRunStyles) {
-    const parts: string[] = [];
-    if (Array.isArray(meta.textRunStyles.textStyleIds) && meta.textRunStyles.textStyleIds.length) parts.push("text");
-    if (Array.isArray(meta.textRunStyles.fillStyleIds) && meta.textRunStyles.fillStyleIds.length) parts.push("fill");
-    if (parts.length) {
-      report.notes.push(`${path}: per-run ${parts.join(" and ")} style links are not rebuilt; literal run values were restored`);
-    }
-  }
-
   const runFontReady: boolean[] = runs.map(() => true);
   if (ctx.loadFont) {
     for (let i = 0; i < runs.length; i++) {
@@ -1124,6 +1162,7 @@ async function applyText(node: any, text: Dict, ctx: RestoreContext, report: Res
           report.notes.push(`${path}: run ${i} ${what} not restored: ${msg(e)}`);
         }
       };
+      await applyRunStyleLinks(node, run, start, end, ctx, report, path, i);
       if (run.font && runFontReady[i] && typeof node.setRangeFontName === "function") {
         runSoft("font", () => { node.setRangeFontName(start, end, run.font); });
       }

@@ -75,8 +75,9 @@ half a design applied.
   also carries rotation (degrees), per-corner radii, stroke cap/join/miter,
   masks, layout grids, layout inclusion flags, text case/decoration/paragraph
   spacing, text hyperlinks (URL, or NODE by node id), text runs (ordered
-  character ranges with their own font, size, fills, case, decoration, line
-  height, letter spacing and hyperlink), and an exact `LINE` length.
+  character ranges with their own font, size, text style, fills, fill style,
+  case, decoration, line height, letter spacing and hyperlink), and an exact
+  `LINE` length.
 - `figma_patch` takes a sparse tree under `rootNodeId`, `buildId` or
   `rootKey`. Children match by key. A missing key is refused unless
   `allowCreate:true`; a key under the wrong parent is refused rather than
@@ -93,9 +94,12 @@ half a design applied.
 On a TEXT node, `runs` are absolute UTF-16 character offsets (`start`
 inclusive, `end` exclusive), sorted and non-overlapping. Each run needs at
 least one field; fields it omits inherit the node's base text properties.
-Send `text` with `runs`, because the engine validates every range against the
-characters it is about to write. `figma_batch_edit`'s `set_text` still sets one
-font per op; use `figma_build` / `figma_patch` for per-range styling.
+`textStyle` and `fillStyle` take a local style name or id and link that range;
+`null` clears a link inherited from the base, and `fillStyle` and `fills` are
+mutually exclusive on one run. Send `text` with `runs`, because the engine
+validates every range against the characters it is about to write.
+`figma_batch_edit`'s `set_text` still sets one font per op; use `figma_build` /
+`figma_patch` for per-range styling.
 
 The safe sequence for all three:
 
@@ -118,8 +122,8 @@ derives the same key the build engine would for nodes without one, and turns
 style/variable links into `fillStyle`/`strokeStyle`/`textStyle`/`effectStyle`
 or `variable`. URL text links travel in the spec; a NODE link is exported with
 a file-local warning. Mixed text becomes a base style plus ordered `runs`, so
-mixed fonts, sizes, fills, case, decoration, spacing and links survive a
-rebuild. Remaining exactness losses include per-run style links and per-range
+mixed fonts, sizes, text/fill style links, case, decoration, spacing and links
+survive a rebuild. Remaining exactness losses include per-range variable
 bindings. Read `unsupported` and `warnings` before building it: an SVG source,
 a detached instance, an instance interior or a paint the spec cannot express
 has no exact representation. `truncated: true` means the spec is incomplete and
@@ -320,8 +324,8 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
 - `action: "save"` records a subtree as data (`nodeId`; a page is refused) into
   one JSON file per file key. The reply carries a `summary` and the
   `limitations` a rebuild cannot carry — instance interiors, per-run variable
-  bindings, per-run style links and component identity. Read them before
-  telling anyone the subtree will come back exactly.
+  bindings and component identity. Read them before telling anyone the subtree
+  will come back exactly.
 - `action: "show"` diffs the live subtree against the file field by field and
   reports the semantic fingerprint next to it. That is how "has this drifted
   already?" gets answered before a rebuild is chosen.
@@ -339,6 +343,10 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   `bindingsDropped` names it. Per-range text bindings are not rebuilt, although
   the text runs themselves are; `bindingsMissing` names the aliases instead of
   flattening them.
+- Per-run text and fill style ids travel inside the runs and are re-linked by
+  id when the style still exists; a missing one is reported in `stylesMissing`
+  with the run's path, and the recorded literal value remains. The text style's
+  font is loaded before the range link is applied.
 - A whole-text hyperlink is saved and restored by value. Mixed per-run links
   travel inside the runs, so `null` on a run clears it for that range. A NODE
   link stays file-local.

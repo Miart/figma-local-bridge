@@ -65,6 +65,8 @@ const BY_TYPE = (t) => {
       getStyledTextSegments: () => [{ characters: "hello" }],
       setRangeFontName(start, end, value) { (this.rangeOps ||= []).push({ field: "font", start, end, value }); },
       setRangeFontSize(start, end, value) { (this.rangeOps ||= []).push({ field: "fontSize", start, end, value }); },
+      setRangeTextStyleIdAsync(start, end, value) { return Promise.resolve((this.rangeOps ||= []).push({ field: "textStyleId", start, end, value })); },
+      setRangeFillStyleIdAsync(start, end, value) { return Promise.resolve((this.rangeOps ||= []).push({ field: "fillStyleId", start, end, value })); },
       setRangeFills(start, end, value) { (this.rangeOps ||= []).push({ field: "fills", start, end, value }); },
       setRangeTextCase(start, end, value) { (this.rangeOps ||= []).push({ field: "textCase", start, end, value }); },
       setRangeTextDecoration(start, end, value) { (this.rangeOps ||= []).push({ field: "textDecoration", start, end, value }); },
@@ -168,6 +170,7 @@ function fakeFigma(registry = [], options = {}) {
       async getVariableByIdAsync(id) { return (options.variables ?? []).find((v) => v.id === id) ?? null; },
       async getVariableCollectionByIdAsync(id) { return (options.collections ?? []).find((c) => c.id === id) ?? null; },
     },
+    async getStyleByIdAsync(id) { return (options.styles ?? []).find((s) => s.id === id) ?? null; },
     createFrame: () => track(node("FRAME")),
     createComponent: () => track(node("COMPONENT")),
     createSection: () => track(node("SECTION")),
@@ -309,7 +312,14 @@ const errors = async (fn) => {
       hyperlink: { type: "URL", value: "https://example.com" }, textStyleId: "S:second", fillStyleId: "S:fill-second",
     },
   ];
-  const figma = fakeFigma();
+  const figma = fakeFigma([], {
+    styles: [
+      { id: "S:first", name: "text/first", fontName: { family: "Inter", style: "Bold" } },
+      { id: "S:second", name: "text/second", fontName: { family: "Inter", style: "Regular" } },
+      { id: "S:fill-first", name: "fill/first" },
+      { id: "S:fill-second", name: "fill/second" },
+    ],
+  });
   const target = node("FRAME");
   const src = node("FRAME", {
     children: [node("TEXT", {
@@ -319,6 +329,9 @@ const errors = async (fn) => {
     })],
   });
   const { root } = await dumpSubtree(src);
+  check("dump: run style links travel with the runs",
+    root.children[0].state.text.textRuns[0].textStyleId === "S:first" &&
+    root.children[0].state.text.textRuns[1].fillStyleId === "S:fill-second");
   const loaded = [];
   const report = await restoreSubtree(root, ctxFor(figma, target, { loadFont: async (f) => { loaded.push(`${f.family}/${f.style}`); } }), {});
   const text = target.children[0];
@@ -335,8 +348,11 @@ const errors = async (fn) => {
     ops.some((o) => o.field === "hyperlink" && o.value && o.value.value === "https://example.com"));
   check("restore: mixed fonts are not reported as a loss when runs exist",
     !report.notes.some((n) => /MIXED fonts/.test(n)) && !report.notes.some((n) => /MIXED hyperlinks/.test(n)));
-  check("restore: per-run style links are named, not pretended",
-    report.notes.some((n) => /per-run text and fill style links/.test(n)));
+  check("restore: per-run text and fill style links are re-linked",
+    report.stylesRestored.some((s) => s.field === "textStyleId" && s.id === "S:first") &&
+    report.stylesRestored.some((s) => s.field === "fillStyleId" && s.id === "S:fill-second") &&
+    ops.some((o) => o.field === "textStyleId" && o.start === 0 && o.end === 1 && o.value === "S:first") &&
+    ops.some((o) => o.field === "fillStyleId" && o.start === 1 && o.end === 2 && o.value === "S:fill-second"));
 }
 
 
