@@ -193,6 +193,7 @@ export function readState(node: any): Dict {
   if ("layoutGrids" in node && Array.isArray(node.layoutGrids) && node.layoutGrids.length) {
     s.layoutGrids = list(node.layoutGrids);
   }
+  if ("exportSettings" in node) s.exportSettings = list(node.exportSettings) ?? [];
   if ("arcData" in node) s.arcData = copy(node.arcData);
   if ("pointCount" in node) s.pointCount = node.pointCount;
   if ("innerRadius" in node) s.innerRadius = node.innerRadius;
@@ -579,6 +580,7 @@ const REBUILDABLE = new Set([
   "STAR",
   "POLYGON",
   "BOOLEAN_OPERATION",
+  "SLICE",
 ]);
 
 /** A node whose type we cannot build still records its identity, so the report can name it. */
@@ -902,6 +904,7 @@ async function createNode(d: DumpNode, ctx: RestoreContext, report: RestoreRepor
     case "VECTOR": node = f.createVector(); break;
     case "STAR": node = f.createStar(); break;
     case "POLYGON": node = f.createPolygon(); break;
+    case "SLICE": node = f.createSlice(); break;
     case "INSTANCE": {
       const main = await resolveMain(d.state.instance ?? {}, ctx);
       if (!main) {
@@ -1039,6 +1042,7 @@ async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: R
     });
   }
   if (state.arcData && "arcData" in node) soft("arc data", () => { node.arcData = state.arcData; });
+  if (Array.isArray(state.exportSettings) && "exportSettings" in node) soft("export settings", () => { node.exportSettings = copy(state.exportSettings); });
   if (typeof state.opacity === "number" && "opacity" in node) soft("opacity", () => { node.opacity = state.opacity; });
   if (state.blendMode && "blendMode" in node) soft("blend mode", () => { node.blendMode = state.blendMode; });
   if (typeof state.isMask === "boolean" && "isMask" in node) {

@@ -389,6 +389,7 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   replayed too. A `BOOLEAN_OPERATION` tree is rebuilt from its children with the
   recorded operation (`union` / `subtract` / `intersect` / `exclude`), including
   nested operations; fewer than two rebuildable children is named and skipped.
+  A `SLICE` comes back with its geometry and `exportSettings`.
   `COMPONENT_SET` is still refused by name.
 - Style ids, node-level variable bindings and explicit variable modes travel in
   `meta`; per-run text bindings and style ids travel inside the runs. Restore

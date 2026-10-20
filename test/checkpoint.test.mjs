@@ -92,6 +92,7 @@ const BY_TYPE = (t) => {
     };
   }
   if (t === "BOOLEAN_OPERATION") return { children: [], booleanOperation: "UNION" };
+  if (t === "SLICE") return { exportSettings: [] };
   if (t === "STAR") return { pointCount: 5, innerRadius: 0.5 };
   if (t === "POLYGON") return { pointCount: 6 };
   if (t === "INSTANCE") {
@@ -211,6 +212,7 @@ function fakeFigma(registry = [], options = {}) {
     createVector: () => track(node("VECTOR")),
     createStar: () => track(node("STAR")),
     createPolygon: () => track(node("POLYGON")),
+    createSlice: () => track(node("SLICE")),
     group(nodes, parent) {
       const g = track(node("GROUP"));
       nodes.forEach((n) => g.appendChild(n));
@@ -733,6 +735,24 @@ const errors = async (fn) => {
     rebuiltInner.type === "BOOLEAN_OPERATION" && rebuiltInner.booleanOperation === "INTERSECT" &&
     rebuiltInner.children.map((c) => c.name).join(",") === "disc,bar" &&
     report.created === 5 && report.skipped.length === 0);
+}
+
+{
+  const figma = fakeFigma();
+  const target = node("FRAME");
+  const settings = [{ format: "PNG", suffix: "@2x", constraint: { type: "SCALE", value: 2 } }];
+  const src = node("FRAME", { children: [node("SLICE", {
+    name: "Export/Hero", x: 12, y: 34, width: 300, height: 200, rotation: 10,
+    exportSettings: settings,
+  })] });
+  const { root, unsupported } = await dumpSubtree(src);
+  check("dump: a slice carries its export settings", unsupported.length === 0 && root.children[0].state.exportSettings[0].format === "PNG" && root.children[0].state.exportSettings[0].suffix === "@2x");
+  const report = await restoreSubtree(root, ctxFor(figma, target), {});
+  const slice = target.children[0];
+  check("restore: a slice comes back with geometry and export settings",
+    slice.type === "SLICE" && slice.width === 300 && slice.height === 200 && slice.x === 12 && slice.y === 34 && slice.rotation === 10 &&
+    slice.exportSettings[0].format === "PNG" && slice.exportSettings[0].constraint.value === 2 &&
+    slice.exportSettings !== settings && report.created === 1 && report.skipped.length === 0);
 }
 
 // ---------------------------------------------------------------- restore: the losses, named
