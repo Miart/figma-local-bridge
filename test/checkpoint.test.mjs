@@ -91,6 +91,8 @@ const BY_TYPE = (t) => {
       minWidth: null, minHeight: null, maxWidth: null, maxHeight: null,
     };
   }
+  if (t === "STAR") return { pointCount: 5, innerRadius: 0.5 };
+  if (t === "POLYGON") return { pointCount: 6 };
   if (t === "INSTANCE") {
     return {
       children: [],
@@ -200,6 +202,8 @@ function fakeFigma(registry = [], options = {}) {
     createLine: () => track(node("LINE")),
     createText: () => track(node("TEXT")),
     createVector: () => track(node("VECTOR")),
+    createStar: () => track(node("STAR")),
+    createPolygon: () => track(node("POLYGON")),
     group(nodes, parent) {
       const g = track(node("GROUP"));
       nodes.forEach((n) => g.appendChild(n));
@@ -621,6 +625,55 @@ const errors = async (fn) => {
   const v = target.children[0];
   check("restore: a vector gets its network back",
     v.vectorNetwork.vertices.length === 3 && v.vectorNetwork.regions[0].windingRule === "NONZERO" && v.windingRule === "NONZERO");
+}
+
+{
+  const figma = fakeFigma();
+  const target = node("FRAME");
+  const src = node("FRAME", { children: [
+    node("STAR", {
+      name: "spark", x: 10, y: 20, width: 80, height: 60, rotation: 15,
+      pointCount: 7, innerRadius: 0.3,
+      fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: 1 }],
+    }),
+    node("POLYGON", { name: "hex", width: 40, height: 40, pointCount: 6 }),
+  ] });
+  const { root, unsupported } = await dumpSubtree(src);
+  check("dump: star and polygon geometry travel",
+    unsupported.length === 0 && root.children[0].state.pointCount === 7 &&
+    root.children[0].state.innerRadius === 0.3 && root.children[1].state.pointCount === 6);
+
+  await restoreSubtree(root, ctxFor(figma, target), {});
+  const [star, poly] = target.children;
+  check("restore: a star is rebuilt with its points, inner radius, size, position and paint",
+    star.type === "STAR" && star.pointCount === 7 && star.innerRadius === 0.3 &&
+    star.width === 80 && star.height === 60 && star.x === 10 && star.y === 20 &&
+    star.rotation === 15 && star.fills[0].color.r === 1);
+  check("restore: a polygon is rebuilt with its point count and size",
+    poly.type === "POLYGON" && poly.pointCount === 6 && poly.width === 40 && poly.height === 40);
+}
+
+{
+  const main = node("COMPONENT", {
+    name: "Badge", key: "K4", id: "10:10",
+    children: [node("STAR", { name: "spark", pointCount: 5, innerRadius: 0.5 })],
+  });
+  const srcInstance = main.createInstance();
+  const srcStar = srcInstance.children[0];
+  srcStar.pointCount = 8;
+  srcStar.innerRadius = 0.2;
+  srcInstance.overrides = [{
+    id: srcStar.id,
+    overriddenFields: ["pointCount", "innerRadius"],
+  }];
+  const { root } = await dumpSubtree(node("FRAME", { children: [srcInstance] }));
+  const figma = fakeFigma([main]);
+  const target = node("FRAME");
+  const report = await restoreSubtree(root, ctxFor(figma, target), {});
+  const restored = target.children[0].children[0];
+  check("instances: star geometry overrides are replayed, not named unsupported",
+    restored.type === "STAR" && restored.pointCount === 8 && restored.innerRadius === 0.2 &&
+    report.overridesUnsupported.length === 0 && report.overridesRestored.length === 1);
 }
 
 // ---------------------------------------------------------------- restore: the losses, named

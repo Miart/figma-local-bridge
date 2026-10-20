@@ -194,6 +194,8 @@ export function readState(node: any): Dict {
     s.layoutGrids = list(node.layoutGrids);
   }
   if ("arcData" in node) s.arcData = copy(node.arcData);
+  if ("pointCount" in node) s.pointCount = node.pointCount;
+  if ("innerRadius" in node) s.innerRadius = node.innerRadius;
 
   if ("layoutMode" in node && node.layoutMode !== "NONE") {
     const L: Dict = {
@@ -314,6 +316,7 @@ const SUPPORTED_OVERRIDE_FIELDS = new Set([
   "primaryAxisSizingMode", "counterAxisSizingMode", "layoutWrap",
   "counterAxisSpacing", "strokesIncludedInLayout", "itemReverseZIndex",
   "minWidth", "minHeight", "maxWidth", "maxHeight", "layoutGrids",
+  "pointCount", "innerRadius",
   "fills", "fillStyleId", "strokes", "strokeStyleId", "strokeWeight",
   "strokeTopWeight", "strokeRightWeight", "strokeBottomWeight", "strokeLeftWeight",
   "strokeAlign", "strokeCap", "strokeJoin", "dashPattern",
@@ -572,13 +575,14 @@ const REBUILDABLE = new Set([
   "LINE",
   "TEXT",
   "VECTOR",
+  "STAR",
+  "POLYGON",
 ]);
 
 /** A node whose type we cannot build still records its identity, so the report can name it. */
 function unsupportedWhy(type: string): string {
   if (type === "BOOLEAN_OPERATION") return "a BOOLEAN_OPERATION cannot be rebuilt: the Plugin API does not expose its inputs or its operation";
   if (type === "COMPONENT_SET") return "a COMPONENT_SET cannot be rebuilt (variants and their combined identity are not restorable); checkpoint its variants instead";
-  if (type === "STAR" || type === "POLYGON") return `a ${type} is not rebuilt by checkpoint-v1`;
   return `${type} is not rebuilt by checkpoint-v1`;
 }
 
@@ -846,6 +850,8 @@ async function createNode(d: DumpNode, ctx: RestoreContext, report: RestoreRepor
     case "LINE": node = f.createLine(); break;
     case "TEXT": node = f.createText(); break;
     case "VECTOR": node = f.createVector(); break;
+    case "STAR": node = f.createStar(); break;
+    case "POLYGON": node = f.createPolygon(); break;
     case "INSTANCE": {
       const main = await resolveMain(d.state.instance ?? {}, ctx);
       if (!main) {
@@ -934,6 +940,11 @@ async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: R
   };
 
   if (typeof state.rotation === "number" && "rotation" in node) soft("rotation", () => { node.rotation = state.rotation; });
+  // Point count and inner radius describe the outline before the final box is
+  // applied: resizing first and changing the outline afterwards can move the
+  // star/polygon off the recorded size.
+  if (typeof state.pointCount === "number" && "pointCount" in node) soft("point count", () => { node.pointCount = state.pointCount; });
+  if (typeof state.innerRadius === "number" && "innerRadius" in node) soft("inner radius", () => { node.innerRadius = state.innerRadius; });
   if (Array.isArray(state.sizing) && "layoutSizingHorizontal" in node) {
     soft("layout sizing", () => { node.layoutSizingHorizontal = state.sizing[0]; node.layoutSizingVertical = state.sizing[1]; });
   }
@@ -1428,6 +1439,10 @@ async function applyInstanceOverrideState(
   if (fields.has("strokeCap") && state.strokeCap && "strokeCap" in target) soft("stroke cap", () => { target.strokeCap = state.strokeCap; });
   if (fields.has("strokeJoin") && state.strokeJoin && "strokeJoin" in target) soft("stroke join", () => { target.strokeJoin = state.strokeJoin; });
   if (fields.has("dashPattern") && Array.isArray(state.dashPattern) && "dashPattern" in target) soft("dash pattern", () => { target.dashPattern = state.dashPattern; });
+
+  // Geometry comes before the size in the width/height block below.
+  if (fields.has("pointCount") && typeof state.pointCount === "number" && "pointCount" in target) soft("point count", () => { target.pointCount = state.pointCount; });
+  if (fields.has("innerRadius") && typeof state.innerRadius === "number" && "innerRadius" in target) soft("inner radius", () => { target.innerRadius = state.innerRadius; });
 
   if (anyField(fields, LAYOUT_OVERRIDE_FIELDS) && state.layout) applyLayout(target, { layout: state.layout }, report, path);
 
