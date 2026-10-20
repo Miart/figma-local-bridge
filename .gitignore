@@ -22,6 +22,7 @@ plugin/audit.mjs
 plugin/index.mjs
 plugin/design-system.mjs
 plugin/spec-export.mjs
+plugin/component-swap.mjs
 
 # logs and OS junk
 *.log

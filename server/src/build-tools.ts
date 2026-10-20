@@ -278,7 +278,13 @@ export function planIdOf(args: any): string {
   // and the caller applies with that id plus the returned fingerprint, the two
   // calls MUST hash the same thing; otherwise the safe workflow would always
   // look like a changed plan.
-  const { dryRun, planId, fileKey, expectedFingerprint, expectedFingerprints, stopOnError, ...rest } = args || {};
+  // allowLoss/allowUnverified are approval gates, not plan inputs. A caller
+  // must be able to run the dry run with the defaults and then approve the
+  // same plan on apply without the planId changing underneath them.
+  const {
+    dryRun, planId, fileKey, expectedFingerprint, expectedFingerprints, stopOnError,
+    allowLoss, allowUnverified, ...rest
+  } = args || {};
   return createHash("sha256").update(JSON.stringify(canonical(rest))).digest("hex").slice(0, 20);
 }
 

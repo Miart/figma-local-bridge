@@ -136,6 +136,27 @@ try {
           planId: env.params.planId,
           verification: { ok: true, missing: [], typeMismatch: [] },
         });
+      case "swap_component":
+        return ok({
+          status: env.params.dryRun === false ? "applied" : "dry_run",
+          schema: "component-swap-v1",
+          state: "compatible",
+          dryRun: env.params.dryRun !== false,
+          targets: [{
+            nodeId: env.params.nodeIds?.[0] || "1:2",
+            name: "Button",
+            fingerprint: "fp-test",
+            from: { id: "9:9", key: "button-old", name: "Button" },
+            to: { id: env.params.componentId || "9:10", key: "button-new", name: "Button v2" },
+            compatibility: { status: "compatible", overrides: { total: 2, replayable: 2, atRisk: 0 }, properties: { total: 2, replayable: 2, dropped: 0 }, root: { fields: ["width", "height"], size: "preserved" }, losses: [], lossCount: 0 },
+          }],
+          counts: { targets: 1, compatible: 1, lossy: 0, unverified: 0, overridesTotal: 2, overridesReplayable: 2 },
+          blocking: [],
+          warnings: [],
+          verification: { ok: true, targets: [{ nodeId: env.params.nodeIds?.[0] || "1:2", verified: true }] },
+          planId: env.params.planId,
+          ms: { plan: 3 },
+        });
       case "design_system":
         return ok({
           schema: "design-system-v1",
@@ -449,6 +470,48 @@ try {
   check("figma_batch_edit refuses a planId that belongs to another op list",
     /PLAN_MISMATCH/.test(batchMismatchMsg) && seen.length === batchSeenMismatch,
     batchMismatchMsg.slice(0, 160));
+
+  const swapSeenBefore = seen.length;
+  const swapDry = c.text(await c.rpc("tools/call", {
+    name: "figma_swap_component",
+    arguments: { nodeIds: ["1:2"], componentId: "9:10" },
+  }));
+  const swapReq = seen[swapSeenBefore];
+  check("figma_swap_component defaults to a dry run and sends a content planId",
+    swapDry.status === "dry_run" && swapDry.schema === "component-swap-v1" && swapDry.targets[0].compatibility.status === "compatible" &&
+      swapReq.method === "swap_component" && swapReq.params.dryRun === true && typeof swapReq.params.planId === "string",
+    JSON.stringify(swapDry).slice(0, 200));
+
+  const swapApplied = c.text(await c.rpc("tools/call", {
+    name: "figma_swap_component",
+    arguments: {
+      dryRun: false,
+      planId: swapDry.planId,
+      nodeIds: ["1:2"],
+      componentId: "9:10",
+      allowLoss: true,
+      expectedFingerprints: { "1:2": "fp-test" },
+    },
+  }));
+  check("figma_swap_component applies with the dry-run planId and fingerprints",
+    swapApplied.status === "applied" && swapApplied.planId === swapDry.planId && swapApplied.verification.ok === true,
+    JSON.stringify(swapApplied).slice(0, 200));
+
+  const swapSeenMismatch = seen.length;
+  const swapMismatch = await c.rpc("tools/call", {
+    name: "figma_swap_component",
+    arguments: {
+      dryRun: false,
+      planId: swapDry.planId,
+      nodeIds: ["1:2"],
+      componentId: "9:11",
+      expectedFingerprints: { "1:2": "fp-test" },
+    },
+  });
+  const swapMismatchMsg = String(swapMismatch.error?.message ?? swapMismatch.result?.content?.[0]?.text ?? JSON.stringify(swapMismatch));
+  check("figma_swap_component refuses a planId that belongs to another request",
+    /PLAN_MISMATCH/.test(swapMismatchMsg) && seen.length === swapSeenMismatch,
+    swapMismatchMsg.slice(0, 160));
 
   const auditSeenBefore = seen.length;
   const audit = c.text(await c.rpc("tools/call", {

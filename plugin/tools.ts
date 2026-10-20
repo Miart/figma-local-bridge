@@ -25,6 +25,7 @@ import { makeHelpers } from "./helpers";
 import { atlasManifest, handoffPreviewRefusal, nineSliceDescriptor, pngSize, stateList, webHandoff } from "./exports";
 import { runBuild, runPatch } from "./ui-build";
 import { runBatch } from "./batch";
+import { runComponentSwap } from "./component-swap";
 import { runAudit } from "./audit";
 import { runIndex, runSearch } from "./index";
 import { runDesignSystem } from "./design-system";
@@ -794,6 +795,7 @@ export const MUTATING_METHODS: ReadonlySet<string> = new Set([
   "build",
   "patch",
   "batch",
+  "swap_component",
 ]);
 
 export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
@@ -1722,6 +1724,15 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
    */
   async batch(p: Json) {
     return runBatch(figma, p);
+  },
+
+  /**
+   * Swap an INSTANCE's main component in one transaction. The dry run compares
+   * the old and new structures and names every override/property it cannot
+   * carry; apply requires the fingerprints from that plan.
+   */
+  async swap_component(p: Json) {
+    return runComponentSwap(figma, p);
   },
 
   /** Read-only design-system audit: keys, hardcoded paints, text styles, contrast. */

@@ -208,5 +208,16 @@ await build({
   logLevel: "warning",
 });
 
+// component-swap.ts is the instance migration engine. Its dry run decides
+// whether an apply is allowed at all, so the tests drive the shipped module.
+await build({
+  entryPoints: [join(here, "component-swap.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "component-swap.mjs"),
+  logLevel: "warning",
+});
+
 console.log("plugin built ->", join(here, "code.js"));
-console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs, helpers.mjs, exports.mjs, ui-build.mjs, batch.mjs, audit.mjs, index.mjs, design-system.mjs, spec-export.mjs");
+console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs, helpers.mjs, exports.mjs, ui-build.mjs, batch.mjs, audit.mjs, index.mjs, design-system.mjs, spec-export.mjs, component-swap.mjs");

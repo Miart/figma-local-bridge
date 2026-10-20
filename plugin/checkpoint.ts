@@ -433,8 +433,9 @@ async function readInstanceOverrides(
   instance: any,
   main: any,
   depth: number,
-  budget: { n: number; truncated: boolean },
+  budget: { n: number; truncated: boolean; depthTruncated?: boolean },
   maxNodes: number,
+  maxDepth = 8,
 ): Promise<any[] | undefined> {
   const entries = instance.overrides;
   if (!Array.isArray(entries) || !entries.length) return undefined;
@@ -483,17 +484,20 @@ async function readInstanceOverrides(
     if (unsupported.length) rec.unsupported = unsupported;
     const meta = readOverrideMeta(target);
     if (meta) rec.meta = meta;
-    if (target.type === "INSTANCE" && depth < 8) rec.state.instance = await readInstance(target, depth + 1, budget, maxNodes);
+    if (target.type === "INSTANCE" && depth < maxDepth) {
+      rec.state.instance = await readInstance(target, depth + 1, budget, maxNodes, maxDepth);
+    }
     out.push(rec);
   }
   return out.length ? out : undefined;
 }
 
-async function readInstance(
+export async function readInstance(
   node: any,
   depth = 0,
-  budget: { n: number; truncated: boolean } = { n: 0, truncated: false },
+  budget: { n: number; truncated: boolean; depthTruncated?: boolean } = { n: 0, truncated: false },
   maxNodes = MAX_NODES,
+  maxDepth = 8,
 ): Promise<Dict> {
   const out: Dict = {};
   let main: any = null;
@@ -518,18 +522,38 @@ async function readInstance(
   } catch {
     /* a component property that cannot be read cannot be restored either */
   }
-  if (depth < 8) {
+  if (depth < maxDepth) {
     try {
-      const overrides = await readInstanceOverrides(node, main, depth, budget, maxNodes);
+      const overrides = await readInstanceOverrides(node, main, depth, budget, maxNodes, maxDepth);
       if (overrides) out.overrides = overrides;
     } catch (e) {
       out.overridesUnresolved = msg(e);
+    }
+  } else {
+    // A checkpoint stops at eight nested instances. A component swap must at
+    // least SAY that it stopped instead of presenting a cut-short override list
+    // as complete. Look through the boundary subtree, because the node itself
+    // may have no overrides while one of its descendants does.
+    try {
+      const stack = [node];
+      while (stack.length) {
+        const n = stack.pop();
+        if (Array.isArray(n.overrides) && n.overrides.length) {
+          budget.depthTruncated = true;
+          out.depthTruncated = true;
+          break;
+        }
+        if (Array.isArray(n.children)) stack.push(...n.children);
+      }
+    } catch {
+      budget.depthTruncated = true;
+      out.depthTruncated = true;
     }
   }
   return out;
 }
 
-function readMeta(node: any): Dict | undefined {
+export function readMeta(node: any): Dict | undefined {
   const meta: Dict = {};
   try {
     const bv = node.boundVariables;
@@ -1764,7 +1788,7 @@ async function applyTextOverride(
  * override of `visible` must not silently detach the main component's fill
  * style, and an override of `fontSize` must not rewrite the characters.
  */
-async function applyInstanceOverrideState(
+export async function applyInstanceOverrideState(
   target: any,
   rec: Dict,
   ctx: RestoreContext,
@@ -1922,7 +1946,7 @@ async function applyInstanceOverrideState(
  * a path that no longer matches is reported and skipped rather than applied to
  * whatever happens to sit at that index now.
  */
-async function applyInstanceOverrides(
+export async function applyInstanceOverrides(
   instance: any,
   overrides: any,
   ctx: RestoreContext,

@@ -12,6 +12,7 @@ import { registerExportTools } from "./export-tools.js";
 import { registerJournalTools } from "./journal-tools.js";
 import { registerBuildTools } from "./build-tools.js";
 import { registerBatchTools } from "./batch-tools.js";
+import { registerComponentTools } from "./component-tools.js";
 import { registerAuditTools } from "./audit-tools.js";
 import { registerIndexTools } from "./index-tools.js";
 import { registerDesignSystemTools } from "./design-system-tools.js";
@@ -112,6 +113,8 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   registerBuildTools(server, client, caps);
   // Batch is the same deal: the dry run is a read, the apply checks caps.write.
   registerBatchTools(server, client, caps);
+  // Component swap has the same split: comparison is a read, apply is guarded.
+  registerComponentTools(server, client, caps);
   // Audit, index and search are read-only and belong in both modes.
   registerAuditTools(server, client);
   registerIndexTools(server, client);

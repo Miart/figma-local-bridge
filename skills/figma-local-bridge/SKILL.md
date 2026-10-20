@@ -61,9 +61,9 @@ barrier is global. Prefer the specific tools over raw code:
 - Writes can be off: `FIGMA_BRIDGE_WRITE=0` leaves the mutating tools
   unregistered, and `figma_use` additionally needs `FIGMA_BRIDGE_DESTRUCTIVE=1`.
 
-## Declarative editing: build, patch, batch
+## Declarative editing and component swap: build, patch, batch, swap
 
-These three tools are the preferred way to change a tree. They resolve every
+The first three tools are the preferred way to change a tree. They resolve every
 target and every resource **before** the first write, so a typo cannot leave
 half a design applied.
 
@@ -105,6 +105,51 @@ half a design applied.
   back unless `stopOnError:false`, which reports the exact failure and what
   did apply.
 
+## Swapping an instance's component
+
+`figma_swap_component` changes one or more `INSTANCE`s to another main
+component. It does not assign `mainComponent` directly: it calls
+`swapComponent` inside one undo transaction, then replays what that editor
+heuristic does not promise to keep.
+
+- Target the component by `componentId`, `componentKey`, `componentName`,
+  `componentSetId` or `componentSetKey`. A set needs `variantProperties` (for
+  example `{ "Size": "L" }`); omit it and the default variant is used with a
+  warning. An ambiguous component name is refused with the candidates.
+- A dry run (the default) compares the old and new structures and returns a
+  per-target fingerprint of the instance and the target component, the mapped
+  overrides, the root-level state it will preserve, every named loss and every
+  remapped path (`compatibility.changes`; `compatibility.losses` holds only
+  actual losses). Apply
+  with `dryRun:false`, the returned `planId` and `expectedFingerprints`. Apply
+  re-plans before the first write and refuses if the instance, its properties
+  or the target component moved since the dry run.
+- A direct override path is exact index+name first, then a unique name in the
+  new component (reported as `override-remapped`). A changed node type, a
+  missing layer, a changed nested component or an unsupported override field
+  is a loss. It is never applied to a different node type.
+- Component properties are mapped by display name and type. `BOOLEAN`, `TEXT`
+  and `INSTANCE_SWAP` values are replayed; `VARIANT` properties belong to the
+  chosen target, and `SLOT` properties cannot be set through the Plugin API.
+  A renamed or type-changed property is reported, not invented.
+- Root-level state that differs from the old main component is preserved:
+  custom name, manually resized geometry, opacity, visibility, paints/strokes/
+  effects and their style links, layout placement, constraints, rotation and
+  min/max size. `preserveSize:false` adopts the new component's size;
+  `preserveRootOverrides:false` adopts all root defaults.
+- `allowLoss:true` is required to apply a swap whose plan names a loss; the
+  apply report carries the predicted losses separately from what was
+  restored. `allowUnverified:true` is required for a library key whose
+  structure could not be checked before import. Any unexpected loss during
+  apply rolls the whole transaction back.
+- A target that is itself nested inside another `INSTANCE` is refused: that is
+  an override of the outer instance. Nested instance overrides deeper than 12
+  levels block the swap rather than being silently truncated.
+
+A no-op (the target already points at that component) writes nothing. The
+tool is registered in read-only mode for dry runs; only apply checks write
+access.
+
 On a TEXT node, `runs` are absolute UTF-16 character offsets (`start`
 inclusive, `end` exclusive), sorted and non-overlapping. Each run needs at
 least one field; fields it omits inherit the node's base text properties.
@@ -134,7 +179,7 @@ blend mode, rotation, corner radii, stroke weight, size and name. A path is
 resolved against the recreated instance before writing; a stale name or index
 is a warning and that override is skipped, never applied to a guessed layer.
 
-The safe sequence for all three:
+The safe sequence for build, patch, batch and swap:
 
 1. Call with `dryRun:true` (the default). Read the plan, `planId`,
    `fingerprints` / `fingerprint`, and any warnings.
