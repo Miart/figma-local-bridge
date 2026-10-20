@@ -643,7 +643,7 @@ test("build carries rotation, per-corner radii, stroke shape and text formatting
   );
 });
 
-test("build restores image paint geometry, filters, visibility and paint blend mode", async () => {
+test("build restores image and video paint geometry, filters, visibility and paint blend mode", async () => {
   const ctx = makeCtx();
   const imageTransform = [[1, 0, 0], [0, 1, 0]];
   const filters = { exposure: 0.2, contrast: 0.1, saturation: 0, temperature: 0, tint: 0, highlights: 0, shadows: 0 };
@@ -662,6 +662,10 @@ test("build restores image paint geometry, filters, visibility and paint blend m
         opacity: 0.5, blendMode: "SCREEN",
       }, {
         color: "#ff000080", opacity: 0.5,
+      }, {
+        type: "VIDEO", videoHash: "video:1", scaleMode: "TILE",
+        videoTransform: [[1, 0, 0], [0, 1, 0]], scalingFactor: 0.25, rotation: 180, filters,
+        opacity: 0.6, blendMode: "OVERLAY", visible: false,
       }],
     },
   };
@@ -679,6 +683,11 @@ test("build restores image paint geometry, filters, visibility and paint blend m
   assert.equal(fills[1].blendMode, "SCREEN");
   assert.equal(fills[1].gradientStops.length, 2);
   assert.ok(Math.abs(fills[2].opacity - 0.5 * (128 / 255)) < 1e-9);
+  assert.deepEqual(fills[3], {
+    type: "VIDEO", videoHash: "video:1", scaleMode: "TILE",
+    videoTransform: [[1, 0, 0], [0, 1, 0]], scalingFactor: 0.25, rotation: 180, filters,
+    opacity: 0.6, blendMode: "OVERLAY", visible: false,
+  });
 });
 
 test("re-sending the same build updates in place and never duplicates", async () => {

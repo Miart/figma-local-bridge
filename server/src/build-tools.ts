@@ -31,8 +31,10 @@ const paintSchema = z.union([
       opacity: z.number().min(0).max(1).optional(),
       variable: z.string().optional().describe("Local colour variable name or id"),
       imageHash: z.string().optional(),
+      videoHash: z.string().optional(),
       scaleMode: z.enum(["FILL", "FIT", "CROP", "TILE"]).optional(),
       imageTransform: z.array(z.array(z.number())).optional().describe("IMAGE crop transform (CROP only)"),
+      videoTransform: z.array(z.array(z.number())).optional().describe("VIDEO crop transform (CROP only)"),
       scalingFactor: z.number().optional().describe("IMAGE tile scaling (TILE only)"),
       rotation: z.number().optional().describe("IMAGE rotation in degrees"),
       filters: z

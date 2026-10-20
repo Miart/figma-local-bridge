@@ -248,7 +248,7 @@ test("layout grids and line length survive the round trip", async () => {
   assert.equal(normalized.nodes, 2);
 });
 
-test("image paint geometry, filters and paint visibility survive the export", async () => {
+test("image and video paint geometry, filters and paint visibility survive the export", async () => {
   const imageTransform = [[1, 0, 0], [0, 1, 0]];
   const filters = { exposure: 0.2, contrast: 0.1, saturation: 0, temperature: 0, tint: 0, highlights: 0, shadows: 0 };
   const rect = node("RECTANGLE", {
@@ -265,6 +265,10 @@ test("image paint geometry, filters and paint visibility survive the export", as
       ],
       gradientTransform: [[1, 0, 0], [0, 1, 0]],
       opacity: 0.5, blendMode: "SCREEN",
+    }, {
+      type: "VIDEO", videoHash: "video:1", scaleMode: "TILE",
+      videoTransform: [[1, 0, 0], [0, 1, 0]], scalingFactor: 0.25, rotation: 180, filters,
+      opacity: 0.6, blendMode: "OVERLAY", visible: false,
     }],
   });
 
@@ -279,6 +283,11 @@ test("image paint geometry, filters and paint visibility survive the export", as
     stops: [{ at: 0, color: "#ff0000" }, { at: 1, color: "#0000ff" }],
     gradientTransform: [[1, 0, 0], [0, 1, 0]],
     opacity: 0.5, blendMode: "SCREEN",
+  });
+  assert.deepEqual(report.spec.fills[2], {
+    type: "VIDEO", videoHash: "video:1", scaleMode: "TILE",
+    videoTransform: [[1, 0, 0], [0, 1, 0]], scalingFactor: 0.25, rotation: 180, filters,
+    opacity: 0.6, blendMode: "OVERLAY", visible: false,
   });
   assert.equal(report.warnings.length, 0);
   assert.doesNotThrow(() => normalizeTree(report.spec));

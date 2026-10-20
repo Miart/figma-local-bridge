@@ -642,7 +642,7 @@ function collectPaints(res: Resources, paints: any, where: string) {
     if (p.color !== undefined) {
       try { parseColor(p.color); } catch (e) { res.blocking.push(`${where}[${i}]: ${errMsg(e)}`); }
     }
-    if (p.type && !["SOLID", "IMAGE", "GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND"].includes(String(p.type))) {
+    if (p.type && !["SOLID", "IMAGE", "VIDEO", "GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND"].includes(String(p.type))) {
       res.blocking.push(`${where}[${i}]: unsupported paint type "${p.type}"`);
     }
     if (p.visible !== undefined && typeof p.visible !== "boolean") {
@@ -651,10 +651,12 @@ function collectPaints(res: Resources, paints: any, where: string) {
     if (p.blendMode !== undefined && typeof p.blendMode !== "string") {
       res.blocking.push(`${where}[${i}].blendMode must be a string`);
     }
-    if (p.type === "IMAGE") {
-      if (!p.imageHash) res.blocking.push(`${where}[${i}]: IMAGE paint needs imageHash`);
-      if (p.imageTransform !== undefined && !Array.isArray(p.imageTransform)) {
-        res.blocking.push(`${where}[${i}].imageTransform must be a transform array`);
+    if (p.type === "IMAGE" || p.type === "VIDEO") {
+      const hashField = p.type === "IMAGE" ? "imageHash" : "videoHash";
+      const transformField = p.type === "IMAGE" ? "imageTransform" : "videoTransform";
+      if (!p[hashField]) res.blocking.push(`${where}[${i}]: ${p.type} paint needs ${hashField}`);
+      if (p[transformField] !== undefined && !Array.isArray(p[transformField])) {
+        res.blocking.push(`${where}[${i}].${transformField} must be a transform array`);
       }
       if (p.filters !== undefined && !isObj(p.filters)) {
         res.blocking.push(`${where}[${i}].filters must be an object`);
@@ -1476,13 +1478,15 @@ function paintFromSpec(ctx: any, value: any, res: Resources): any {
     }
     return paintCommon(paint, value);
   }
-  if (value.type === "IMAGE") {
+  if (value.type === "IMAGE" || value.type === "VIDEO") {
+    const isVideo = value.type === "VIDEO";
     const paint: any = {
-      type: "IMAGE",
-      imageHash: String(value.imageHash),
+      type: value.type,
+      [isVideo ? "videoHash" : "imageHash"]: String(isVideo ? value.videoHash : value.imageHash),
       scaleMode: value.scaleMode || "FILL",
     };
-    if (value.imageTransform !== undefined) paint.imageTransform = value.imageTransform;
+    const transform = isVideo ? value.videoTransform : value.imageTransform;
+    if (transform !== undefined) paint[isVideo ? "videoTransform" : "imageTransform"] = transform;
     if (value.scalingFactor !== undefined) paint.scalingFactor = Number(value.scalingFactor);
     if (value.rotation !== undefined) paint.rotation = Number(value.rotation);
     if (value.filters !== undefined) paint.filters = value.filters;

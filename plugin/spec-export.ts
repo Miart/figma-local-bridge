@@ -154,13 +154,15 @@ async function paintToSpec(
     }
     return paintCommon(out, paint);
   }
-  if (paint.type === "IMAGE") {
-    if (!paint.imageHash) {
-      warnings.push(`${path}: an IMAGE paint has no imageHash and was omitted`);
+  if (paint.type === "IMAGE" || paint.type === "VIDEO") {
+    const hash = paint.type === "IMAGE" ? paint.imageHash : paint.videoHash;
+    if (!hash) {
+      warnings.push(`${path}: a ${paint.type} paint has no ${paint.type === "IMAGE" ? "imageHash" : "videoHash"} and was omitted`);
       return null;
     }
-    const out: Json = { type: "IMAGE", imageHash: paint.imageHash, scaleMode: paint.scaleMode || "FILL" };
-    if (paint.imageTransform) out.imageTransform = paint.imageTransform;
+    const out: Json = { type: paint.type, [paint.type === "IMAGE" ? "imageHash" : "videoHash"]: hash, scaleMode: paint.scaleMode || "FILL" };
+    const transform = paint.type === "IMAGE" ? paint.imageTransform : paint.videoTransform;
+    if (transform) out[paint.type === "IMAGE" ? "imageTransform" : "videoTransform"] = transform;
     if (paint.scalingFactor !== undefined) out.scalingFactor = paint.scalingFactor;
     if (paint.rotation !== undefined) out.rotation = paint.rotation;
     if (paint.filters) out.filters = paint.filters;
