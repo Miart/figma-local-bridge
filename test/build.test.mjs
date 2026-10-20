@@ -121,6 +121,8 @@ function makeCtx({ textStyles = [], paintStyles = [], localVariables = [] } = {}
     setRangeTextStyleIdAsync(start, end, value) { return Promise.resolve((this.rangeOps ||= []).push({ field: "textStyleId", start, end, value })); },
     setRangeFillStyleIdAsync(start, end, value) { return Promise.resolve((this.rangeOps ||= []).push({ field: "fillStyleId", start, end, value })); },
     setRangeFills(start, end, value) { (this.rangeOps ||= []).push({ field: "fills", start, end, value }); },
+    setBoundVariable(field, variable) { (this.bindOps ||= []).push({ field, variable, range: null }); },
+    setRangeBoundVariable(start, end, field, variable) { (this.bindOps ||= []).push({ field, variable, start, end }); },
     setRangeTextCase(start, end, value) { (this.rangeOps ||= []).push({ field: "textCase", start, end, value }); },
     setRangeTextDecoration(start, end, value) { (this.rangeOps ||= []).push({ field: "textDecoration", start, end, value }); },
     setRangeLineHeight(start, end, value) { (this.rangeOps ||= []).push({ field: "lineHeight", start, end, value }); },
@@ -220,15 +222,17 @@ test("a hyperlink is text-only and normalized", () => {
 
 test("text runs are ordered, bounded and text-only", () => {
   const text = normalizeTree({
-    type: "TEXT", text: "Hello",
+    type: "TEXT", text: "Hello", textVariable: { fontSize: " type/size ", fontFamily: null },
     runs: [
-      { start: 0, end: 2, font: "Inter/Bold", fontSize: 24, textStyle: " body/bold ", fillStyle: " accent ", textCase: "UPPER", hyperlink: null },
+      { start: 0, end: 2, font: "Inter/Bold", fontSize: 24, textStyle: " body/bold ", fillStyle: " accent ", variable: { fontSize: " type/size ", lineHeight: null }, textCase: "UPPER", hyperlink: null },
       { start: 2, end: 5, lineHeight: 20, letterSpacing: 1, textDecoration: "UNDERLINE" },
     ],
   });
+  assert.deepEqual(text.root.spec.textVariable, { fontSize: "type/size", fontFamily: null });
   assert.deepEqual(text.root.spec.runs[0].font, { family: "Inter", style: "Bold" });
   assert.equal(text.root.spec.runs[0].textStyle, "body/bold");
   assert.equal(text.root.spec.runs[0].fillStyle, "accent");
+  assert.deepEqual(text.root.spec.runs[0].variable, { fontSize: "type/size", lineHeight: null });
   assert.deepEqual(text.root.spec.runs[1].lineHeight, { unit: "PIXELS", value: 20 });
   assert.equal(text.root.spec.runs[0].hyperlink, null);
 
@@ -244,6 +248,10 @@ test("text runs are ordered, bounded and text-only", () => {
   assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, textStyle: " " }] }), /textStyle/);
   assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, fillStyle: " " }] }), /fillStyle/);
   assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, fillStyle: "a", fills: "#fff" }] }), /not both/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, variable: { bold: "x" } }] }), /not a bindable/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, variable: { fontSize: " " } }] }), /non-empty/);
+  assert.throws(() => normalizeTree({ type: "FRAME", textVariable: { fontSize: "x" } }), /only valid on TEXT/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", textVariable: { weight: "x" } }), /not a bindable/);
   assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, textCase: "SHOUT" }] }), /textCase/);
 });
 
@@ -368,6 +376,51 @@ test("text runs link and clear local styles by range", async () => {
   assert.ok(label.rangeOps.some((op) => op.field === "fillStyleId" && op.start === 0 && op.end === 2 && op.value === "S:accent"));
   assert.ok(label.rangeOps.some((op) => op.field === "textStyleId" && op.start === 2 && op.end === 5 && op.value === ""));
   assert.ok(label.rangeOps.some((op) => op.field === "fillStyleId" && op.start === 2 && op.end === 5 && op.value === ""));
+});
+
+test("text variables bind the base and a run by local variable name", async () => {
+  const size = { id: "V:size", key: "size-key", name: "type/size", resolvedType: "FLOAT" };
+  const family = { id: "V:family", key: "family-key", name: "type/family", resolvedType: "STRING" };
+  const ctx = makeCtx({ localVariables: [size, family] });
+  const spec = {
+    buildId: "runs/variables",
+    root: {
+      type: "FRAME", name: "Bound", size: { width: 200, height: 40 },
+      children: [{
+        type: "TEXT", name: "Label", key: "runs/variables/label", text: "Hello",
+        font: "Inter/Regular", textVariable: { fontSize: "type/size" },
+        runs: [{ start: 0, end: 2, variable: { fontSize: null, fontFamily: "type/family" } }],
+      }],
+    },
+  };
+
+  const dry = await runBuild(ctx, { ...spec, dryRun: true });
+  assert.equal(dry.status, "dry_run");
+  assert.deepEqual(dry.variables, ["type/family", "type/size"]);
+
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.status, "applied");
+  const label = ctx.currentPage.children[0].children[0];
+  assert.ok(label.bindOps.some((op) => op.range === null && op.field === "fontSize" && op.variable.id === "V:size"));
+  assert.ok(label.bindOps.some((op) => op.start === 0 && op.end === 2 && op.field === "fontSize" && op.variable === null));
+  assert.ok(label.bindOps.some((op) => op.start === 0 && op.end === 2 && op.field === "fontFamily" && op.variable.id === "V:family"));
+});
+
+test("a text variable of the wrong type blocks the build before writing", async () => {
+  const ctx = makeCtx({
+    localVariables: [{ id: "V:color", key: "color-key", name: "brand/red", resolvedType: "COLOR" }],
+  });
+  const plan = await runBuild(ctx, {
+    buildId: "runs/bad-variable",
+    root: {
+      type: "TEXT", text: "x", font: "Inter/Regular",
+      textVariable: { fontSize: "brand/red" },
+    },
+    dryRun: true,
+  });
+  assert.equal(plan.status, "blocked");
+  assert.match(plan.blocking.join(" "), /COLOR.*FLOAT/);
+  assert.equal(ctx.metrics.undos, 0);
 });
 
 test("build carries rotation, per-corner radii, stroke shape and text formatting", async () => {

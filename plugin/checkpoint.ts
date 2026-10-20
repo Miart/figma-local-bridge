@@ -11,9 +11,8 @@
  *   - an INSTANCE comes back as an instance of its main component, with
  *     component properties re-applied — the overridden leaves inside it are not
  *     captured, so it shows the main component's current content;
- *   - per-run text variable bindings are not rebuilt; the runs themselves
- *     (font, size, fills, style links, case, decoration, line height, letter
- *     spacing and hyperlink) are;
+ *   - the runs themselves (font, size, fills, style links, variable bindings,
+ *     case, decoration, line height, letter spacing and hyperlink) are;
  *   - style ids, node-level variable bindings and explicit modes travel in
  *     `meta` and are re-linked by id when they still exist; every one that does
  *     not is reported instead of passing as restored;
@@ -38,9 +37,8 @@ export const MAX_DEPTH = 40;
  */
 export const LIMITATIONS: readonly string[] = [
   "instance interiors are not captured: a restored INSTANCE shows its main component's current content (component properties are re-applied)",
-  "text runs are rebuilt (font, size, fills, text/fill style links, case, decoration, line height, letter spacing and hyperlink); per-run variable bindings are not",
-  "style ids are re-linked when the style still exists; node-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
-  "per-range text bindings are not rebuilt; a single binding across the whole text is restored",
+  "text runs are rebuilt (font, size, fills, text/fill style links, variable bindings, case, decoration, line height, letter spacing and hyperlink)",
+  "style ids are re-linked when the style still exists; node-level and run-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
   "a BOOLEAN_OPERATION is not rebuilt (its inputs are not recoverable from the API)",
 ];
@@ -221,6 +219,11 @@ export function readState(node: any): Dict {
   return s;
 }
 
+const TEXT_RANGE_FIELDS = new Set([
+  "fontFamily", "fontStyle", "fontWeight", "fontSize",
+  "letterSpacing", "lineHeight", "paragraphSpacing", "paragraphIndent",
+]);
+
 function readTextRun(seg: any): Dict {
   const out: Dict = { start: seg.start, end: seg.end };
   if (!isMixedValue(seg.fontName) && isObj(seg.fontName)) out.font = copy(seg.fontName);
@@ -234,6 +237,14 @@ function readTextRun(seg: any): Dict {
   else if (seg.hyperlink && !isMixedValue(seg.hyperlink)) out.hyperlink = copy(seg.hyperlink);
   if (typeof seg.textStyleId === "string" && seg.textStyleId) out.textStyleId = seg.textStyleId;
   if (typeof seg.fillStyleId === "string" && seg.fillStyleId) out.fillStyleId = seg.fillStyleId;
+  if (isObj(seg.boundVariables)) {
+    const variables: Dict = {};
+    for (const field of TEXT_RANGE_FIELDS) {
+      const alias = seg.boundVariables[field];
+      if (isAlias(alias)) variables[field] = copy(alias);
+    }
+    if (Object.keys(variables).length) out.variables = variables;
+  }
   return out;
 }
 
@@ -258,6 +269,7 @@ function readText(node: any): Dict {
     const segs = node.getStyledTextSegments([
       "fontName", "fontSize", "fills", "textCase", "textDecoration",
       "lineHeight", "letterSpacing", "hyperlink", "textStyleId", "fillStyleId",
+      "boundVariables",
     ]);
     if (Array.isArray(segs) && segs.length > 1) {
       t.runs = segs.length;
@@ -881,18 +893,29 @@ async function applyVariableModes(node: any, modes: Dict | undefined, ctx: Resto
  */
 async function applyVariableBindings(node: any, bindings: Dict | undefined, state: Dict | undefined, ctx: RestoreContext, report: RestoreReport, path: string): Promise<void> {
   if (!bindings || typeof bindings !== "object") return;
+  const runs = state?.text?.textRuns;
+  const runFields = new Set<string>();
+  if (Array.isArray(runs)) {
+    for (const run of runs) {
+      if (!isObj(run?.variables)) continue;
+      for (const field of Object.keys(run.variables)) runFields.add(field);
+    }
+  }
   for (const [field, value] of Object.entries(bindings)) {
     if (PAINT_LEVEL_BINDINGS.has(field)) continue;
+    // A field the runs carry is restored range by range; a whole-node write
+    // here would flatten those bindings.
+    if (runFields.has(field)) continue;
 
     if (field === "textRangeFills") {
-      // The paints already carry a whole-text binding when there is one. A
-      // mixed fill has per-range bindings; text runs are restored, but the
-      // aliases attached to those runs are not.
+      // The paints already carry a whole-text binding when there is one, and a
+      // run's fills carry their own per-range bindings through setRangeFills.
+      if (Array.isArray(runs) && runs.length) continue;
       if (state?.fills === "mixed") {
         for (const alias of (Array.isArray(value) ? value : [value]).filter(isAlias)) {
           report.bindingsMissing.push({
             path, field, id: alias.id,
-            why: "per-range text fill bindings are not rebuilt; literal run fills were restored without the binding",
+            why: "per-range text fill bindings are not carried by these runs; literal fills were restored without the binding",
           });
         }
       }
@@ -933,7 +956,7 @@ async function applyVariableBindings(node: any, bindings: Dict | undefined, stat
     if (ids.length > 1) {
       report.bindingsMissing.push({
         path, field, id: ids.join(","),
-        why: `${aliases.length} different per-range bindings; text runs are restored but their variable bindings are not`,
+        why: `${aliases.length} different per-range bindings; the text runs do not carry this field's binding, so its literal value remains`,
       });
       continue;
     }
@@ -1055,6 +1078,43 @@ async function applyRunStyleLinks(
       report.stylesRestored.push({ path: at, field, id: style.id || id });
     } catch (e) {
       missing(msg(e));
+    }
+  }
+}
+
+async function applyRunBindings(
+  node: any,
+  run: Dict,
+  start: number,
+  end: number,
+  ctx: RestoreContext,
+  report: RestoreReport,
+  path: string,
+  i: number,
+): Promise<void> {
+  if (!isObj(run.variables)) return;
+  for (const [field, alias] of Object.entries(run.variables as Dict)) {
+    if (!TEXT_RANGE_FIELDS.has(field)) continue;
+    const at = `${path}.runs[${i}]`;
+    const missing = (id: string, why: string) => report.bindingsMissing.push({ path: at, field, id, why });
+    if (!isAlias(alias)) {
+      missing(String((alias as any)?.id ?? ""), "the recorded run binding is not a variable alias");
+      continue;
+    }
+    const resolved = await resolveVariable(alias, ctx);
+    if (!resolved.variable) {
+      missing(alias.id, resolved.why ?? "unresolved");
+      continue;
+    }
+    if (typeof node.setRangeBoundVariable !== "function") {
+      missing(alias.id, `a ${node.type} cannot bind a variable to a character range`);
+      continue;
+    }
+    try {
+      node.setRangeBoundVariable(start, end, field, resolved.variable);
+      report.bindingsRestored.push({ path: at, field, id: resolved.variable.id, name: resolved.variable.name });
+    } catch (e) {
+      missing(alias.id, msg(e));
     }
   }
 }
@@ -1199,6 +1259,7 @@ async function applyText(node: any, text: Dict, ctx: RestoreContext, report: Res
       if (run.hyperlink !== undefined && typeof node.setRangeHyperlink === "function") {
         runSoft("hyperlink", () => { node.setRangeHyperlink(start, end, run.hyperlink); });
       }
+      await applyRunBindings(node, run, start, end, ctx, report, path, i);
     }
   }
 

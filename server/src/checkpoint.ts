@@ -192,7 +192,7 @@ function annotateDiffs(diffs: Difference[]): string[] {
   for (const d of diffs) {
     if (d.path.includes(".state.size")) notes.add("size: an auto-layout (HUG) frame owns its own size — the rebuild does not resize it, so a size difference there is the layout, not the rebuild");
     if (d.path.includes(".state.pos")) notes.add("position: inside an auto-layout parent the layout places children; a recorded position is not restored there");
-    if (d.path.includes(".state.text.runs")) notes.add("runs: the number of text runs differs; checkpoint-v1 restores per-run font, size, fills, case, decoration, line height, letter spacing and hyperlink");
+    if (d.path.includes(".state.text.runs")) notes.add("runs: the number of text runs differs; checkpoint-v1 restores per-run font, size, fills, style links, variable bindings, case, decoration, line height, letter spacing and hyperlink");
     if (d.path.includes(".state.text.textRuns")) notes.add("runs: a per-run text property differs after the rebuild — missing fonts and failures are named in the restore report");
     if (d.path.endsWith(".children.length")) notes.add("children: the subtree has a different number of children — read `skipped` and `created` in the restore report");
   }

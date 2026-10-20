@@ -34,6 +34,7 @@ function node(type, opts = {}) {
     strokeStyleId: opts.strokeStyleId || "",
     effectStyleId: opts.effectStyleId || "",
     textStyleId: opts.textStyleId || "",
+    boundVariables: opts.boundVariables,
     strokeWeight: opts.strokeWeight === undefined ? 1 : opts.strokeWeight,
     strokeAlign: opts.strokeAlign || "INSIDE",
     strokeCap: opts.strokeCap || "NONE",
@@ -272,6 +273,10 @@ test("mixed fonts and per-run styling export as text runs", async () => {
       textCase: "ORIGINAL", textDecoration: "NONE",
       lineHeight: { unit: "AUTO" }, letterSpacing: { unit: "PERCENT", value: 0 },
       hyperlink: null, textStyleId: "S:text-base", fillStyleId: "",
+      boundVariables: {
+        fontSize: { type: "VARIABLE_ALIAS", id: "V:size-base" },
+        letterSpacing: { type: "VARIABLE_ALIAS", id: "V:tracking" },
+      },
     },
     {
       characters: " World", start: 5, end: 11,
@@ -279,12 +284,22 @@ test("mixed fonts and per-run styling export as text runs", async () => {
       textCase: "UPPER", textDecoration: "UNDERLINE",
       lineHeight: { unit: "PIXELS", value: 20 }, letterSpacing: { unit: "PIXELS", value: 1 },
       hyperlink: { type: "URL", value: "https://example.com" }, textStyleId: "S:text-emphasis", fillStyleId: "S:fill-emphasis",
+      boundVariables: {
+        fontSize: { type: "VARIABLE_ALIAS", id: "V:size-run" },
+        fontFamily: { type: "VARIABLE_ALIAS", id: "V:family" },
+      },
     },
   ];
   const styles = new Map([
     ["S:text-base", { id: "S:text-base", name: "text/base", type: "TEXT", fontName: { family: "Inter", style: "Bold" } }],
     ["S:text-emphasis", { id: "S:text-emphasis", name: "text/emphasis", type: "TEXT", fontName: { family: "Inter", style: "Regular" } }],
     ["S:fill-emphasis", { id: "S:fill-emphasis", name: "fill/emphasis", type: "PAINT" }],
+  ]);
+  const vars = new Map([
+    ["V:size-base", { id: "V:size-base", name: "type/size-base" }],
+    ["V:size-run", { id: "V:size-run", name: "type/size-run" }],
+    ["V:family", { id: "V:family", name: "type/family" }],
+    ["V:tracking", { id: "V:tracking", name: "type/tracking" }],
   ]);
   const title = node("TEXT", { name: "Mixed", characters: "Hello World", segments });
   title.fontName = Symbol("mixed");
@@ -296,8 +311,9 @@ test("mixed fonts and per-run styling export as text runs", async () => {
   title.textDecoration = Symbol("mixed");
   title.hyperlink = Symbol("mixed");
 
-  const report = await runExportSpec(makeCtx({ styles }), { nodeId: title.id });
+  const report = await runExportSpec(makeCtx({ styles, vars }), { nodeId: title.id });
   assert.equal(report.spec.textStyle, "text/base");
+  assert.deepEqual(report.spec.textVariable, { fontSize: "type/size-base", letterSpacing: "type/tracking" });
   assert.equal(report.spec.font, undefined);
   assert.equal(report.spec.fontSize, 24);
   assert.deepEqual(report.spec.fills, [{ color: "#ff0000" }]);
@@ -310,6 +326,11 @@ test("mixed fonts and per-run styling export as text runs", async () => {
   assert.equal(run.textStyle, "text/emphasis");
   assert.equal(run.fillStyle, "fill/emphasis");
   assert.equal(run.fills, undefined);
+  assert.deepEqual(run.variable, {
+    fontSize: "type/size-run",
+    fontFamily: "type/family",
+    letterSpacing: null,
+  });
   assert.equal(run.textCase, "UPPER");
   assert.equal(run.textDecoration, "UNDERLINE");
   assert.deepEqual(run.lineHeight, { unit: "PIXELS", value: 20 });
@@ -322,6 +343,62 @@ test("mixed fonts and per-run styling export as text runs", async () => {
   assert.deepEqual(normalized.root.spec.runs[0].font, { family: "Inter", style: "Regular" });
   assert.equal(normalized.root.spec.runs[0].textStyle, "text/emphasis");
   assert.equal(normalized.root.spec.runs[0].fillStyle, "fill/emphasis");
+  assert.deepEqual(normalized.root.spec.textVariable, { fontSize: "type/size-base", letterSpacing: "type/tracking" });
+  assert.deepEqual(normalized.root.spec.runs[0].variable, {
+    fontSize: "type/size-run",
+    fontFamily: "type/family",
+    letterSpacing: null,
+  });
+});
+
+test("a uniform text binding still exports through the segment path", async () => {
+  const vars = new Map([["V:size", { id: "V:size", name: "type/size" }]]);
+  const fill = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: 1 }];
+  const title = node("TEXT", {
+    name: "Bound", characters: "Hi",
+    fontName: { family: "Inter", style: "Regular" }, fontSize: 16, fills: fill,
+    segments: [{
+      characters: "Hi", start: 0, end: 2,
+      fontName: { family: "Inter", style: "Regular" }, fontSize: 16, fills: fill,
+      textCase: "ORIGINAL", textDecoration: "NONE",
+      lineHeight: { unit: "AUTO" }, letterSpacing: { unit: "PERCENT", value: 0 },
+      hyperlink: null,
+      boundVariables: { fontSize: { type: "VARIABLE_ALIAS", id: "V:size" } },
+    }],
+  });
+  const report = await runExportSpec(makeCtx({ vars }), { nodeId: title.id });
+  assert.deepEqual(report.spec.textVariable, { fontSize: "type/size" });
+  assert.equal(report.spec.runs, undefined);
+  assert.equal(normalizeTree(report.spec).root.spec.textVariable.fontSize, "type/size");
+});
+
+test("an unresolved run variable clears the base binding instead of inheriting it", async () => {
+  const vars = new Map([["V:base", { id: "V:base", name: "type/base" }]]);
+  const black = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: 1 }];
+  const segments = [
+    {
+      characters: "A", start: 0, end: 1,
+      fontName: { family: "Inter", style: "Regular" }, fontSize: 16, fills: black,
+      textCase: "ORIGINAL", textDecoration: "NONE",
+      lineHeight: { unit: "AUTO" }, letterSpacing: { unit: "PERCENT", value: 0 },
+      hyperlink: null,
+      boundVariables: { fontSize: { type: "VARIABLE_ALIAS", id: "V:base" } },
+    },
+    {
+      characters: "B", start: 1, end: 2,
+      fontName: { family: "Inter", style: "Regular" }, fontSize: 18, fills: black,
+      textCase: "ORIGINAL", textDecoration: "NONE",
+      lineHeight: { unit: "AUTO" }, letterSpacing: { unit: "PERCENT", value: 0 },
+      hyperlink: null,
+      boundVariables: { fontSize: { type: "VARIABLE_ALIAS", id: "V:gone" } },
+    },
+  ];
+  const title = node("TEXT", { name: "Gone", characters: "AB", segments });
+  const report = await runExportSpec(makeCtx({ vars }), { nodeId: title.id });
+  assert.deepEqual(report.spec.textVariable, { fontSize: "type/base" });
+  assert.deepEqual(report.spec.runs[0].variable, { fontSize: null });
+  assert.equal(report.spec.runs[0].fontSize, 18);
+  assert.ok(report.warnings.some((w) => /V:gone.*no longer resolves/.test(w)));
 });
 
 test("variables, derived keys and unsupported nodes are named", async () => {

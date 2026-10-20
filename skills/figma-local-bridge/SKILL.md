@@ -76,8 +76,8 @@ half a design applied.
   masks, layout grids, layout inclusion flags, text case/decoration/paragraph
   spacing, text hyperlinks (URL, or NODE by node id), text runs (ordered
   character ranges with their own font, size, text style, fills, fill style,
-  case, decoration, line height, letter spacing and hyperlink), and an exact
-  `LINE` length.
+  variable bindings, case, decoration, line height, letter spacing and
+  hyperlink), whole-text `textVariable` bindings, and an exact `LINE` length.
 - `figma_patch` takes a sparse tree under `rootNodeId`, `buildId` or
   `rootKey`. Children match by key. A missing key is refused unless
   `allowCreate:true`; a key under the wrong parent is refused rather than
@@ -96,10 +96,20 @@ inclusive, `end` exclusive), sorted and non-overlapping. Each run needs at
 least one field; fields it omits inherit the node's base text properties.
 `textStyle` and `fillStyle` take a local style name or id and link that range;
 `null` clears a link inherited from the base, and `fillStyle` and `fills` are
-mutually exclusive on one run. Send `text` with `runs`, because the engine
-validates every range against the characters it is about to write.
-`figma_batch_edit`'s `set_text` still sets one font per op; use `figma_build` /
-`figma_patch` for per-range styling.
+mutually exclusive on one run. A TEXT node's `textVariable` binds base text
+fields, and a run's `variable` binds that range; both are objects keyed by
+Figma's field names (`fontFamily`, `fontStyle`, `fontWeight`, `fontSize`,
+`letterSpacing`, `lineHeight`, `paragraphSpacing`, `paragraphIndent`). The value
+is a local variable name/id, and `null` clears a binding inherited from the
+base. A literal run value does not remove a base binding; set that field to
+`null` in the run's `variable` map when the range should be unbound. Build
+resolves the variable and checks its `STRING`/`FLOAT` type before writing. A
+`fontFamily`/`fontStyle` binding changes the font, so Figma may need that font
+loaded; the build rolls back and names the font error if it is not.
+Send `text` with `runs`, because the engine validates every range against the
+characters it is about to write. `figma_batch_edit`'s `set_text` still sets one
+font per op; use `figma_build` / `figma_patch` for per-range styling and
+bindings.
 
 The safe sequence for all three:
 
@@ -119,15 +129,15 @@ parent; use `batch` with `reparent` when a move is intended.
 To bring a hand-made tree into this language, `figma_export_build_spec`
 returns a spec that `figma_build` accepts. It keeps keys that already exist,
 derives the same key the build engine would for nodes without one, and turns
-style/variable links into `fillStyle`/`strokeStyle`/`textStyle`/`effectStyle`
-or `variable`. URL text links travel in the spec; a NODE link is exported with
-a file-local warning. Mixed text becomes a base style plus ordered `runs`, so
-mixed fonts, sizes, text/fill style links, case, decoration, spacing and links
-survive a rebuild. Remaining exactness losses include per-range variable
-bindings. Read `unsupported` and `warnings` before building it: an SVG source,
-a detached instance, an instance interior or a paint the spec cannot express
-has no exact representation. `truncated: true` means the spec is incomplete and
-must not be built as-is.
+style/variable links into `fillStyle`/`strokeStyle`/`textStyle`/`effectStyle`,
+`variable` or `textVariable`. URL text links travel in the spec; a NODE link is
+exported with a file-local warning. Mixed text becomes a base style plus
+ordered `runs`, so mixed fonts, sizes, text/fill style links, text variable
+bindings, case, decoration, spacing and links survive a rebuild. Read
+`unsupported` and `warnings` before building it: an SVG source, a detached
+instance, an instance interior or a paint the spec cannot express has no exact
+representation. `truncated: true` means the spec is incomplete and must not be
+built as-is.
 
 ## Finding things, and checking the result
 
@@ -323,9 +333,8 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
 
 - `action: "save"` records a subtree as data (`nodeId`; a page is refused) into
   one JSON file per file key. The reply carries a `summary` and the
-  `limitations` a rebuild cannot carry — instance interiors, per-run variable
-  bindings and component identity. Read them before telling anyone the subtree
-  will come back exactly.
+  `limitations` a rebuild cannot carry — instance interiors and component
+  identity. Read them before telling anyone the subtree will come back exactly.
 - `action: "show"` diffs the live subtree against the file field by field and
   reports the semantic fingerprint next to it. That is how "has this drifted
   already?" gets answered before a rebuild is chosen.
@@ -334,19 +343,18 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   and created; a real rebuild needs `dryRun: false`, `allowDestructive: true`
   and a bridge started with `FIGMA_BRIDGE_DESTRUCTIVE=1`.
 - Style ids, node-level variable bindings and explicit variable modes travel in
-  `meta`. Restore re-links a style, variable, collection or mode when it still
-  exists and reports every one that does not: `stylesMissing`, `bindingsMissing`
-  and `modesMissing`. The recorded value is written either way, so a missing link
+  `meta`; per-run text bindings and style ids travel inside the runs. Restore
+  re-links a style, variable, collection or mode when it still exists and
+  reports every one that does not: `stylesMissing`, `bindingsMissing` and
+  `modesMissing`. The recorded value is written either way, so a missing link
   leaves a correct-looking but unlinked node instead of a missing colour or size.
 - Paint-level variable bindings travel with the paint. They survive when their
   variable exists; when it does not, the paint returns by value and
-  `bindingsDropped` names it. Per-range text bindings are not rebuilt, although
-  the text runs themselves are; `bindingsMissing` names the aliases instead of
-  flattening them.
-- Per-run text and fill style ids travel inside the runs and are re-linked by
-  id when the style still exists; a missing one is reported in `stylesMissing`
-  with the run's path, and the recorded literal value remains. The text style's
-  font is loaded before the range link is applied.
+  `bindingsDropped` names it.
+- Per-run text and fill style ids and text variable bindings travel inside the
+  runs and are re-linked by id when the style or variable still exists; a
+  missing one is reported with the run's path, and the recorded literal value
+  remains. The text style's font is loaded before the range link is applied.
 - A whole-text hyperlink is saved and restored by value. Mixed per-run links
   travel inside the runs, so `null` on a run clears it for that range. A NODE
   link stays file-local.

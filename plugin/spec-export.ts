@@ -203,9 +203,41 @@ async function paintsToSpec(
 const TEXT_SEGMENT_FIELDS = [
   "fontName", "fontSize", "fills", "textCase", "textDecoration",
   "lineHeight", "letterSpacing", "hyperlink", "textStyleId", "fillStyleId",
+  "boundVariables",
 ];
 
+const TEXT_VARIABLE_FIELDS = new Set([
+  "fontFamily", "fontStyle", "fontWeight", "fontSize",
+  "letterSpacing", "lineHeight", "paragraphSpacing", "paragraphIndent",
+]);
+
 const same = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
+
+/** field -> uniform alias id. A field with several different ids is left to runs. */
+function textVariableIds(bound: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!isObj(bound)) return out;
+  for (const field of TEXT_VARIABLE_FIELDS) {
+    const value = bound[field];
+    if (!value) continue;
+    const list = Array.isArray(value) ? value : [value];
+    const ids = [...new Set(list
+      .filter((a: any) => isObj(a) && a.type === "VARIABLE_ALIAS" && typeof a.id === "string" && a.id)
+      .map((a: any) => a.id))];
+    if (ids.length === 1) out[field] = ids[0];
+  }
+  return out;
+}
+
+function hasTextVariables(bound: any): boolean {
+  if (!isObj(bound)) return false;
+  for (const field of TEXT_VARIABLE_FIELDS) {
+    const value = bound[field];
+    if (!value) continue;
+    if (Array.isArray(value) ? value.length > 0 : isObj(value)) return true;
+  }
+  return false;
+}
 
 const plain = (v: any) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 
@@ -231,7 +263,12 @@ async function textSegmentsFor(node: any, state: any, path: string): Promise<any
   if (typeof node.getStyledTextSegments !== "function") return null;
   try {
     const segs = node.getStyledTextSegments(TEXT_SEGMENT_FIELDS);
-    if (!Array.isArray(segs) || segs.length <= 1) return null;
+    if (!Array.isArray(segs) || !segs.length) return null;
+    // A uniform text with a variable binding still needs the segment path: the
+    // first segment becomes the base binding, and the ordinary text path has no
+    // field for a text variable.
+    const force = hasTextVariables(node.boundVariables) || segs.some((s: any) => hasTextVariables(s?.boundVariables));
+    if (segs.length <= 1 && !force) return null;
     const usable = segs.every((s: any) => s && Number.isInteger(s.start) && Number.isInteger(s.end) && s.end > s.start);
     if (!usable) {
       state.warnings.push(`${path}: per-run text styling has unreadable character offsets; the spec carries one base style`);
@@ -254,6 +291,7 @@ async function textRunsFor(
   baseFills: any[] | null,
   baseTextStyleId: string,
   baseFillStyleId: string,
+  baseVars: Record<string, string>,
   vars: Map<string, any>,
   styles: Map<string, any>,
   warnings: string[],
@@ -330,6 +368,28 @@ async function textRunsFor(
       changed = true;
       if (link?.type === "NODE") {
         warnings.push(`${at}: the text hyperlink points at node ${link.value}; a NODE link is file-local and will not resolve in another file`);
+      }
+    }
+    const segVars = textVariableIds(seg.boundVariables);
+    for (const field of TEXT_VARIABLE_FIELDS) {
+      const segId = segVars[field] || "";
+      const baseId = baseVars[field] || "";
+      if (segId === baseId) continue;
+      if (!segId) {
+        (run.variable ||= {})[field] = null;
+        changed = true;
+        continue;
+      }
+      const name = await variableName(ctx, segId, vars);
+      if (name) {
+        (run.variable ||= {})[field] = name;
+        changed = true;
+      } else {
+        // Clearing the inherited base binding is what lets the literal run
+        // value actually win after the rebuild.
+        (run.variable ||= {})[field] = null;
+        changed = true;
+        warnings.push(`${at}: variable id ${segId} bound to ${field} no longer resolves; the literal value was exported`);
       }
     }
     if (changed) runs.push(run);
@@ -577,6 +637,7 @@ async function exportNode(
   let baseFillsSpec: any[] | null = null;
   let baseTextStyleId = "";
   let baseFillStyleId = "";
+  let baseVars: Record<string, string> = {};
   if (textSegments) {
     const base = textSegments[0];
     baseTextStyleId = typeof base.textStyleId === "string"
@@ -585,6 +646,20 @@ async function exportNode(
     baseFillStyleId = typeof base.fillStyleId === "string"
       ? base.fillStyleId
       : (typeof node.fillStyleId === "string" ? node.fillStyleId : "");
+    // The first segment's bindings are the base, but a field the segment does
+    // not report can still be bound uniformly across the whole text.
+    const baseBound = {
+      ...(isObj(node.boundVariables) ? node.boundVariables : {}),
+      ...(isObj(base.boundVariables) ? base.boundVariables : {}),
+    };
+    baseVars = textVariableIds(baseBound);
+    const textVariable: any = {};
+    for (const [field, id] of Object.entries(baseVars)) {
+      const name = await variableName(ctx, id, state.vars);
+      if (name) textVariable[field] = name;
+      else state.warnings.push(`${path}: variable id ${id} bound to ${field} no longer resolves; the literal value was exported`);
+    }
+    if (Object.keys(textVariable).length) spec.textVariable = textVariable;
     const style = await styleInfo(ctx, baseFillStyleId, state.styles);
     if (style) spec.fillStyle = style.name;
     else if (baseFillStyleId) {
@@ -653,7 +728,7 @@ async function exportNode(
         }
       }
       const runs = await textRunsFor(
-        ctx, textSegments, baseFillsSpec, baseTextStyleId, baseFillStyleId,
+        ctx, textSegments, baseFillsSpec, baseTextStyleId, baseFillStyleId, baseVars,
         state.vars, state.styles, state.warnings, path,
       );
       if (runs.length) spec.runs = runs;

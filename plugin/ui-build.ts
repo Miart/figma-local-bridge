@@ -51,6 +51,18 @@ const STROKE_CAPS = new Set(["NONE", "ROUND", "SQUARE", "ARROW_LINES", "ARROW_EQ
 const STROKE_JOINS = new Set(["MITER", "BEVEL", "ROUND"]);
 const TEXT_CASES = new Set(["ORIGINAL", "UPPER", "LOWER", "TITLE", "SMALL_CAPS", "SMALL_CAPS_FORCED"]);
 const TEXT_DECORATIONS = new Set(["NONE", "UNDERLINE", "STRIKETHROUGH"]);
+// The text fields Figma can bind to a variable, and the type each one needs.
+// STRING and FLOAT are the only resolved types that appear here.
+const TEXT_VARIABLE_TYPES: Record<string, "STRING" | "FLOAT"> = {
+  fontFamily: "STRING",
+  fontStyle: "STRING",
+  fontWeight: "FLOAT",
+  fontSize: "FLOAT",
+  letterSpacing: "FLOAT",
+  lineHeight: "FLOAT",
+  paragraphSpacing: "FLOAT",
+  paragraphIndent: "FLOAT",
+};
 const MAX_TEXT_RUNS = 200;
 const GRID_PATTERNS = new Set(["COLUMNS", "ROWS", "GRID"]);
 const GRID_ALIGNMENTS = new Set(["MIN", "MAX", "CENTER", "STRETCH"]);
@@ -221,6 +233,27 @@ function letterSpacingFromSpec(v: any, path: string): Json {
 }
 
 /**
+ * A textVariable binds text fields to local variables. The keys are the Figma
+ * field names, so the spec does not need its own vocabulary; the value is a
+ * local variable name/id, or null to clear a binding inherited from the base.
+ */
+export function textVariableFromSpec(value: any, path: string): Json {
+  if (!isObj(value)) throw new Error(`${path} must be an object`);
+  const out: Json = {};
+  for (const [field, ref] of Object.entries(value)) {
+    if (!TEXT_VARIABLE_TYPES[field]) {
+      throw new Error(`${path}.${field} is not a bindable text field; use one of ${Object.keys(TEXT_VARIABLE_TYPES).join(", ")}`);
+    }
+    if (ref !== null && (typeof ref !== "string" || !ref.trim())) {
+      throw new Error(`${path}.${field} must be a non-empty variable name/id, or null to clear the binding`);
+    }
+    out[field] = ref === null ? null : ref.trim();
+  }
+  if (!Object.keys(out).length) throw new Error(`${path} needs at least one text field binding`);
+  return out;
+}
+
+/**
  * Text runs are absolute character ranges, not a list of overrides that can
  * overlap. Keeping them ordered and disjoint makes apply deterministic: a font
  * set by run 1 cannot be silently undone by run 2. A field the run omits
@@ -277,6 +310,10 @@ export function textRunsFromSpec(value: any, path: string, text: string): Json[]
       normalized.fillStyle = run.fillStyle === null ? null : run.fillStyle.trim();
       fields++;
     }
+    if (run.variable !== undefined) {
+      normalized.variable = textVariableFromSpec(run.variable, `${at}.variable`);
+      fields++;
+    }
     if (run.textCase !== undefined) {
       if (!TEXT_CASES.has(String(run.textCase))) throw new Error(`${at}.textCase must be ${[...TEXT_CASES].join(", ")}`);
       normalized.textCase = run.textCase;
@@ -301,7 +338,7 @@ export function textRunsFromSpec(value: any, path: string, text: string): Json[]
       normalized.hyperlink = hyperlinkFromSpec(run.hyperlink, `${at}.hyperlink`);
       fields++;
     }
-    if (!fields) throw new Error(`${at}: a run needs at least one of font, fontSize, textStyle, fills, fillStyle, textCase, textDecoration, lineHeight, letterSpacing or hyperlink`);
+    if (!fields) throw new Error(`${at}: a run needs at least one of font, fontSize, textStyle, fills, fillStyle, variable, textCase, textDecoration, lineHeight, letterSpacing or hyperlink`);
     out.push(normalized);
   });
   return out;
@@ -435,6 +472,10 @@ function validateNode(
     if (type !== "TEXT") throw new Error(`${path}.runs is only valid on TEXT`);
     if (raw.text === undefined) throw new Error(`${path}.runs needs text, so character offsets can be validated`);
   }
+  if (raw.textVariable !== undefined) {
+    if (type !== "TEXT") throw new Error(`${path}.textVariable is only valid on TEXT`);
+    out.spec.textVariable = textVariableFromSpec(raw.textVariable, `${path}.textVariable`);
+  }
 
   if (type === "TEXT") {
     if (raw.text !== undefined && typeof raw.text !== "string") throw new Error(`${path}.text must be a string`);
@@ -506,6 +547,7 @@ interface Resources {
   paintStyles: Map<string, any>;
   effectStyles: Map<string, any>;
   variables: Map<string, any>;
+  variableKinds: Map<string, string>;
   components: Map<string, any>;
   styleNames: { text: string[]; paint: string[]; effect: string[] };
   variableNames: string[];
@@ -521,6 +563,7 @@ function resourceMap(): Resources {
     paintStyles: new Map(),
     effectStyles: new Map(),
     variables: new Map(),
+    variableKinds: new Map(),
     components: new Map(),
     styleNames: { text: [], paint: [], effect: [] },
     variableNames: [],
@@ -568,12 +611,18 @@ function addFont(res: Resources, f: any, where: string) {
   res.fonts.set(fontKey(parsed), parsed);
 }
 
-function collectVariableRef(res: Resources, ref: any, where: string) {
+function collectVariableRef(res: Resources, ref: any, where: string, kind = "COLOR") {
   if (ref === undefined || ref === null) return;
   if (typeof ref !== "string" || !ref.trim()) {
     res.blocking.push(`${where}: variable reference must be a non-empty string`);
     return;
   }
+  const previous = res.variableKinds.get(ref);
+  if (previous && previous !== kind) {
+    res.blocking.push(`${where}: variable "${ref}" is already used as ${previous}, not ${kind}`);
+    return;
+  }
+  res.variableKinds.set(ref, kind);
   if (!res.variableNames.includes(ref)) res.variableNames.push(ref);
 }
 
@@ -619,8 +668,10 @@ async function resolveVariables(ctx: any, res: Resources) {
       continue;
     }
     const v = hits[0];
-    if (v.resolvedType && v.resolvedType !== "COLOR") {
-      res.blocking.push(`variable "${ref}" is ${v.resolvedType}, but only COLOR variables can bind a paint`);
+    const kind = res.variableKinds.get(ref) || "COLOR";
+    if (v.resolvedType && v.resolvedType !== kind) {
+      const use = kind === "COLOR" ? "a paint" : `the text field (${kind})`;
+      res.blocking.push(`variable "${ref}" is ${v.resolvedType}, but ${use} needs ${kind}`);
       continue;
     }
     res.variables.set(ref, v);
@@ -650,6 +701,11 @@ async function collectResources(ctx: any, root: NormalizedNode): Promise<Resourc
         addFont(res, DEFAULT_FONT, n.key);
         res.warnings.push(`${n.key}: no font or textStyle; defaulting to Inter/Regular`);
       }
+      if (isObj(s.textVariable)) {
+        for (const [field, ref] of Object.entries(s.textVariable)) {
+          collectVariableRef(res, ref, `${n.key}.textVariable.${field}`, TEXT_VARIABLE_TYPES[field]);
+        }
+      }
       if (Array.isArray(s.runs)) {
         s.runs.forEach((run: Json, i: number) => {
           if (run.font !== undefined) addFont(res, run.font, `${n.key}.runs[${i}]`);
@@ -670,6 +726,11 @@ async function collectResources(ctx: any, root: NormalizedNode): Promise<Resourc
             else {
               res.paintStyles.set(ref, st);
               if (!res.styleNames.paint.includes(st.name)) res.styleNames.paint.push(st.name);
+            }
+          }
+          if (isObj(run.variable)) {
+            for (const [field, ref] of Object.entries(run.variable)) {
+              collectVariableRef(res, ref, `${n.key}.runs[${i}].variable.${field}`, TEXT_VARIABLE_TYPES[field]);
             }
           }
           collectPaints(res, run.fills, `${n.key}.runs[${i}].fills`);
@@ -1636,6 +1697,36 @@ async function applyTextRuns(ctx: any, node: any, spec: Json, res: Resources, wh
     if (run.lineHeight !== undefined) node.setRangeLineHeight(start, end, run.lineHeight);
     if (run.letterSpacing !== undefined) node.setRangeLetterSpacing(start, end, run.letterSpacing);
     if (run.hyperlink !== undefined) node.setRangeHyperlink(start, end, run.hyperlink);
+    if (run.variable !== undefined) {
+      if (typeof node.setRangeBoundVariable !== "function") {
+        throw new Error(`${where}.runs[${i}]: this host cannot bind a variable to a text range`);
+      }
+      for (const [field, ref] of Object.entries(run.variable as Json)) {
+        const variable = ref === null ? null : res.variables.get(String(ref));
+        if (ref !== null && !variable) throw new Error(`${where}.runs[${i}].variable.${field}: variable "${ref}" was not resolved`);
+        try {
+          node.setRangeBoundVariable(start, end, field, variable);
+        } catch (e) {
+          throw new Error(`${where}.runs[${i}].variable.${field}: ${errMsg(e)}`);
+        }
+      }
+    }
+  }
+}
+
+function applyTextVariableBindings(node: any, spec: Json, res: Resources, where: string): void {
+  if (!isObj(spec.textVariable)) return;
+  if (typeof node.setBoundVariable !== "function") {
+    throw new Error(`${where}: this host cannot bind a variable to a text field`);
+  }
+  for (const [field, ref] of Object.entries(spec.textVariable as Json)) {
+    const variable = ref === null ? null : res.variables.get(String(ref));
+    if (ref !== null && !variable) throw new Error(`${where}.textVariable.${field}: variable "${ref}" was not resolved`);
+    try {
+      node.setBoundVariable(field, variable);
+    } catch (e) {
+      throw new Error(`${where}.textVariable.${field}: ${errMsg(e)}`);
+    }
   }
 }
 
@@ -1661,6 +1752,7 @@ async function applyTextProps(ctx: any, node: any, spec: Json, res: Resources, w
   if (spec.textDecoration !== undefined) node.textDecoration = spec.textDecoration;
   if (spec.paragraphSpacing !== undefined) node.paragraphSpacing = Number(spec.paragraphSpacing);
   if (spec.paragraphIndent !== undefined) node.paragraphIndent = Number(spec.paragraphIndent);
+  applyTextVariableBindings(node, spec, res, where);
   await applyTextRuns(ctx, node, spec, res, where);
   if (spec.size !== undefined) {
     node.textAutoResize = "NONE";

@@ -96,6 +96,20 @@ const layoutGridSchema = z
   })
   .passthrough();
 
+const textVariableRef = z.string().min(1).nullable();
+const textVariableSchema = z
+  .object({
+    fontFamily: textVariableRef.optional(),
+    fontStyle: textVariableRef.optional(),
+    fontWeight: textVariableRef.optional(),
+    fontSize: textVariableRef.optional(),
+    letterSpacing: textVariableRef.optional(),
+    lineHeight: textVariableRef.optional(),
+    paragraphSpacing: textVariableRef.optional(),
+    paragraphIndent: textVariableRef.optional(),
+  })
+  .passthrough();
+
 const textRunSchema = z
   .object({
     start: z.number().int().min(0).describe("Start character offset (inclusive, UTF-16)"),
@@ -105,6 +119,7 @@ const textRunSchema = z
     textStyle: z.string().min(1).nullable().optional().describe("Local text style name or id for this range; null clears the link"),
     fills: z.union([paintSchema, z.array(paintSchema)]).optional(),
     fillStyle: z.string().min(1).nullable().optional().describe("Local paint style name or id for this range; null clears the link"),
+    variable: textVariableSchema.optional().describe("Text-field bindings for this range; null clears a binding inherited from the base"),
     textCase: z.enum(["ORIGINAL", "UPPER", "LOWER", "TITLE", "SMALL_CAPS", "SMALL_CAPS_FORCED"]).optional(),
     textDecoration: z.enum(["NONE", "UNDERLINE", "STRIKETHROUGH"]).optional(),
     lineHeight: z.union([z.number(), z.object({ unit: z.string(), value: z.number() })]).optional(),
@@ -131,6 +146,7 @@ const buildNodeSchema: z.ZodType<any> = z.lazy(() =>
       font: fontSchema.optional(),
       fontSize: z.number().positive().optional(),
       textStyle: z.string().optional().describe("Local text style name or id"),
+      textVariable: textVariableSchema.optional().describe("TEXT only. Bind base text fields to local variables; runs can override by range"),
       textAutoResize: z.enum(["NONE", "WIDTH_AND_HEIGHT", "HEIGHT", "TRUNCATE"]).optional(),
       textAlignHorizontal: z.enum(["LEFT", "CENTER", "RIGHT", "JUSTIFIED"]).optional(),
       textAlignVertical: z.enum(["TOP", "CENTER", "BOTTOM"]).optional(),
@@ -150,7 +166,7 @@ const buildNodeSchema: z.ZodType<any> = z.lazy(() =>
         .max(200)
         .optional()
         .describe(
-          "TEXT only. Ordered, non-overlapping character ranges with per-run font, size, text style, fills, fill style, case, decoration, line height, letter spacing or hyperlink. Omitted fields inherit the node's base text properties.",
+          "TEXT only. Ordered, non-overlapping character ranges with per-run font, size, text style, fills, fill style, variable bindings, case, decoration, line height, letter spacing or hyperlink. Omitted fields inherit the node's base text properties.",
         ),
 
       fills: z.union([paintSchema, z.array(paintSchema)]).optional(),

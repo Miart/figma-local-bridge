@@ -73,6 +73,7 @@ const BY_TYPE = (t) => {
       setRangeLineHeight(start, end, value) { (this.rangeOps ||= []).push({ field: "lineHeight", start, end, value }); },
       setRangeLetterSpacing(start, end, value) { (this.rangeOps ||= []).push({ field: "letterSpacing", start, end, value }); },
       setRangeHyperlink(start, end, value) { (this.rangeOps ||= []).push({ field: "hyperlink", start, end, value }); },
+      setRangeBoundVariable(start, end, field, variable) { (this.boundOps ||= []).push({ field, variable, start, end }); },
     };
   }
   if (t === "ELLIPSE") return { arcData: { startingAngle: 0, endingAngle: 6.283, innerRadius: 0 } };
@@ -302,6 +303,10 @@ const errors = async (fn) => {
       textCase: "ORIGINAL", textDecoration: "NONE",
       lineHeight: { unit: "PIXELS", value: 28 }, letterSpacing: { unit: "PIXELS", value: 1 },
       hyperlink: null, textStyleId: "S:first", fillStyleId: "S:fill-first",
+      boundVariables: {
+        fontSize: { type: "VARIABLE_ALIAS", id: "V:size-first" },
+        lineHeight: { type: "VARIABLE_ALIAS", id: "V:line-first" },
+      },
     },
     {
       characters: "B", start: 1, end: 2,
@@ -310,6 +315,7 @@ const errors = async (fn) => {
       textCase: "UPPER", textDecoration: "UNDERLINE",
       lineHeight: { unit: "AUTO" }, letterSpacing: { unit: "PERCENT", value: 0 },
       hyperlink: { type: "URL", value: "https://example.com" }, textStyleId: "S:second", fillStyleId: "S:fill-second",
+      boundVariables: { fontSize: { type: "VARIABLE_ALIAS", id: "V:size-second" } },
     },
   ];
   const figma = fakeFigma([], {
@@ -319,6 +325,11 @@ const errors = async (fn) => {
       { id: "S:fill-first", name: "fill/first" },
       { id: "S:fill-second", name: "fill/second" },
     ],
+    variables: [
+      { id: "V:size-first", name: "size/first" },
+      { id: "V:size-second", name: "size/second" },
+      { id: "V:line-first", name: "line/first" },
+    ],
   });
   const target = node("FRAME");
   const src = node("FRAME", {
@@ -326,12 +337,23 @@ const errors = async (fn) => {
       characters: "AB", fontName: Symbol("mixed"), fontSize: Symbol("mixed"),
       fills: Symbol("mixed"), lineHeight: Symbol("mixed"), letterSpacing: Symbol("mixed"),
       hyperlink: Symbol("mixed"), getStyledTextSegments: () => segments,
+      boundVariables: {
+        fontSize: [
+          { type: "VARIABLE_ALIAS", id: "V:size-first" },
+          { type: "VARIABLE_ALIAS", id: "V:size-second" },
+        ],
+        lineHeight: [{ type: "VARIABLE_ALIAS", id: "V:line-first" }],
+      },
     })],
   });
   const { root } = await dumpSubtree(src);
   check("dump: run style links travel with the runs",
     root.children[0].state.text.textRuns[0].textStyleId === "S:first" &&
     root.children[0].state.text.textRuns[1].fillStyleId === "S:fill-second");
+  check("dump: run variable bindings travel with the runs",
+    root.children[0].state.text.textRuns[0].variables.fontSize.id === "V:size-first" &&
+    root.children[0].state.text.textRuns[1].variables.fontSize.id === "V:size-second" &&
+    root.children[0].state.text.textRuns[1].variables.lineHeight === undefined);
   const loaded = [];
   const report = await restoreSubtree(root, ctxFor(figma, target, { loadFont: async (f) => { loaded.push(`${f.family}/${f.style}`); } }), {});
   const text = target.children[0];
@@ -353,6 +375,11 @@ const errors = async (fn) => {
     report.stylesRestored.some((s) => s.field === "fillStyleId" && s.id === "S:fill-second") &&
     ops.some((o) => o.field === "textStyleId" && o.start === 0 && o.end === 1 && o.value === "S:first") &&
     ops.some((o) => o.field === "fillStyleId" && o.start === 1 && o.end === 2 && o.value === "S:fill-second"));
+  check("restore: per-run variable bindings are re-linked",
+    report.bindingsRestored.some((b) => b.field === "fontSize" && b.id === "V:size-first") &&
+    report.bindingsRestored.some((b) => b.field === "fontSize" && b.id === "V:size-second") &&
+    report.bindingsRestored.some((b) => b.field === "lineHeight" && b.id === "V:line-first") &&
+    (text.boundOps || []).some((o) => o.field === "fontSize" && o.start === 1 && o.end === 2 && o.variable.id === "V:size-second"));
 }
 
 
@@ -716,7 +743,7 @@ const errors = async (fn) => {
   });
   const { root } = await dumpSubtree(src);
   const report = await restoreSubtree(root, ctxFor(figma, target), {});
-  check("restore: per-range text bindings are named, not flattened",
+  check("restore: per-range text bindings without readable runs are named, not flattened",
     report.bindingsMissing.some((x) => x.field === "fontSize" && /per-range/.test(x.why)) &&
     report.bindingsMissing.some((x) => x.field === "textRangeFills" && /per-range/.test(x.why)) &&
     target.children[0].boundVariables === undefined);
