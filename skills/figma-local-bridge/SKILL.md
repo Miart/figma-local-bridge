@@ -345,9 +345,9 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
 
 - `action: "save"` records a subtree as data (`nodeId`; a page is refused) into
   one JSON file per file key. The reply carries a `summary` and the
-  `limitations` a rebuild cannot carry — instance interiors (including their
-  overrides) and component identity. Read them before telling anyone the
-  subtree will come back exactly.
+  `limitations` a rebuild cannot carry — an INSTANCE's interior structure
+  beyond its direct overrides, and component identity. Read them before telling
+  anyone the subtree will come back exactly.
 - `action: "show"` diffs the live subtree against the file field by field and
   reports the semantic fingerprint next to it. That is how "has this drifted
   already?" gets answered before a rebuild is chosen.
@@ -355,6 +355,18 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   transaction. It is a **dry run by default** and names what would be deleted
   and created; a real rebuild needs `dryRun: false`, `allowDestructive: true`
   and a bridge started with `FIGMA_BRIDGE_DESTRUCTIVE=1`.
+- An INSTANCE's direct per-layer overrides travel in
+  `state.instance.overrides`: a structural path built from the main component's
+  layer names, the fields Figma reports as overridden, a snapshot of the layer
+  and its style/variable links. Restore recreates the instance from its main
+  component, re-applies component properties, then replays each override field
+  by field. A path that no longer matches the main component is named in
+  `overridesMissing` and skipped — never applied to whatever now sits at that
+  index. `overridesRestored` counts the ones that landed, and a field this
+  version cannot rebuild is named in `overridesUnsupported` instead of being
+  dropped. A direct override that changed per-run text styling is restored at
+  the base level; the ranges it cannot replay are named in the notes. The
+  interior's structure itself is still the main component's current structure.
 - Style ids, node-level variable bindings and explicit variable modes travel in
   `meta`; per-run text bindings and style ids travel inside the runs. Restore
   re-links a style, variable, collection or mode when it still exists and

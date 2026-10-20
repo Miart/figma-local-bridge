@@ -9,8 +9,8 @@
  *
  *   - a restored COMPONENT is a new component (new id, new key, no instances);
  *   - an INSTANCE comes back as an instance of its main component, with
- *     component properties re-applied — the overridden leaves inside it are not
- *     captured, so it shows the main component's current content;
+ *     component properties and direct per-layer overrides re-applied — the
+ *     interior's STRUCTURE is the main component's current structure;
  *   - the runs themselves (font, size, fills, style links, variable bindings,
  *     case, decoration, line height, letter spacing and hyperlink) are;
  *   - style ids, node-level variable bindings and explicit modes travel in
@@ -36,7 +36,8 @@ export const MAX_DEPTH = 40;
  * it travels with the data instead of living only in this file.
  */
 export const LIMITATIONS: readonly string[] = [
-  "instance interiors and their direct overrides are not captured: a restored INSTANCE shows its main component's current content (component properties are re-applied)",
+  "an INSTANCE's interior STRUCTURE is its main component's current structure; direct per-layer overrides are captured and re-applied, but a layer added to or removed from the main component is not described by the checkpoint",
+  "a direct instance override that changed per-run text styling is captured with the layer snapshot; restore reapplies the base text fields and names the ranges it cannot replay",
   "text runs are rebuilt (font, size, fills, text/fill style links, variable bindings, case, decoration, line height, letter spacing and hyperlink)",
   "style ids are re-linked when the style still exists; node-level and run-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
@@ -102,6 +103,12 @@ export interface RestoreReport {
   bindingsRestored: Array<{ path: string; field: string; id: string; name?: string }>;
   /** Node-level variable bindings the file could not resolve; the value is still restored. */
   bindingsMissing: Array<{ path: string; field: string; id: string; why: string }>;
+  /** Direct per-layer overrides re-applied inside a rebuilt INSTANCE. */
+  overridesRestored: Array<{ path: string; fields: number }>;
+  /** Direct overrides whose target path no longer matches the main component. */
+  overridesMissing: Array<{ path: string; why: string }>;
+  /** Direct override fields this version cannot write back; named, not hidden. */
+  overridesUnsupported: Array<{ path: string; fields: string[] }>;
   /** Explicit variable modes re-applied because their collection and mode still exist. */
   modesRestored: Array<{ path: string; collectionId: string; collectionName?: string; modeId: string; modeName?: string }>;
   /** Explicit variable modes the file could not resolve. */
@@ -282,10 +289,199 @@ function readText(node: any): Dict {
   return t;
 }
 
-async function readInstance(node: any): Promise<Dict> {
+/**
+ * The path to a directly overridden layer, from the INSTANCE down. Names come
+ * from the main component, not the instance: renaming a layer is itself an
+ * override, and a path carrying the new name would not match the layer created
+ * from the main component. The index is the structural selector; the name makes
+ * a path readable and catches a main component whose structure moved.
+ */
+/**
+ * Override fields this version knows how to write back. The rest are named on
+ * the record (and in the restore report) rather than silently skipped: a
+ * checkpoint that says "restored" while dropping a field is worse than one that
+ * says exactly what is missing.
+ */
+const SUPPORTED_OVERRIDE_FIELDS = new Set([
+  "name", "visible", "locked", "opacity", "blendMode", "isMask", "maskType", "clipsContent",
+  "x", "y", "width", "height", "rotation", "cornerRadius",
+  "topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius",
+  "constraints", "layoutAlign", "layoutGrow", "layoutPositioning",
+  "layoutSizingHorizontal", "layoutSizingVertical",
+  "layoutMode", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+  "itemSpacing", "primaryAxisAlignItems", "counterAxisAlignItems",
+  "primaryAxisSizingMode", "counterAxisSizingMode", "layoutWrap",
+  "counterAxisSpacing", "strokesIncludedInLayout", "itemReverseZIndex",
+  "minWidth", "minHeight", "maxWidth", "maxHeight", "layoutGrids",
+  "fills", "fillStyleId", "strokes", "strokeStyleId", "strokeWeight",
+  "strokeTopWeight", "strokeRightWeight", "strokeBottomWeight", "strokeLeftWeight",
+  "strokeAlign", "strokeCap", "strokeJoin", "dashPattern",
+  "effects", "effectStyleId", "arcData", "vectorNetwork", "vectorPaths", "windingRule",
+  "characters", "fontName", "fontSize", "lineHeight", "letterSpacing",
+  "textCase", "textDecoration", "paragraphSpacing", "paragraphIndent",
+  "hyperlink", "textAlignHorizontal", "textAlignVertical", "textAutoResize",
+  "textStyleId", "componentProperties",
+]);
+
+function instanceOverridePath(instance: any, target: any, main: any): any[] | null {
+  const nodes: any[] = [];
+  let node = target;
+  while (node && node !== instance) {
+    const parent = node.parent;
+    if (!parent) return null;
+    nodes.unshift(node);
+    node = parent;
+  }
+  if (node !== instance || !nodes.length) return null;
+
+  const path: any[] = [];
+  let base = main;
+  for (const step of nodes) {
+    const parent = step.parent;
+    const index = (parent.children || []).indexOf(step);
+    if (index < 0) return null;
+    const baseChild = base && Array.isArray(base.children) ? base.children[index] : null;
+    const name = baseChild && typeof baseChild.name === "string" ? baseChild.name : "";
+    path.push(name ? { name, index } : { index });
+    base = baseChild || null;
+  }
+  return path;
+}
+
+/**
+ * A direct override is a SNAPSHOT of one layer, not a diff: the layer belongs
+ * to the main component, and the checkpoint is restoring the state the user
+ * saw. Defaults are written explicitly so an override that set a value back to
+ * its default still beats whatever the main component does today.
+ */
+function readOverrideState(node: any): Dict {
+  const s = readState(node);
+  if ("rotation" in node) s.rotation = round(node.rotation);
+  if ("visible" in node) s.visible = node.visible === true;
+  if ("locked" in node) s.locked = node.locked === true;
+  if ("opacity" in node) s.opacity = node.opacity;
+  if ("blendMode" in node) s.blendMode = node.blendMode;
+  if ("isMask" in node) s.isMask = node.isMask === true;
+  if ("maskType" in node && node.maskType) s.maskType = node.maskType;
+  if ("clipsContent" in node) s.clipsContent = node.clipsContent === true;
+  if ("layoutGrids" in node) s.layoutGrids = list(node.layoutGrids) ?? [];
+  if ("layoutMode" in node) {
+    const L: Dict = s.layout || {};
+    L.mode = node.layoutMode;
+    L.padding = [node.paddingTop, node.paddingRight, node.paddingBottom, node.paddingLeft];
+    L.gap = node.itemSpacing;
+    L.primaryAlign = node.primaryAxisAlignItems;
+    L.counterAlign = node.counterAxisAlignItems;
+    if ("primaryAxisSizingMode" in node) L.primary = node.primaryAxisSizingMode;
+    if ("counterAxisSizingMode" in node) L.counter = node.counterAxisSizingMode;
+    if ("layoutWrap" in node) L.wrap = node.layoutWrap === "WRAP";
+    if ("counterAxisSpacing" in node) L.counterGap = node.counterAxisSpacing;
+    if ("strokesIncludedInLayout" in node) L.strokesIncluded = node.strokesIncludedInLayout === true;
+    if ("itemReverseZIndex" in node) L.reverseZ = node.itemReverseZIndex === true;
+    s.layout = L;
+  }
+  if ("layoutAlign" in node) s.layoutAlign = node.layoutAlign;
+  if ("layoutGrow" in node) s.layoutGrow = node.layoutGrow;
+  if ("layoutPositioning" in node) s.layoutPositioning = node.layoutPositioning;
+  if ("minWidth" in node) s.minSize = [node.minWidth, node.minHeight];
+  if ("maxWidth" in node) s.maxSize = [node.maxWidth, node.maxHeight];
+  if (node.type === "TEXT" && s.text) {
+    if (s.text.hyperlink === undefined) s.text.hyperlink = null;
+    if (s.text.textCase === undefined) s.text.textCase = isMixedValue(node.textCase) ? "mixed" : (node.textCase || "ORIGINAL");
+    if (s.text.textDecoration === undefined) s.text.textDecoration = isMixedValue(node.textDecoration) ? "mixed" : (node.textDecoration || "NONE");
+    if (typeof s.text.paragraphSpacing !== "number") s.text.paragraphSpacing = node.paragraphSpacing ?? 0;
+    if (typeof s.text.paragraphIndent !== "number") s.text.paragraphIndent = node.paragraphIndent ?? 0;
+  }
+  return s;
+}
+
+/**
+ * Style ids for a direct override, including the EMPTY ones: a removed style
+ * link is as much a snapshot as a new one, and the rebuild has to clear what
+ * the main component carries today.
+ */
+function readOverrideMeta(node: any): Dict | undefined {
+  const meta = readMeta(node) || {};
+  const ids: Dict = {};
+  for (const field of ["fillStyleId", "strokeStyleId", "effectStyleId", "textStyleId"]) {
+    if (!(field in node)) continue;
+    const value = node[field];
+    ids[field] = typeof value === "string" && !isMixedValue(value) ? value : "";
+  }
+  if (Object.keys(ids).length) meta.styleIds = ids;
+  return Object.keys(meta).length ? meta : undefined;
+}
+
+async function readInstanceOverrides(
+  instance: any,
+  main: any,
+  depth: number,
+  budget: { n: number; truncated: boolean },
+  maxNodes: number,
+): Promise<any[] | undefined> {
+  const entries = instance.overrides;
+  if (!Array.isArray(entries) || !entries.length) return undefined;
+
+  const byId = new Map<string, any>();
+  const walk = (node: any) => {
+    for (const child of node.children || []) {
+      if (!child || typeof child.id !== "string") continue;
+      byId.set(child.id, child);
+      walk(child);
+    }
+  };
+  walk(instance);
+
+  const out: any[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry.id !== "string") continue;
+    const target = byId.get(entry.id);
+    if (budget.n >= maxNodes) {
+      // A cut-short override list is as dangerous as a cut-short tree: the
+      // restore would silently use the main component for the missing layers.
+      budget.truncated = true;
+      break;
+    }
+    budget.n++;
+    const fields: string[] = Array.isArray(entry.overriddenFields) ? entry.overriddenFields.map((f: any) => String(f)) : [];
+    if (!target) {
+      // The layer is gone from the instance, but the entry is still a loss:
+      // keep it so show and restore can name it instead of dropping it.
+      out.push({
+        path: null,
+        name: "",
+        fields,
+        state: {},
+        unresolved: `the overridden layer ${entry.id} is not present in this instance`,
+      });
+      continue;
+    }
+    const rec: Dict = {
+      path: instanceOverridePath(instance, target, main),
+      name: target.name,
+      fields,
+      state: readOverrideState(target),
+    };
+    const unsupported = fields.filter((f) => !SUPPORTED_OVERRIDE_FIELDS.has(f));
+    if (unsupported.length) rec.unsupported = unsupported;
+    const meta = readOverrideMeta(target);
+    if (meta) rec.meta = meta;
+    if (target.type === "INSTANCE" && depth < 8) rec.state.instance = await readInstance(target, depth + 1, budget, maxNodes);
+    out.push(rec);
+  }
+  return out.length ? out : undefined;
+}
+
+async function readInstance(
+  node: any,
+  depth = 0,
+  budget: { n: number; truncated: boolean } = { n: 0, truncated: false },
+  maxNodes = MAX_NODES,
+): Promise<Dict> {
   const out: Dict = {};
+  let main: any = null;
   try {
-    const main = await node.getMainComponentAsync();
+    main = await node.getMainComponentAsync();
     if (main) {
       out.componentId = main.id;
       out.componentKey = main.key ?? null;
@@ -304,6 +500,14 @@ async function readInstance(node: any): Promise<Dict> {
     }
   } catch {
     /* a component property that cannot be read cannot be restored either */
+  }
+  if (depth < 8) {
+    try {
+      const overrides = await readInstanceOverrides(node, main, depth, budget, maxNodes);
+      if (overrides) out.overrides = overrides;
+    } catch (e) {
+      out.overridesUnresolved = msg(e);
+    }
   }
   return out;
 }
@@ -391,7 +595,7 @@ async function readNode(node: any, depth: number, budget: { n: number; truncated
   }
 
   out.state = readState(node);
-  if (node.type === "INSTANCE") out.state.instance = await readInstance(node);
+  if (node.type === "INSTANCE") out.state.instance = await readInstance(node, 0, budget, opts.maxNodes);
   const meta = readMeta(node);
   if (meta) out.meta = meta;
 
@@ -469,6 +673,9 @@ export async function restoreSubtree(dump: DumpNode, ctx: RestoreContext, opts: 
     bindingsDropped: [],
     bindingsRestored: [],
     bindingsMissing: [],
+    overridesRestored: [],
+    overridesMissing: [],
+    overridesUnsupported: [],
     modesRestored: [],
     modesMissing: [],
     stylesRestored: [],
@@ -568,6 +775,9 @@ async function buildNode(d: DumpNode, parent: any, ctx: RestoreContext, report: 
     await applyFinal(node, d.state, ctx, report, path, false);
     await applyStyleLinks(node, d.meta?.styleIds, ctx, report, path, d.state);
     await applyVariableBindings(node, d.meta?.variableBindings, d.state, ctx, report, path);
+    if (d.type === "INSTANCE") {
+      await applyInstanceOverrides(node, d.state.instance?.overrides, ctx, report, path);
+    }
     report.created++;
     return node;
   } catch (e) {
@@ -686,16 +896,16 @@ function applyLayout(node: any, state: Dict, report: RestoreReport, path: string
       node.paddingLeft = L.padding[3];
     }
     if (typeof L.gap === "number") node.itemSpacing = L.gap;
-    if (L.wrap && "layoutWrap" in node) {
-      node.layoutWrap = "WRAP";
-      if (typeof L.counterGap === "number") node.counterAxisSpacing = L.counterGap;
+    if (typeof L.wrap === "boolean" && "layoutWrap" in node) {
+      node.layoutWrap = L.wrap ? "WRAP" : "NO_WRAP";
+      if ("counterAxisSpacing" in node && L.counterGap !== undefined) node.counterAxisSpacing = L.counterGap;
     }
     if (L.primaryAlign) node.primaryAxisAlignItems = L.primaryAlign;
     if (L.counterAlign) node.counterAxisAlignItems = L.counterAlign;
     if (L.primary && "primaryAxisSizingMode" in node) node.primaryAxisSizingMode = L.primary;
     if (L.counter && "counterAxisSizingMode" in node) node.counterAxisSizingMode = L.counter;
-    if (L.strokesIncluded && "strokesIncludedInLayout" in node) node.strokesIncludedInLayout = true;
-    if (L.reverseZ && "itemReverseZIndex" in node) node.itemReverseZIndex = true;
+    if (typeof L.strokesIncluded === "boolean" && "strokesIncludedInLayout" in node) node.strokesIncludedInLayout = L.strokesIncluded;
+    if (typeof L.reverseZ === "boolean" && "itemReverseZIndex" in node) node.itemReverseZIndex = L.reverseZ;
   } catch (e) {
     report.notes.push(`${path}: layout not fully applied: ${msg(e)}`);
   }
@@ -731,7 +941,7 @@ async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: R
   }
   if (Array.isArray(state.minSize) && "minWidth" in node) soft("min size", () => { node.minWidth = state.minSize[0]; node.minHeight = state.minSize[1]; });
   if (Array.isArray(state.maxSize) && "maxWidth" in node) soft("max size", () => { node.maxWidth = state.maxSize[0]; node.maxHeight = state.maxSize[1]; });
-  if (state.layoutPositioning === "ABSOLUTE" && "layoutPositioning" in node) soft("absolute positioning", () => { node.layoutPositioning = "ABSOLUTE"; });
+  if (state.layoutPositioning && "layoutPositioning" in node) soft("layout positioning", () => { node.layoutPositioning = state.layoutPositioning; });
   if (!isRoot && Array.isArray(state.pos) && "x" in node) soft("position", () => { node.x = state.pos[0]; node.y = state.pos[1]; });
   if (state.layoutAlign && "layoutAlign" in node) soft("layout align", () => { node.layoutAlign = state.layoutAlign; });
   if (typeof state.layoutGrow === "number" && "layoutGrow" in node) soft("layout grow", () => { node.layoutGrow = state.layoutGrow; });
@@ -768,13 +978,18 @@ async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: R
   if (state.arcData && "arcData" in node) soft("arc data", () => { node.arcData = state.arcData; });
   if (typeof state.opacity === "number" && "opacity" in node) soft("opacity", () => { node.opacity = state.opacity; });
   if (state.blendMode && "blendMode" in node) soft("blend mode", () => { node.blendMode = state.blendMode; });
-  if (state.isMask && "isMask" in node) soft("mask", () => { node.isMask = true; if (state.maskType && "maskType" in node) node.maskType = state.maskType; });
-  if (state.clipsContent && "clipsContent" in node) soft("clips content", () => { node.clipsContent = true; });
-  if (state.visible === false) soft("visibility", () => { node.visible = false; });
-  if (state.locked === true) soft("locked", () => { node.locked = true; });
+  if (typeof state.isMask === "boolean" && "isMask" in node) {
+    soft("mask", () => { node.isMask = state.isMask; if (state.maskType && "maskType" in node) node.maskType = state.maskType; });
+  }
+  if (typeof state.clipsContent === "boolean" && "clipsContent" in node) soft("clips content", () => { node.clipsContent = state.clipsContent; });
+  if (typeof state.visible === "boolean") soft("visibility", () => { node.visible = state.visible; });
+  if (typeof state.locked === "boolean") soft("locked", () => { node.locked = state.locked; });
 
   if (node.type === "TEXT") await applyText(node, state.text, ctx, report, path);
   if (node.type === "INSTANCE" && state.instance?.properties) applyInstanceProperties(node, state.instance.properties, report, path);
+  if (node.type === "INSTANCE" && state.instance?.overridesUnresolved) {
+    report.notes.push(`${path}: the instance's overrides could not be read when the checkpoint was saved: ${state.instance.overridesUnresolved}`);
+  }
   if (node.type === "VECTOR" && state.vector) {
     // setVectorNetworkAsync is the only way back into a vector: the network is
     // read-only. Its size follows from the geometry, which is why ownsSize()
@@ -995,6 +1210,14 @@ async function applyStyleLinks(node: any, ids: Dict | undefined, ctx: RestoreCon
       if (Array.isArray(runs) && runs.some((r: any) => typeof r?.[field] === "string" && r[field])) continue;
     }
     const styleId = String(id);
+    if (!styleId) {
+      try {
+        node[field] = "";
+      } catch (e) {
+        report.stylesMissing.push({ path, field, id: "", why: `the inherited style link could not be cleared: ${msg(e)}` });
+      }
+      continue;
+    }
     try {
       const style = ctx.figma.getStyleByIdAsync ? await ctx.figma.getStyleByIdAsync(styleId) : null;
       if (!style) {
@@ -1023,6 +1246,303 @@ function applyInstanceProperties(node: any, props: Dict, report: RestoreReport, 
     } catch (e) {
       report.propertiesFailed.push({ path, name, why: msg(e) });
     }
+  }
+}
+
+function resolveOverrideTarget(instance: any, path: any, at: string, report: RestoreReport): any | null {
+  if (!Array.isArray(path) || !path.length) {
+    report.overridesMissing.push({ path: at, why: "the checkpoint has no layer path for this override" });
+    return null;
+  }
+  let node = instance;
+  for (let i = 0; i < path.length; i++) {
+    const step = path[i];
+    const index = step?.index;
+    if (!Number.isInteger(index)) {
+      report.overridesMissing.push({ path: at, why: `path step ${i} has no integer index` });
+      return null;
+    }
+    const children = Array.isArray(node.children) ? node.children : [];
+    const child = children[index];
+    if (!child) {
+      report.overridesMissing.push({ path: at, why: `the main component no longer has a child at index ${index} (step ${i})` });
+      return null;
+    }
+    if (typeof step.name === "string" && step.name && child.name !== step.name) {
+      report.overridesMissing.push({ path: at, why: `step ${i} expected "${step.name}" at index ${index}, found "${child.name}"` });
+      return null;
+    }
+    node = child;
+  }
+  return node;
+}
+
+const TEXT_OVERRIDE_FIELDS = new Set([
+  "characters", "fontName", "fontSize", "lineHeight", "letterSpacing",
+  "textCase", "textDecoration", "paragraphSpacing", "paragraphIndent",
+  "hyperlink", "textAlignHorizontal", "textAlignVertical", "textAutoResize",
+  "textRangeFills",
+]);
+
+const LAYOUT_OVERRIDE_FIELDS = new Set([
+  "layoutMode", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+  "itemSpacing", "primaryAxisAlignItems", "counterAxisAlignItems",
+  "primaryAxisSizingMode", "counterAxisSizingMode", "layoutWrap",
+  "counterAxisSpacing", "strokesIncludedInLayout", "itemReverseZIndex",
+]);
+
+const anyField = (fields: Set<string>, names: Iterable<string>): boolean => {
+  for (const name of names) if (fields.has(name)) return true;
+  return false;
+};
+
+/**
+ * Text formatting fields are written one by one when the characters themselves
+ * did not change. A full text rewrite would also pin unrelated formatting and
+ * flatten a text style the main component still owns.
+ */
+async function applyTextOverride(
+  target: any,
+  state: Dict,
+  fields: Set<string>,
+  ctx: RestoreContext,
+  report: RestoreReport,
+  path: string,
+): Promise<void> {
+  const text = state.text || {};
+  const font = text.font && text.font !== "mixed" ? text.font : null;
+  if (font && ctx.loadFont) {
+    try {
+      await ctx.loadFont(font);
+    } catch {
+      const key = `${font.family} ${font.style}`;
+      if (!report.fontsUnavailable.includes(key)) report.fontsUnavailable.push(key);
+      report.notes.push(`${path}: font "${key}" is not available — the font override was not restored`);
+    }
+  }
+  const soft = (what: string, fn: () => void) => {
+    try {
+      fn();
+    } catch (e) {
+      report.notes.push(`${path}: text ${what} not restored: ${msg(e)}`);
+    }
+  };
+  // Set the characters WITHOUT rewriting the base font: the main component's
+  // formatting stays in place unless the override names a formatting field.
+  if (fields.has("characters")) soft("characters", () => { target.characters = text.characters ?? ""; });
+  if (fields.has("fontName") && font) soft("font", () => { target.fontName = font; });
+  if (fields.has("fontSize") && typeof text.fontSize === "number") soft("font size", () => { target.fontSize = text.fontSize; });
+  if (fields.has("lineHeight") && text.lineHeight && text.lineHeight !== "mixed") soft("line height", () => { target.lineHeight = text.lineHeight; });
+  if (fields.has("letterSpacing") && text.letterSpacing && text.letterSpacing !== "mixed") soft("letter spacing", () => { target.letterSpacing = text.letterSpacing; });
+  if (fields.has("textCase") && text.textCase && text.textCase !== "mixed") soft("text case", () => { target.textCase = text.textCase; });
+  if (fields.has("textDecoration") && text.textDecoration && text.textDecoration !== "mixed") soft("text decoration", () => { target.textDecoration = text.textDecoration; });
+  if (fields.has("paragraphSpacing") && typeof text.paragraphSpacing === "number") soft("paragraph spacing", () => { target.paragraphSpacing = text.paragraphSpacing; });
+  if (fields.has("paragraphIndent") && typeof text.paragraphIndent === "number") soft("paragraph indent", () => { target.paragraphIndent = text.paragraphIndent; });
+  if (fields.has("hyperlink")) {
+    if (text.hyperlink === "mixed") {
+      report.notes.push(`${path}: hyperlinks are mixed and the checkpoint has no per-run data; the hyperlink override was not restored`);
+    } else {
+      soft("hyperlink", () => { target.hyperlink = text.hyperlink ?? null; });
+    }
+  }
+  if (fields.has("textAlignHorizontal") && Array.isArray(text.align)) soft("horizontal align", () => { target.textAlignHorizontal = text.align[0]; });
+  if (fields.has("textAlignVertical") && Array.isArray(text.align)) soft("vertical align", () => { target.textAlignVertical = text.align[1]; });
+  if (fields.has("textAutoResize") && text.autoResize) soft("auto resize", () => { target.textAutoResize = text.autoResize; });
+  if (Array.isArray(text.textRuns) && text.textRuns.length && anyField(fields, TEXT_OVERRIDE_FIELDS)) {
+    report.notes.push(`${path}: the instance override carries per-run text styling; the base fields are restored, but the ranges are not reapplied`);
+  }
+}
+
+/**
+ * Apply only the fields the instance actually overrode. The state is a full
+ * snapshot (so defaults are explicit), but the field list is the selector: an
+ * override of `visible` must not silently detach the main component's fill
+ * style, and an override of `fontSize` must not rewrite the characters.
+ */
+async function applyInstanceOverrideState(
+  target: any,
+  rec: Dict,
+  ctx: RestoreContext,
+  report: RestoreReport,
+  path: string,
+): Promise<void> {
+  const state: Dict = rec.state && typeof rec.state === "object" ? rec.state : {};
+  const fields = new Set<string>(Array.isArray(rec.fields) ? rec.fields.map((f: any) => String(f)) : []);
+  const meta = rec.meta && typeof rec.meta === "object" ? rec.meta : {};
+  const soft = (what: string, fn: () => void) => {
+    try {
+      fn();
+    } catch (e) {
+      report.notes.push(`${path}: ${what} not restored: ${msg(e)}`);
+    }
+  };
+
+  await applyVariableModes(target, meta.variableModes, ctx, report, path);
+
+  // A text style is a font/size/line-height bundle; apply it before the literal
+  // text overrides so those remain the final word, as they are in the file.
+  if (fields.has("textStyleId") && meta.styleIds && "textStyleId" in meta.styleIds) {
+    await applyStyleLinks(target, { textStyleId: meta.styleIds.textStyleId }, ctx, report, path, state);
+  }
+  if (anyField(fields, TEXT_OVERRIDE_FIELDS)) await applyTextOverride(target, state, fields, ctx, report, path);
+
+  if (fields.has("fills")) applyPaints(target, "fills", state.fills, report, path);
+  if (fields.has("strokes")) applyPaints(target, "strokes", state.strokes, report, path);
+  if (fields.has("effects")) applyPaints(target, "effects", state.effects, report, path);
+  if (fields.has("layoutGrids")) applyPaints(target, "layoutGrids", state.layoutGrids, report, path);
+  if (fields.has("arcData") && state.arcData && "arcData" in target) soft("arc data", () => { target.arcData = state.arcData; });
+
+  // Paint style links come after the literal paints: a link is the final state
+  // when both were recorded.
+  const paintStyles: Dict = {};
+  for (const field of ["fillStyleId", "strokeStyleId", "effectStyleId"]) {
+    if (fields.has(field) && meta.styleIds && field in meta.styleIds) paintStyles[field] = meta.styleIds[field];
+  }
+  if (Object.keys(paintStyles).length) await applyStyleLinks(target, paintStyles, ctx, report, path, state);
+
+  if (fields.has("strokeWeight") && state.strokeWeight !== undefined) {
+    if (typeof state.strokeWeight === "number" && "strokeWeight" in target) soft("stroke weight", () => { target.strokeWeight = state.strokeWeight; });
+    else if (Array.isArray(state.strokeWeight) && "strokeTopWeight" in target) {
+      soft("stroke weights", () => {
+        target.strokeTopWeight = state.strokeWeight[0];
+        target.strokeRightWeight = state.strokeWeight[1];
+        target.strokeBottomWeight = state.strokeWeight[2];
+        target.strokeLeftWeight = state.strokeWeight[3];
+      });
+    }
+  }
+  const weights = Array.isArray(state.strokeWeight)
+    ? state.strokeWeight
+    : typeof state.strokeWeight === "number" ? [state.strokeWeight, state.strokeWeight, state.strokeWeight, state.strokeWeight] : null;
+  for (const [field, index] of [["strokeTopWeight", 0], ["strokeRightWeight", 1], ["strokeBottomWeight", 2], ["strokeLeftWeight", 3]] as Array<[string, number]>) {
+    if (!fields.has(field) || !(field in target) || !weights) continue;
+    soft(field, () => { target[field] = weights[index]; });
+  }
+  if (fields.has("strokeAlign") && state.strokeAlign && "strokeAlign" in target) soft("stroke align", () => { target.strokeAlign = state.strokeAlign; });
+  if (fields.has("strokeCap") && state.strokeCap && "strokeCap" in target) soft("stroke cap", () => { target.strokeCap = state.strokeCap; });
+  if (fields.has("strokeJoin") && state.strokeJoin && "strokeJoin" in target) soft("stroke join", () => { target.strokeJoin = state.strokeJoin; });
+  if (fields.has("dashPattern") && Array.isArray(state.dashPattern) && "dashPattern" in target) soft("dash pattern", () => { target.dashPattern = state.dashPattern; });
+
+  if (anyField(fields, LAYOUT_OVERRIDE_FIELDS) && state.layout) applyLayout(target, { layout: state.layout }, report, path);
+
+  if (fields.has("width") || fields.has("height")) {
+    if (Array.isArray(state.size)) {
+      const width = fields.has("width") ? state.size[0] : target.width;
+      const height = fields.has("height") ? state.size[1] : target.height;
+      soft("size", () => { target.resize(width, height); });
+    }
+  }
+  if (fields.has("x") || fields.has("y")) {
+    if (Array.isArray(state.pos) && "x" in target) {
+      const x = fields.has("x") ? state.pos[0] : target.x;
+      const y = fields.has("y") ? state.pos[1] : target.y;
+      soft("position", () => { target.x = x; target.y = y; });
+    }
+  }
+  if (fields.has("rotation") && typeof state.rotation === "number" && "rotation" in target) soft("rotation", () => { target.rotation = state.rotation; });
+  if (fields.has("cornerRadius") || fields.has("topLeftRadius") || fields.has("topRightRadius") || fields.has("bottomRightRadius") || fields.has("bottomLeftRadius")) {
+    if (typeof state.cornerRadius === "number" && "cornerRadius" in target) soft("corner radius", () => { target.cornerRadius = state.cornerRadius; });
+    else if (Array.isArray(state.cornerRadius) && "topLeftRadius" in target) {
+      soft("corner radii", () => {
+        target.topLeftRadius = state.cornerRadius[0];
+        target.topRightRadius = state.cornerRadius[1];
+        target.bottomRightRadius = state.cornerRadius[2];
+        target.bottomLeftRadius = state.cornerRadius[3];
+      });
+    }
+  }
+  if (fields.has("constraints") && Array.isArray(state.constraints) && "constraints" in target) {
+    soft("constraints", () => { target.constraints = { horizontal: state.constraints[0], vertical: state.constraints[1] }; });
+  }
+  if (fields.has("layoutAlign") && state.layoutAlign && "layoutAlign" in target) soft("layout align", () => { target.layoutAlign = state.layoutAlign; });
+  if (fields.has("layoutGrow") && typeof state.layoutGrow === "number" && "layoutGrow" in target) soft("layout grow", () => { target.layoutGrow = state.layoutGrow; });
+  if (fields.has("layoutPositioning") && state.layoutPositioning && "layoutPositioning" in target) soft("layout positioning", () => { target.layoutPositioning = state.layoutPositioning; });
+  if (fields.has("layoutSizingHorizontal") || fields.has("layoutSizingVertical")) {
+    if (Array.isArray(state.sizing) && "layoutSizingHorizontal" in target) {
+      soft("layout sizing", () => {
+        if (fields.has("layoutSizingHorizontal")) target.layoutSizingHorizontal = state.sizing[0];
+        if (fields.has("layoutSizingVertical")) target.layoutSizingVertical = state.sizing[1];
+      });
+    }
+  }
+  if (anyField(fields, ["minWidth", "minHeight"]) && Array.isArray(state.minSize) && "minWidth" in target) {
+    soft("min size", () => {
+      if (fields.has("minWidth")) target.minWidth = state.minSize[0];
+      if (fields.has("minHeight")) target.minHeight = state.minSize[1];
+    });
+  }
+  if (anyField(fields, ["maxWidth", "maxHeight"]) && Array.isArray(state.maxSize) && "maxWidth" in target) {
+    soft("max size", () => {
+      if (fields.has("maxWidth")) target.maxWidth = state.maxSize[0];
+      if (fields.has("maxHeight")) target.maxHeight = state.maxSize[1];
+    });
+  }
+  if (fields.has("visible") && typeof state.visible === "boolean") soft("visibility", () => { target.visible = state.visible; });
+  if (fields.has("locked") && typeof state.locked === "boolean") soft("locked", () => { target.locked = state.locked; });
+  if (fields.has("opacity") && typeof state.opacity === "number" && "opacity" in target) soft("opacity", () => { target.opacity = state.opacity; });
+  if (fields.has("blendMode") && state.blendMode && "blendMode" in target) soft("blend mode", () => { target.blendMode = state.blendMode; });
+  if (fields.has("isMask") && typeof state.isMask === "boolean" && "isMask" in target) {
+    soft("mask", () => { target.isMask = state.isMask; if (state.maskType && "maskType" in target) target.maskType = state.maskType; });
+  }
+  if (fields.has("clipsContent") && typeof state.clipsContent === "boolean" && "clipsContent" in target) soft("clips content", () => { target.clipsContent = state.clipsContent; });
+
+  if (anyField(fields, ["vectorNetwork", "vectorPaths", "windingRule"]) && state.vector) {
+    try {
+      await target.setVectorNetworkAsync(state.vector);
+      if (fields.has("windingRule") && state.windingRule) target.windingRule = state.windingRule;
+    } catch (e) {
+      report.notes.push(`${path}: vector network not restored: ${msg(e)}`);
+    }
+  }
+
+  if (target.type === "INSTANCE") {
+    if (fields.has("componentProperties") && state.instance?.properties) applyInstanceProperties(target, state.instance.properties, report, path);
+    await applyInstanceOverrides(target, state.instance?.overrides, ctx, report, path);
+  }
+
+  const bindings: Dict = {};
+  for (const [field, value] of Object.entries(meta.variableBindings || {})) {
+    if (fields.has(field) || field === "componentProperties") bindings[field] = value;
+  }
+  if (Object.keys(bindings).length) await applyVariableBindings(target, bindings, state, ctx, report, path);
+}
+
+/**
+ * Replay every direct override the checkpoint recorded onto a freshly created
+ * instance. The path is resolved against the main component's CURRENT children;
+ * a path that no longer matches is reported and skipped rather than applied to
+ * whatever happens to sit at that index now.
+ */
+async function applyInstanceOverrides(
+  instance: any,
+  overrides: any,
+  ctx: RestoreContext,
+  report: RestoreReport,
+  path: string,
+): Promise<void> {
+  if (!Array.isArray(overrides)) return;
+  for (let i = 0; i < overrides.length; i++) {
+    const rec = overrides[i];
+    if (!rec || typeof rec !== "object") continue;
+    const at = `${path}.overrides[${i}]`;
+    if (typeof rec.unresolved === "string") report.notes.push(`${at}: ${rec.unresolved}`);
+    const target = resolveOverrideTarget(instance, rec.path, at, report);
+    if (!target) continue;
+
+    if (typeof rec.name === "string" && Array.isArray(rec.fields) && rec.fields.includes("name")) {
+      try {
+        target.name = rec.name;
+      } catch (e) {
+        report.notes.push(`${at}: name not restored: ${msg(e)}`);
+      }
+    }
+    if (Array.isArray(rec.unsupported) && rec.unsupported.length) {
+      const fields = rec.unsupported.map((f: any) => String(f));
+      report.overridesUnsupported.push({ path: at, fields });
+      report.notes.push(`${at}: override field(s) this checkpoint cannot rebuild: ${fields.join(", ")}`);
+    }
+    await applyInstanceOverrideState(target, rec, ctx, report, at);
+    report.overridesRestored.push({ path: at, fields: Array.isArray(rec.fields) ? rec.fields.length : 0 });
   }
 }
 

@@ -154,9 +154,29 @@ function node(type, props = {}) {
   if (type === "COMPONENT") {
     // The API's own shape: an instance carries its main component's properties,
     // and setProperties refuses a name the component does not have.
-    n.createInstance = () => node("INSTANCE", { _main: n, componentProperties: JSON.parse(JSON.stringify(n._defaults ?? {})) });
+    n.createInstance = () => {
+      const inst = node("INSTANCE", { _main: n, componentProperties: JSON.parse(JSON.stringify(n._defaults ?? {})) });
+      for (const child of n.children ?? []) inst.appendChild(cloneForInstance(child));
+      return inst;
+    };
   }
   return n;
+}
+
+/** A component instance owns copies of the main component's children. */
+function cloneForInstance(src) {
+  const props = { ...src };
+  delete props.children;
+  delete props.parent;
+  delete props.id;
+  delete props.createInstance;
+  // The fixture's segment reader closes over the source characters; the clone
+  // is a plain single-run text node unless the test says otherwise.
+  delete props.getStyledTextSegments;
+  return node(src.type, {
+    ...props,
+    children: (src.children ?? []).map(cloneForInstance),
+  });
 }
 
 /** A target's children are the fixture's children: same shape as the API. */
@@ -816,6 +836,72 @@ const errors = async (fn) => {
   check("instances: the instance is recreated from its main component",
     inst.type === "INSTANCE" && inst._main === main && report.created === 1);
   check("instances: its component properties are re-applied", inst._applied.Label === "Play" && report.propertiesFailed.length === 0);
+}
+
+{
+  const label = node("TEXT", { name: "Label", characters: "Default", fontSize: 12, fillStyleId: "S:fill" });
+  const icon = node("RECTANGLE", { name: "Icon", width: 24, height: 24 });
+  const styled = node("RECTANGLE", { name: "Styled", width: 10, height: 10, fillStyleId: "S:fill" });
+  const main = node("COMPONENT", { name: "Button", key: "K2", id: "8:8", children: [label, icon, styled] });
+  const srcInstance = main.createInstance();
+  srcInstance.name = "Button instance";
+  const srcLabel = srcInstance.children[0];
+  const srcIcon = srcInstance.children[1];
+  const srcStyled = srcInstance.children[2];
+  srcLabel.name = "Play label";
+  srcLabel.characters = "Play";
+  srcLabel.fontSize = 20;
+  srcLabel.fillStyleId = "";
+  srcIcon.visible = false;
+  srcIcon.opacity = 0.5;
+  srcIcon.resize(16, 16);
+  srcStyled.fillStyleId = "S:alt";
+  srcInstance.overrides = [
+    { id: srcLabel.id, overriddenFields: ["name", "characters", "fontSize", "fillStyleId"] },
+    { id: srcIcon.id, overriddenFields: ["visible", "opacity", "width", "height", "pluginData"] },
+    { id: srcStyled.id, overriddenFields: ["fillStyleId"] },
+  ];
+
+  const src = node("FRAME", { name: "Card", children: [srcInstance] });
+  const { root } = await dumpSubtree(src);
+  const dumped = root.children[0].state.instance.overrides;
+  check("instances: direct overrides are captured as state",
+    dumped.length === 3 && dumped[0].fields.join(",") === "name,characters,fontSize,fillStyleId" &&
+    dumped[0].path.length === 1 && dumped[0].path[0].name === "Label" && dumped[0].path[0].index === 0);
+  check("instances: an override records the overridden values, not the main component's",
+    dumped[0].name === "Play label" && dumped[0].state.text.characters === "Play" &&
+    dumped[0].state.text.fontSize === 20 && dumped[1].state.visible === false &&
+    dumped[1].state.opacity === 0.5 && dumped[1].state.size.join("x") === "16x16" &&
+    dumped[0].meta.styleIds.fillStyleId === "" && dumped[2].meta.styleIds.fillStyleId === "S:alt" &&
+    dumped[1].unsupported.join(",") === "pluginData");
+
+  const figma = fakeFigma([main], { styles: [{ id: "S:alt", name: "brand/alt", type: "PAINT" }] });
+  const target = node("FRAME");
+  const report = await restoreSubtree(root, ctxFor(figma, target), {});
+  const restored = target.children[0];
+  check("instances: direct overrides are replayed after the main component's children are cloned",
+    restored.children[0].name === "Play label" && restored.children[0].characters === "Play" &&
+    restored.children[0].fontSize === 20);
+  check("instances: non-text overrides are replayed field by field",
+    restored.children[1].visible === false && restored.children[1].opacity === 0.5 &&
+    restored.children[1].width === 16 && restored.children[1].height === 16);
+  check("instances: a removed style link is cleared and a new one is re-linked",
+    restored.children[0].fillStyleId === "" && restored.children[2].fillStyleId === "S:alt");
+  check("instances: the main component itself is untouched by the instance override",
+    main.children[0].characters === "Default" && main.children[0].fontSize === 12 &&
+    main.children[0].fillStyleId === "S:fill" && main.children[2].fillStyleId === "S:fill");
+  check("instances: the report names the overrides it restored and the fields it cannot rebuild",
+    report.overridesRestored.length === 3 && report.overridesMissing.length === 0 &&
+    report.overridesUnsupported.length === 1 && report.overridesUnsupported[0].fields[0] === "pluginData" &&
+    report.notes.some((n) => /cannot rebuild: pluginData/.test(n)));
+
+  const stale = JSON.parse(JSON.stringify(root));
+  stale.children[0].state.instance.overrides[0].path[0].name = "Gone";
+  const staleTarget = node("FRAME");
+  const staleReport = await restoreSubtree(stale, ctxFor(fakeFigma([main]), staleTarget), {});
+  check("instances: a stale override path is reported and skipped, not applied to the wrong layer",
+    staleReport.overridesMissing.length === 1 && /expected "Gone" at index 0, found "Label"/.test(staleReport.overridesMissing[0].why) &&
+    staleTarget.children[0].children[0].characters === "Default" && staleReport.overridesRestored.length === 2);
 }
 
 {

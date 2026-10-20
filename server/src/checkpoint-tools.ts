@@ -50,7 +50,7 @@ export function registerCheckpointTools(server: McpServer, client: FigmaClient, 
     "figma_checkpoint",
     "Save a subtree as data, compare it against the live document, and rebuild it — the alternative to an undo stack the Plugin API does not offer. " +
       'action "save" writes an inspectable JSON file; "show" diffs the live subtree against it; "restore" replaces the target\'s children from it in ONE transaction, dry run first, and verifies itself by dumping the subtree again. ' +
-      "Refuses what it cannot promise: node types it cannot rebuild, truncated dumps, a group or instance target, and any restore not asked for out loud. A save says what a checkpoint-v1 rebuild does not carry (instance interiors and their overrides, and component identity); style ids and node-level and run-level variable bindings are re-linked when still present, and every missing link is reported.",
+      "Refuses what it cannot promise: node types it cannot rebuild, truncated dumps, a group or instance target, and any restore not asked for out loud. A save says what a checkpoint-v1 rebuild does not carry (an INSTANCE's interior structure beyond its direct overrides, and component identity); direct per-layer overrides are captured and replayed by path after the main component is re-instantiated, and style ids and node-level and run-level variable bindings are re-linked when still present. Every missing link or stale override path is reported.",
     {
       action: z.enum(["save", "show", "list", "drop", "restore"]).describe("save | show (compare live, read-only) | list | drop (a local file) | restore (dry run unless dryRun: false)"),
       nodeId: figmaNodeId("nodeId").optional().describe("The subtree root. save: defaults to the selection; show/restore: defaults to the checkpoint's own root"),
@@ -319,7 +319,10 @@ export function registerCheckpointTools(server: McpServer, client: FigmaClient, 
               ((report.modesRestored?.length ?? 0) ? `\n${report.modesRestored.length} explicit variable mode(s) restored.` : "") +
               ((report.modesMissing?.length ?? 0) ? `\n${report.modesMissing.length} explicit variable mode(s) could not be restored.` : "") +
               ((report.stylesRestored?.length ?? 0) ? `\n${report.stylesRestored.length} style link(s) restored.` : "") +
-              ((report.stylesMissing?.length ?? 0) ? `\n${report.stylesMissing.length} style link(s) could not be restored; their values came back unlinked.` : "");
+              ((report.stylesMissing?.length ?? 0) ? `\n${report.stylesMissing.length} style link(s) could not be restored; their values came back unlinked.` : "") +
+              ((report.overridesRestored?.length ?? 0) ? `\n${report.overridesRestored.length} direct instance override(s) replayed by path.` : "") +
+              ((report.overridesMissing?.length ?? 0) ? `\n${report.overridesMissing.length} direct instance override(s) no longer match the main component and were skipped.` : "") +
+              ((report.overridesUnsupported?.length ?? 0) ? `\n${report.overridesUnsupported.length} direct instance override(s) carry field(s) this version cannot rebuild; they are named in the report.` : "");
 
             return content(
               caption +
