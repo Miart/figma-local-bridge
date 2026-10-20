@@ -921,6 +921,57 @@ test("build restores image and video paint geometry, filters, visibility and pai
   });
 });
 
+test("a pattern paint resolves its source node and carries tiling fields", async () => {
+  const ctx = makeCtx();
+  const source = ctx.createRectangle();
+  source.name = "Tile source";
+  ctx.currentPage.appendChild(source);
+  const spec = {
+    buildId: "pattern",
+    root: {
+      type: "FRAME", name: "Pattern",
+      fills: [{
+        type: "PATTERN", sourceNodeId: source.id,
+        tileType: "HORIZONTAL_HEXAGONAL", scalingFactor: 0.5,
+        spacing: { x: 4, y: -2 }, horizontalAlignment: "CENTER",
+        opacity: 0.8, blendMode: "MULTIPLY", visible: false,
+      }],
+    },
+  };
+
+  const dry = await runBuild(ctx, spec);
+  assert.equal(dry.status, "dry_run");
+  assert.deepEqual(dry.patterns, [{
+    nodeId: source.id, type: "RECTANGLE", name: "Tile source", resolved: true,
+  }]);
+  assert.equal(ctx.metrics.undos, 0);
+
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.verification.ok, true);
+  const frame = ctx.currentPage.children.find((n) => n.type === "FRAME");
+  assert.deepEqual(frame.fills[0], {
+    type: "PATTERN", sourceNodeId: source.id,
+    tileType: "HORIZONTAL_HEXAGONAL", scalingFactor: 0.5,
+    spacing: { x: 4, y: -2 }, horizontalAlignment: "CENTER",
+    opacity: 0.8, visible: false, blendMode: "MULTIPLY",
+  });
+
+  const missing = await runBuild(ctx, {
+    buildId: "missing-pattern",
+    root: { type: "FRAME", name: "Missing", fills: [{ type: "PATTERN", sourceNodeId: "999:999" }] },
+  });
+  assert.equal(missing.status, "blocked");
+  assert.match(missing.blocking.join("\n"), /pattern source node 999:999/);
+
+  const invalid = await runBuild(ctx, {
+    buildId: "invalid-pattern",
+    root: { type: "FRAME", name: "Invalid", fills: [{ type: "PATTERN", sourceNodeId: source.id, tileType: "FAN" }] },
+  });
+  assert.equal(invalid.status, "blocked");
+  assert.match(invalid.blocking.join("\n"), /tileType/);
+});
+
 test("re-sending the same build updates in place and never duplicates", async () => {
   const ctx = makeCtx();
   const first = {

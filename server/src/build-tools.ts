@@ -26,16 +26,20 @@ const paintSchema = z.union([
   z.string().describe("A colour: #rrggbb, #rrggbbaa, rgb(...) or rgba(...)"),
   z
     .object({
-      type: z.string().optional(),
+      type: z.string().optional().describe("SOLID | IMAGE | VIDEO | PATTERN | GRADIENT_*; a bare string is a solid colour"),
       color: z.string().optional(),
       opacity: z.number().min(0).max(1).optional(),
       variable: z.string().optional().describe("Local colour variable name or id"),
       imageHash: z.string().optional(),
       videoHash: z.string().optional(),
+      sourceNodeId: z.string().optional().describe("PATTERN only: source node id in this file"),
+      tileType: z.enum(["RECTANGULAR", "HORIZONTAL_HEXAGONAL", "VERTICAL_HEXAGONAL"]).optional().describe("PATTERN tiling"),
+      spacing: z.object({ x: z.number(), y: z.number() }).optional().describe("PATTERN tile spacing"),
+      horizontalAlignment: z.enum(["START", "CENTER", "END"]).optional().describe("PATTERN horizontal alignment"),
       scaleMode: z.enum(["FILL", "FIT", "CROP", "TILE"]).optional(),
       imageTransform: z.array(z.array(z.number())).optional().describe("IMAGE crop transform (CROP only)"),
       videoTransform: z.array(z.array(z.number())).optional().describe("VIDEO crop transform (CROP only)"),
-      scalingFactor: z.number().optional().describe("IMAGE tile scaling (TILE only)"),
+      scalingFactor: z.number().optional().describe("IMAGE tile or PATTERN scaling"),
       rotation: z.number().optional().describe("IMAGE rotation in degrees"),
       filters: z
         .object({
@@ -285,6 +289,7 @@ export function registerBuildTools(server: McpServer, client: FigmaClient, caps:
       "dryRun defaults to TRUE and returns a real plan plus a scope fingerprint. Pass dryRun:false with that fingerprint to apply. An existing root with the same buildId is patched in place; prune:true makes the tree exact by deleting keyed children the spec no longer contains. " +
       "An SVG leaf is created as a frame; re-sending it updates that frame in place, and a changed svg source replaces its interior while keeping the id and key. " +
       "A BOOLEAN_OPERATION is created from at least two operands in spec order (first operand is the subtract/intersect base) and can change its operation in place; its size is derived from the operands and is ignored. " +
+      "A PATTERN paint resolves its file-local source node id before writing and is refused when that node is missing. " +
       "Refuses type changes, ambiguous component names, unknown keys, position inside auto-layout, component swaps, and unsupported node types.",
     {
       buildId: z

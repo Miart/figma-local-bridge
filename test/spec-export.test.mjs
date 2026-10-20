@@ -294,6 +294,29 @@ test("image and video paint geometry, filters and paint visibility survive the e
   assert.doesNotThrow(() => normalizeTree(report.spec));
 });
 
+test("pattern paints export their source and tiling fields", async () => {
+  const source = node("RECTANGLE", { name: "Tile source" });
+  const rect = node("RECTANGLE", {
+    name: "Pattern",
+    fills: [{
+      type: "PATTERN", sourceNodeId: source.id,
+      tileType: "VERTICAL_HEXAGONAL", scalingFactor: 0.75,
+      spacing: { x: 3, y: 5 }, horizontalAlignment: "END",
+      opacity: 0.4, blendMode: "SCREEN", visible: false,
+    }],
+  });
+
+  const report = await runExportSpec(makeCtx(), { nodeId: rect.id });
+  assert.deepEqual(report.spec.fills[0], {
+    type: "PATTERN", sourceNodeId: source.id,
+    tileType: "VERTICAL_HEXAGONAL", scalingFactor: 0.75,
+    spacing: { x: 3, y: 5 }, horizontalAlignment: "END",
+    opacity: 0.4, visible: false, blendMode: "SCREEN",
+  });
+  assert.equal(report.warnings.length, 0);
+  assert.doesNotThrow(() => normalizeTree(report.spec));
+});
+
 test("URL links export, while NODE links and mixed runs are named", async () => {
   const url = node("TEXT", { name: "Docs", hyperlink: { type: "URL", value: "https://example.com/docs" } });
   const urlReport = await runExportSpec(makeCtx(), { nodeId: url.id });

@@ -157,6 +157,29 @@ async function paintToSpec(
     }
     return paintCommon(out, paint);
   }
+  if (paint.type === "PATTERN") {
+    const sourceNodeId = typeof paint.sourceNodeId === "string" ? paint.sourceNodeId : "";
+    if (!sourceNodeId) {
+      warnings.push(`${path}: a PATTERN paint has no sourceNodeId and was omitted`);
+      return null;
+    }
+    const spacing = isObj(paint.spacing)
+      ? { x: Number(paint.spacing.x), y: Number(paint.spacing.y) }
+      : { x: 0, y: 0 };
+    const scalingFactor = paint.scalingFactor === undefined ? 1 : Number(paint.scalingFactor);
+    if (!Number.isFinite(spacing.x) || !Number.isFinite(spacing.y) || !Number.isFinite(scalingFactor) || scalingFactor <= 0) {
+      warnings.push(`${path}: a PATTERN paint has an unreadable scaling factor or spacing and was omitted`);
+      return null;
+    }
+    return paintCommon({
+      type: "PATTERN",
+      sourceNodeId,
+      tileType: paint.tileType || "RECTANGULAR",
+      scalingFactor,
+      spacing,
+      horizontalAlignment: paint.horizontalAlignment || "START",
+    }, paint);
+  }
   if (paint.type === "IMAGE" || paint.type === "VIDEO") {
     const hash = paint.type === "IMAGE" ? paint.imageHash : paint.videoHash;
     if (!hash) {

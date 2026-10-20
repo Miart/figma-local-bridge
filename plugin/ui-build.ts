@@ -70,6 +70,8 @@ const TEXT_VARIABLE_TYPES: Record<string, "STRING" | "FLOAT"> = {
 };
 const MAX_TEXT_RUNS = 200;
 const GRID_PATTERNS = new Set(["COLUMNS", "ROWS", "GRID"]);
+const PATTERN_TILES = new Set(["RECTANGULAR", "HORIZONTAL_HEXAGONAL", "VERTICAL_HEXAGONAL"]);
+const PATTERN_ALIGNMENTS = new Set(["START", "CENTER", "END"]);
 const GRID_ALIGNMENTS = new Set(["MIN", "MAX", "CENTER", "STRETCH"]);
 
 type Json = any;
@@ -587,6 +589,8 @@ interface Resources {
   variables: Map<string, any>;
   variableKinds: Map<string, string>;
   components: Map<string, any>;
+  patternSources: Map<string, any>;
+  patternSourceIds: string[];
   styleNames: { text: string[]; paint: string[]; effect: string[] };
   variableNames: string[];
   componentRefs: Json[];
@@ -603,6 +607,8 @@ function resourceMap(): Resources {
     variables: new Map(),
     variableKinds: new Map(),
     components: new Map(),
+    patternSources: new Map(),
+    patternSourceIds: [],
     styleNames: { text: [], paint: [], effect: [] },
     variableNames: [],
     componentRefs: [],
@@ -677,7 +683,7 @@ function collectPaints(res: Resources, paints: any, where: string) {
     if (p.color !== undefined) {
       try { parseColor(p.color); } catch (e) { res.blocking.push(`${where}[${i}]: ${errMsg(e)}`); }
     }
-    if (p.type && !["SOLID", "IMAGE", "VIDEO", "GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND"].includes(String(p.type))) {
+    if (p.type && !["SOLID", "IMAGE", "VIDEO", "PATTERN", "GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND"].includes(String(p.type))) {
       res.blocking.push(`${where}[${i}]: unsupported paint type "${p.type}"`);
     }
     if (p.visible !== undefined && typeof p.visible !== "boolean") {
@@ -685,6 +691,34 @@ function collectPaints(res: Resources, paints: any, where: string) {
     }
     if (p.blendMode !== undefined && typeof p.blendMode !== "string") {
       res.blocking.push(`${where}[${i}].blendMode must be a string`);
+    }
+    if (p.type === "PATTERN") {
+      const source = typeof p.sourceNodeId === "string" ? p.sourceNodeId.trim() : "";
+      if (!source) res.blocking.push(`${where}[${i}]: PATTERN paint needs sourceNodeId`);
+      else if (!res.patternSourceIds.includes(source)) res.patternSourceIds.push(source);
+      if (p.tileType !== undefined && !PATTERN_TILES.has(String(p.tileType))) {
+        res.blocking.push(`${where}[${i}].tileType must be RECTANGULAR, HORIZONTAL_HEXAGONAL or VERTICAL_HEXAGONAL`);
+      }
+      if (p.scalingFactor !== undefined) {
+        const n = Number(p.scalingFactor);
+        if (!Number.isFinite(n) || n <= 0) res.blocking.push(`${where}[${i}].scalingFactor must be a finite number > 0`);
+      }
+      if (p.spacing !== undefined) {
+        if (!isObj(p.spacing)) res.blocking.push(`${where}[${i}].spacing must be {x,y}`);
+        else {
+          for (const axis of ["x", "y"]) {
+            if (!Number.isFinite(Number(p.spacing[axis]))) {
+              res.blocking.push(`${where}[${i}].spacing.${axis} must be a finite number`);
+            }
+          }
+        }
+      }
+      if (p.horizontalAlignment !== undefined && !PATTERN_ALIGNMENTS.has(String(p.horizontalAlignment))) {
+        res.blocking.push(`${where}[${i}].horizontalAlignment must be START, CENTER or END`);
+      }
+      if (p.variable !== undefined) {
+        res.blocking.push(`${where}[${i}]: a PATTERN paint cannot also carry a colour variable`);
+      }
     }
     if (p.type === "IMAGE" || p.type === "VIDEO") {
       const hashField = p.type === "IMAGE" ? "imageHash" : "videoHash";
@@ -698,6 +732,31 @@ function collectPaints(res: Resources, paints: any, where: string) {
       }
     }
   });
+}
+
+async function resolvePatternSources(ctx: any, res: Resources) {
+  for (const id of res.patternSourceIds) {
+    let node: any = null;
+    try {
+      node = await ctx.getNodeByIdAsync(id);
+    } catch (e) {
+      res.blocking.push(`pattern source node ${id} cannot be read: ${errMsg(e)}`);
+      continue;
+    }
+    if (!node) {
+      res.blocking.push(`pattern source node ${id} was not found in this file; a PATTERN paint needs its source node`);
+      continue;
+    }
+    if (node.removed === true) {
+      res.blocking.push(`pattern source node ${id} has been removed`);
+      continue;
+    }
+    if (node.type === "PAGE" || node.type === "DOCUMENT") {
+      res.blocking.push(`pattern source node ${id} is ${node.type}, not a scene node`);
+      continue;
+    }
+    res.patternSources.set(id, node);
+  }
 }
 
 async function resolveVariables(ctx: any, res: Resources) {
@@ -882,6 +941,7 @@ async function collectResources(ctx: any, root: NormalizedNode): Promise<Resourc
     for (const c of n.children) visit(c);
   };
   visit(root);
+  await resolvePatternSources(ctx, res);
   await resolveVariables(ctx, res);
   return res;
 }
@@ -1127,6 +1187,7 @@ export interface Plan {
   styles: { text: string[]; paint: string[]; effect: string[] };
   variables: string[];
   components: Json[];
+  patterns: Json[];
   warnings: string[];
   blocking: string[];
   prune: boolean;
@@ -1149,6 +1210,7 @@ function emptyPlan(): Plan {
     styles: { text: [], paint: [], effect: [] },
     variables: [],
     components: [],
+    patterns: [],
     warnings: [],
     blocking: [],
     prune: false,
@@ -1282,6 +1344,10 @@ async function planBuild(ctx: any, p: Json): Promise<Plan> {
     componentSetKey: r.componentSetKey ?? null,
     resolved: res.components.has(r.key),
   }));
+  plan.patterns = res.patternSourceIds.map((nodeId) => {
+    const source = res.patternSources.get(nodeId);
+    return { nodeId, type: source ? source.type : null, name: source ? source.name : null, resolved: !!source };
+  });
 
   plan.counts.create = plan.planned.create.length;
   plan.counts.update = plan.planned.update.length;
@@ -1471,6 +1537,10 @@ async function planPatch(ctx: any, p: Json): Promise<Plan> {
     componentSetKey: r.componentSetKey ?? null,
     resolved: res.components.has(r.key),
   }));
+  plan.patterns = res.patternSourceIds.map((nodeId) => {
+    const source = res.patternSources.get(nodeId);
+    return { nodeId, type: source ? source.type : null, name: source ? source.name : null, resolved: !!source };
+  });
   plan.counts.create = plan.planned.create.length;
   plan.counts.update = plan.planned.update.length;
   plan.counts.unchanged = plan.planned.unchanged.length;
@@ -1514,7 +1584,7 @@ function paintFromSpec(ctx: any, value: any, res: Resources): any {
   if (value.style !== undefined) {
     throw new Error("paint styles are set with fillStyle / strokeStyle, not inside fills/strokes");
   }
-  if (value.variable !== undefined) {
+  if (value.variable !== undefined && (value.type === undefined || value.type === "SOLID")) {
     // resolveVariables already proved the reference, but the map is keyed by
     // the caller's string and a missing entry means the plan is blocked before
     // we get here. The throw is a last line of defence, not a fallback.
@@ -1532,6 +1602,35 @@ function paintFromSpec(ctx: any, value: any, res: Resources): any {
       /* the literal paint is the fallback */
     }
     return paintCommon(paint, value);
+  }
+  if (value.type === "PATTERN") {
+    const sourceNodeId = typeof value.sourceNodeId === "string" ? value.sourceNodeId.trim() : "";
+    if (!sourceNodeId) throw new Error("PATTERN paint needs sourceNodeId");
+    if (!res.patternSources.has(sourceNodeId)) {
+      throw new Error(`pattern source node ${sourceNodeId} was not resolved`);
+    }
+    const tileType = value.tileType === undefined ? "RECTANGULAR" : String(value.tileType);
+    if (!PATTERN_TILES.has(tileType)) {
+      throw new Error(`PATTERN tileType must be RECTANGULAR, HORIZONTAL_HEXAGONAL or VERTICAL_HEXAGONAL, not "${tileType}"`);
+    }
+    const horizontalAlignment = value.horizontalAlignment === undefined ? "START" : String(value.horizontalAlignment);
+    if (!PATTERN_ALIGNMENTS.has(horizontalAlignment)) {
+      throw new Error(`PATTERN horizontalAlignment must be START, CENTER or END, not "${horizontalAlignment}"`);
+    }
+    const scalingFactor = value.scalingFactor === undefined
+      ? 1
+      : validateNumber(value.scalingFactor, "PATTERN scalingFactor", { positive: true });
+    const spacing = value.spacing === undefined
+      ? { x: 0, y: 0 }
+      : validatePoint(value.spacing, "PATTERN spacing");
+    return paintCommon({
+      type: "PATTERN",
+      sourceNodeId,
+      tileType,
+      scalingFactor,
+      spacing,
+      horizontalAlignment,
+    }, value);
   }
   if (value.type === "IMAGE" || value.type === "VIDEO") {
     const isVideo = value.type === "VIDEO";
@@ -2606,6 +2705,7 @@ function blocked(plan: Plan, t0: number): Json {
     styles: plan.styles,
     variables: plan.variables,
     components: plan.components,
+    patterns: plan.patterns,
     ms: { plan: Date.now() - t0 },
   };
 }
@@ -2654,6 +2754,7 @@ export async function runBuild(ctx: any, params: Json): Promise<Json> {
     styles: plan.styles,
     variables: plan.variables,
     components: plan.components,
+    patterns: plan.patterns,
     ...applied,
     ms: { plan: planMs(plan), apply: applied.ms.apply, total: Date.now() - t0 },
   };
@@ -2703,6 +2804,7 @@ export async function runPatch(ctx: any, params: Json): Promise<Json> {
     styles: plan.styles,
     variables: plan.variables,
     components: plan.components,
+    patterns: plan.patterns,
     ...applied,
     ms: { plan: planMs(plan), apply: applied.ms.apply, total: Date.now() - t0 },
   };
