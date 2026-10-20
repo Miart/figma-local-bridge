@@ -13,6 +13,7 @@ import { registerJournalTools } from "./journal-tools.js";
 import { registerBuildTools } from "./build-tools.js";
 import { registerBatchTools } from "./batch-tools.js";
 import { registerComponentTools } from "./component-tools.js";
+import { registerVariantTools } from "./variant-tools.js";
 import { registerAuditTools } from "./audit-tools.js";
 import { registerIndexTools } from "./index-tools.js";
 import { registerDesignSystemTools } from "./design-system-tools.js";
@@ -115,6 +116,8 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   registerBatchTools(server, client, caps);
   // Component swap has the same split: comparison is a read, apply is guarded.
   registerComponentTools(server, client, caps);
+  // Variant-set authoring follows the same plan/fingerprint/apply split.
+  registerVariantTools(server, client, caps);
   // Audit, index and search are read-only and belong in both modes.
   registerAuditTools(server, client);
   registerIndexTools(server, client);

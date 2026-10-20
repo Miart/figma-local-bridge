@@ -26,6 +26,7 @@ import { atlasManifest, handoffPreviewRefusal, nineSliceDescriptor, pngSize, sta
 import { runBuild, runPatch } from "./ui-build";
 import { runBatch } from "./batch";
 import { runComponentSwap } from "./component-swap";
+import { runVariantSet } from "./variant-sets";
 import { runAudit } from "./audit";
 import { runIndex, runSearch } from "./index";
 import { runDesignSystem } from "./design-system";
@@ -796,6 +797,7 @@ export const MUTATING_METHODS: ReadonlySet<string> = new Set([
   "patch",
   "batch",
   "swap_component",
+  "variant_set",
 ]);
 
 export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
@@ -1733,6 +1735,15 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
    */
   async swap_component(p: Json) {
     return runComponentSwap(figma, p);
+  },
+
+  /**
+   * Variant-set authoring: combine standalone components, add a variant by
+   * cloning one, or rename a variant's property combination. The dry run
+   * validates the matrix and fingerprints the components, set and destination.
+   */
+  async variant_set(p: Json) {
+    return runVariantSet(figma, p);
   },
 
   /** Read-only design-system audit: keys, hardcoded paints, text styles, contrast. */

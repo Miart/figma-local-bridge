@@ -18,7 +18,7 @@
 import {
   KEY_DATA, PROTECTED_DATA, parseColor, fontSpec, hyperlinkFromSpec, applyContainerLayout, applyChildLayout,
 } from "./ui-build";
-import { snapshot, STRICT, hashString } from "./fingerprint";
+import { snapshot, STRICT, containerFingerprint } from "./fingerprint";
 
 export const BATCH_SCHEMA = "batch-v1";
 export const MAX_OPS = 200;
@@ -224,40 +224,6 @@ function destinationWarning(parent: any): string | null {
   return component
     ? `destination is inside COMPONENT "${component.name}"; this edits the component definition, not an instance`
     : null;
-}
-
-/**
- * The semantic snapshot deliberately excludes layout props: it answers "is this
- * the same local tree", not "would a child land in the same place". A move
- * destination needs the second question, so its fingerprint adds the container
- * layout that decides flow, padding, clipping and order.
- */
-function destinationFingerprint(parent: any): string {
-  const layout = {
-    layoutMode: parent.layoutMode ?? null,
-    layoutWrap: parent.layoutWrap ?? null,
-    primaryAxisSizingMode: parent.primaryAxisSizingMode ?? null,
-    counterAxisSizingMode: parent.counterAxisSizingMode ?? null,
-    primaryAxisAlignItems: parent.primaryAxisAlignItems ?? null,
-    counterAxisAlignItems: parent.counterAxisAlignItems ?? null,
-    itemSpacing: parent.itemSpacing ?? null,
-    counterAxisSpacing: parent.counterAxisSpacing ?? null,
-    paddingLeft: parent.paddingLeft ?? null,
-    paddingRight: parent.paddingRight ?? null,
-    paddingTop: parent.paddingTop ?? null,
-    paddingBottom: parent.paddingBottom ?? null,
-    itemReverseZIndex: parent.itemReverseZIndex ?? null,
-    strokesIncludedInLayout: parent.strokesIncludedInLayout ?? null,
-    clipsContent: parent.clipsContent ?? null,
-    layoutSizingHorizontal: parent.layoutSizingHorizontal ?? null,
-    layoutSizingVertical: parent.layoutSizingVertical ?? null,
-    layoutGrids: parent.layoutGrids ?? null,
-    gridRowCount: parent.gridRowCount ?? null,
-    gridColumnCount: parent.gridColumnCount ?? null,
-    gridRowGap: parent.gridRowGap ?? null,
-    gridColumnGap: parent.gridColumnGap ?? null,
-  };
-  return hashString(`${snapshot(parent, STRICT).hash}|${JSON.stringify(layout)}`);
 }
 
 function insertionIndex(target: any, parent: any, index: number, requested: any): number {
@@ -599,7 +565,7 @@ export async function runBatch(ctx: any, params: Json): Promise<Json> {
     }
     let h = parentFingerprints.get(n.id);
     if (!h) {
-      h = destinationFingerprint(n);
+      h = containerFingerprint(n);
       parentFingerprints.set(n.id, h);
     }
     p.parent.fingerprint = h;

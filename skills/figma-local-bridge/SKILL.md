@@ -110,12 +110,51 @@ half a design applied.
   preserving the canvas position (default) and `AUTO` with
   `preserveAbsolute:false`. A destination inside an `INSTANCE` or
   `COMPONENT_SET` is refused; inside a `COMPONENT` it is reported as an edit
-  to the component definition. Moving into or out of a protected parent is
-  refused, because that changes the parent's children. A duplicate whose
-  `newKey` already exists is a no-op and reports an existing node under a
-  different parent. Every target, destination, font, paint style and variant
-  property is resolved first; a failed op rolls the whole batch back unless
-  `stopOnError:false`, which reports the exact failure and what did apply.
+  to the component definition. To extend an existing set, use
+  `figma_variant_set` `add`, not a batch reparent. Moving into or out of a
+  protected parent is refused, because that changes the parent's children. A
+  duplicate whose `newKey` already exists is a no-op and reports an existing
+  node under a different parent. Every target, destination, font, paint style
+  and variant property is resolved first; a failed op rolls the whole batch
+  back unless `stopOnError:false`, which reports the exact failure and what
+  did apply.
+
+## Authoring a variant set
+
+`figma_variant_set` treats a `COMPONENT_SET` as a matrix. There is no direct
+`variantProperties` setter: a variant's `Property=Value` name is what Figma
+parses into the matrix, so the tool writes names and then reads the API fields
+back to prove the matrix landed.
+
+- `action:"combine"` takes standalone `COMPONENT`s, a set `name`, and the
+  properties each component should represent. Every component must use the
+  same property names, no combination may repeat, and a component already in
+  a set, inside an `INSTANCE`, or nested in another listed component is
+  refused. Components are renamed, then `figma.combineAsVariants` moves them
+  into a new set appended to `parentId`/`parentKey` (or their common parent).
+- `action:"add"` takes `sourceId`/`sourceKey` (an existing variant) and a
+  complete new `properties` map. It clones the source's structure — not its
+  instances — inserts the clone (optionally at `index`) and verifies the new
+  combination. An existing combination is refused; use `edit`.
+- `action:"edit"` takes `variantId`/`variantKey` and the complete new
+  `properties`. It renames the variant in place, so its id and instances
+  survive; their variant property values follow. The same combination is a
+  no-op.
+- Property names and values cannot contain comma, equals or a newline. All
+  variants must expose the same property names; a set whose variants do not
+  expose `variantProperties` is refused instead of guessed at.
+- A dry run (the default) returns `fingerprints` for every component and the
+  set, plus the destination layout for combine. Apply with
+  `dryRun:false`, the returned `planId` and that whole map. After writing, the
+  tool verifies `variantProperties` and `variantGroupProperties`; if Figma did
+  not accept the names, the transaction is rolled back rather than reported
+  as an applied matrix. If the undo itself fails, the error says `ROLLBACK
+  FAILED` and tells you to inspect before retrying.
+- A combine destination inside an `INSTANCE`, any `COMPONENT_SET` (including a
+  variant) or a `COMPONENT` definition is refused: Figma will not reparent a
+  component into a component definition. `add` and `edit` still operate on an
+  existing set inside a component and name that edit. A combine appends the
+  set; move it afterwards with `figma_batch_edit` if placement matters.
 
 ## Swapping an instance's component
 

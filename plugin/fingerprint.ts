@@ -405,6 +405,40 @@ export function snapshot(node: any, policy: FingerprintPolicy = STRICT, depth = 
   };
 }
 
+/**
+ * A destination fingerprint: the semantic snapshot plus the container layout
+ * that decides where a new child lands. The semantic snapshot deliberately
+ * excludes layout props, because local equivalence must not depend on flow.
+ * A move or a variant insertion asks a different question, so it needs both.
+ */
+export function containerFingerprint(node: any): string {
+  const layout = {
+    layoutMode: node.layoutMode ?? null,
+    layoutWrap: node.layoutWrap ?? null,
+    primaryAxisSizingMode: node.primaryAxisSizingMode ?? null,
+    counterAxisSizingMode: node.counterAxisSizingMode ?? null,
+    primaryAxisAlignItems: node.primaryAxisAlignItems ?? null,
+    counterAxisAlignItems: node.counterAxisAlignItems ?? null,
+    itemSpacing: node.itemSpacing ?? null,
+    counterAxisSpacing: node.counterAxisSpacing ?? null,
+    paddingLeft: node.paddingLeft ?? null,
+    paddingRight: node.paddingRight ?? null,
+    paddingTop: node.paddingTop ?? null,
+    paddingBottom: node.paddingBottom ?? null,
+    itemReverseZIndex: node.itemReverseZIndex ?? null,
+    strokesIncludedInLayout: node.strokesIncludedInLayout ?? null,
+    clipsContent: node.clipsContent ?? null,
+    layoutSizingHorizontal: node.layoutSizingHorizontal ?? null,
+    layoutSizingVertical: node.layoutSizingVertical ?? null,
+    layoutGrids: node.layoutGrids ?? null,
+    gridRowCount: node.gridRowCount ?? null,
+    gridColumnCount: node.gridColumnCount ?? null,
+    gridRowGap: node.gridRowGap ?? null,
+    gridColumnGap: node.gridColumnGap ?? null,
+  };
+  return hashString(`${snapshot(node, STRICT).hash}|${JSON.stringify(layout)}`);
+}
+
 // ---------------------------------------------------------------- verdicts
 
 function collectStatuses(s: SemanticSnapshot, acc: Set<GeometryStatus>): void {

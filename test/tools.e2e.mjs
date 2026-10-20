@@ -86,8 +86,8 @@ try {
     "figma_get_variable_defs", "figma_get_libraries", "figma_search_design_system", "figma_get_figjam",
     "figma_download_assets", "figma_get_code_connect_map", "figma_use", "figma_upload_assets", "figma_add_code_connect_map",
     "figma_compare", "figma_checkpoint", "figma_ops", "figma_cancel",
-    "figma_build", "figma_patch", "figma_batch_edit", "figma_audit", "figma_index", "figma_search", "figma_design_system",
-    "figma_export_build_spec"];
+    "figma_build", "figma_patch", "figma_batch_edit", "figma_swap_component", "figma_variant_set",
+    "figma_audit", "figma_index", "figma_search", "figma_design_system", "figma_export_build_spec"];
   const missing = expected.filter((n) => !tools.includes(n));
   check("all parity tools are registered", missing.length === 0, "missing: " + missing.join(","));
 
@@ -156,6 +156,37 @@ try {
           verification: { ok: true, targets: [{ nodeId: env.params.nodeIds?.[0] || "1:2", verified: true }] },
           planId: env.params.planId,
           ms: { plan: 3 },
+        });
+      case "variant_set":
+        return ok({
+          status: env.params.dryRun === false ? "applied" : "dry_run",
+          schema: "variant-set-v1",
+          action: env.params.action,
+          dryRun: env.params.dryRun !== false,
+          set: {
+            id: env.params.dryRun === false ? "8:1" : "8:0",
+            nodeId: env.params.dryRun === false ? "8:1" : null,
+            key: "button-set",
+            publishedKey: null,
+            name: env.params.name || "Button",
+            type: "COMPONENT_SET",
+            variantProperties: { Size: { values: ["M", "S"] }, Tone: { values: ["Light"] } },
+            defaultVariantId: "8:2",
+          },
+          components: (env.params.components || []).map((c, i) => ({
+            nodeId: c.nodeId || `8:${i + 2}`,
+            key: `button-${i}`,
+            name: Object.entries(c.properties).map(([k, v]) => `${k}=${v}`).join(", "),
+            variantProperties: c.properties,
+            variantName: Object.entries(c.properties).map(([k, v]) => `${k}=${v}`).join(", "),
+          })),
+          variantProperties: { Size: { values: ["M", "S"] }, Tone: { values: ["Light"] } },
+          counts: { components: 2, propertyNames: 2, variants: 2 },
+          warnings: ["component names are replaced by the requested variant names; previous names are reported"],
+          fingerprints: { "8:2": "fp-component-a", "8:3": "fp-component-b" },
+          verification: env.params.dryRun === false ? { ok: true, problems: [] } : undefined,
+          planId: env.params.planId,
+          ms: { plan: 2, apply: 1, total: 3 },
         });
       case "design_system":
         return ok({
@@ -529,6 +560,84 @@ try {
   check("figma_swap_component refuses a planId that belongs to another request",
     /PLAN_MISMATCH/.test(swapMismatchMsg) && seen.length === swapSeenMismatch,
     swapMismatchMsg.slice(0, 160));
+
+  const variantSeenBefore = seen.length;
+  const variantDry = c.text(await c.rpc("tools/call", {
+    name: "figma_variant_set",
+    arguments: {
+      action: "combine",
+      name: "Button",
+      components: [
+        { nodeId: "8:2", properties: { Size: "S", Tone: "Light" } },
+        { nodeId: "8:3", properties: { Size: "M", Tone: "Light" } },
+      ],
+    },
+  }));
+  const variantReq = seen[variantSeenBefore];
+  check("figma_variant_set defaults to a dry run and sends the property matrix",
+    variantDry.status === "dry_run" && variantDry.schema === "variant-set-v1" && variantDry.action === "combine" &&
+      variantDry.set.name === "Button" && variantDry.components.length === 2 &&
+      variantReq.method === "variant_set" && variantReq.params.dryRun === true && typeof variantReq.params.planId === "string",
+    JSON.stringify(variantDry).slice(0, 200));
+
+  const variantApplied = c.text(await c.rpc("tools/call", {
+    name: "figma_variant_set",
+    arguments: {
+      action: "combine",
+      name: "Button",
+      components: [
+        { nodeId: "8:2", properties: { Size: "S", Tone: "Light" } },
+        { nodeId: "8:3", properties: { Size: "M", Tone: "Light" } },
+      ],
+      dryRun: false,
+      planId: variantDry.planId,
+      expectedFingerprints: variantDry.fingerprints,
+    },
+  }));
+  check("figma_variant_set applies with the dry-run planId and fingerprints",
+    variantApplied.status === "applied" && variantApplied.planId === variantDry.planId &&
+      variantApplied.verification.ok === true && variantApplied.set.type === "COMPONENT_SET",
+    JSON.stringify(variantApplied).slice(0, 200));
+
+  const addSeenBefore = seen.length;
+  const addDry = c.text(await c.rpc("tools/call", {
+    name: "figma_variant_set",
+    arguments: { action: "add", sourceId: "8:2", properties: { Size: "L", Tone: "Light" } },
+  }));
+  check("figma_variant_set add sends the source and the complete new properties",
+    addDry.action === "add" && seen[addSeenBefore].method === "variant_set" &&
+      seen[addSeenBefore].params.sourceId === "8:2" && seen[addSeenBefore].params.properties.Size === "L",
+    JSON.stringify(addDry).slice(0, 160));
+
+  const editSeenBefore = seen.length;
+  const editDry = c.text(await c.rpc("tools/call", {
+    name: "figma_variant_set",
+    arguments: { action: "edit", variantId: "8:2", properties: { Size: "XL", Tone: "Light" } },
+  }));
+  check("figma_variant_set edit sends the variant and the complete new properties",
+    editDry.action === "edit" && seen[editSeenBefore].method === "variant_set" &&
+      seen[editSeenBefore].params.variantId === "8:2" && seen[editSeenBefore].params.properties.Size === "XL",
+    JSON.stringify(editDry).slice(0, 160));
+
+  const variantSeenMismatch = seen.length;
+  const variantMismatch = await c.rpc("tools/call", {
+    name: "figma_variant_set",
+    arguments: {
+      action: "combine",
+      name: "Button",
+      components: [
+        { nodeId: "8:2", properties: { Size: "S", Tone: "Light" } },
+        { nodeId: "8:4", properties: { Size: "M", Tone: "Light" } },
+      ],
+      dryRun: false,
+      planId: variantDry.planId,
+      expectedFingerprints: variantDry.fingerprints,
+    },
+  });
+  const variantMismatchMsg = String(variantMismatch.error?.message ?? variantMismatch.result?.content?.[0]?.text ?? JSON.stringify(variantMismatch));
+  check("figma_variant_set refuses a planId that belongs to another matrix",
+    /PLAN_MISMATCH/.test(variantMismatchMsg) && seen.length === variantSeenMismatch,
+    variantMismatchMsg.slice(0, 160));
 
   const auditSeenBefore = seen.length;
   const audit = c.text(await c.rpc("tools/call", {
