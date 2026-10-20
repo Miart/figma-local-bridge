@@ -517,11 +517,12 @@ try {
   const specSeenBefore = seen.length;
   const spec = c.text(await c.rpc("tools/call", {
     name: "figma_export_build_spec",
-    arguments: { nodeId: "1:2", maxNodes: 25 },
+    arguments: { nodeId: "1:2", maxNodes: 25, svgFallback: false },
   }));
   const specReq = seen[specSeenBefore];
-  check("figma_export_build_spec sends the root and cap, and returns a build spec",
+  check("figma_export_build_spec sends the root, cap and SVG fallback switch, and returns a build spec",
     specReq.method === "export_spec" && specReq.params.nodeId === "1:2" && specReq.params.maxNodes === 25 &&
+      specReq.params.svgFallback === false &&
       spec.schema === "build-spec-export/v1" && spec.spec.key === "card" && spec.counts.nodes === 1,
     JSON.stringify(spec).slice(0, 200));
 

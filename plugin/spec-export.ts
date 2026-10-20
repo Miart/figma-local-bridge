@@ -7,18 +7,31 @@
  * another page or in another file. This is a lossy translation by nature — the
  * Plugin API cannot recover an SVG's source, a BOOLEAN_OPERATION's inputs, or
  * the inside of an instance — so the report names every field it could not
- * carry instead of returning a spec that looks complete.
+ * carry instead of returning a spec that looks complete. A node with no build
+ * equivalent can instead travel as the SVG render of its current appearance;
+ * the spec then says it is flattened and the report names what that loses.
  *
  * The spec is ordinary data and the source is never modified.
  */
 
-import { BUILD_DATA, KEY_DATA, KIND_DATA, PROTECTED_DATA } from "./ui-build";
+import { BUILD_DATA, KEY_DATA, KIND_DATA, MAX_SPEC_BYTES, PROTECTED_DATA } from "./ui-build";
 
 export const SPEC_EXPORT_SCHEMA = "build-spec-export/v1";
 
 type Json = any;
 
 const EXPORTABLE = new Set(["FRAME", "RECTANGLE", "ELLIPSE", "LINE", "TEXT", "INSTANCE", "COMPONENT"]);
+/*
+ * A node type the build cannot express can still be carried as its rendered
+ * appearance: Figma exports any layer as SVG, and the build engine already
+ * creates a frame from an SVG string. The fallback is deliberately bounded —
+ * the build refuses a spec over MAX_SPEC_BYTES, and one enormous illustration
+ * must not crowd out the rest of the tree.
+ */
+const SVG_FALLBACK_NODE_LIMIT = 128 * 1024;
+const SVG_FALLBACK_TOTAL_LIMIT = 192 * 1024;
+const NO_SVG_FALLBACK = new Set(["SLICE"]);
+
 const SHADOWS = new Set(["DROP_SHADOW", "INNER_SHADOW"]);
 const BLURS = new Set(["LAYER_BLUR", "BACKGROUND_BLUR"]);
 
@@ -758,6 +771,110 @@ function mergeLayout(a: Json | undefined, b: Json | undefined): Json | undefined
   return { ...a, ...b, ...(a.sizing || b.sizing ? { sizing: { ...(a.sizing || {}), ...(b.sizing || {}) } } : {}) };
 }
 
+/** Decode the UTF-8 bytes of an SVG export without relying on `TextDecoder`. */
+function decodeUtf8(bytes: Uint8Array): string {
+  let out = "";
+  for (let i = 0; i < bytes.length;) {
+    const b = bytes[i++];
+    if (b < 0x80) out += String.fromCharCode(b);
+    else if (b < 0xe0) out += String.fromCharCode(((b & 0x1f) << 6) | (bytes[i++] & 0x3f));
+    else if (b < 0xf0) {
+      out += String.fromCharCode(((b & 0x0f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f));
+    } else {
+      const cp = ((b & 0x07) << 18) | ((bytes[i++] & 0x3f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f);
+      out += String.fromCodePoint(cp);
+    }
+  }
+  return out;
+}
+
+/**
+ * Render a layer as an inline SVG. `SVG_STRING` is the direct form; older
+ * plugin sessions only know `SVG`, whose bytes are decoded by hand. A caller
+ * gets a reason in `warnings` whenever no usable SVG comes back, so a skipped
+ * fallback never looks like a node that was never there.
+ */
+async function svgFallbackFor(
+  node: any,
+  state: Json,
+  path: string,
+): Promise<{ svg: string | null; error?: string }> {
+  if (typeof node.exportAsync !== "function") {
+    const error = "this node has no exportAsync in this session";
+    state.warnings.push(`${path}: SVG fallback is unavailable: ${error}`);
+    return { svg: null, error };
+  }
+  let svg: any = "";
+  try {
+    svg = await node.exportAsync({
+      format: "SVG_STRING",
+      svgOutlineText: true,
+      svgIdAttribute: false,
+      svgSimplifyStroke: true,
+    });
+  } catch {
+    try {
+      const bytes: Uint8Array = await node.exportAsync({
+        format: "SVG",
+        svgOutlineText: true,
+        svgIdAttribute: false,
+        svgSimplifyStroke: true,
+      });
+      svg = decodeUtf8(bytes);
+    } catch (e) {
+      const error = `the SVG exporter failed: ${errMsg(e)}`;
+      state.warnings.push(`${path}: SVG fallback failed: ${errMsg(e)}`);
+      return { svg: null, error };
+    }
+  }
+  if (typeof svg !== "string") svg = decodeUtf8(svg);
+  if (!/^\s*(<\?xml[^>]*>\s*)?<svg[\s>]/i.test(svg)) {
+    const error = "the exporter returned something that is not an <svg> document";
+    state.warnings.push(`${path}: ${error}; fallback skipped`);
+    return { svg: null, error };
+  }
+  if (svg.length > SVG_FALLBACK_NODE_LIMIT) {
+    const error = `the render is ${Math.ceil(svg.length / 1024)} KiB, over the ${SVG_FALLBACK_NODE_LIMIT / 1024} KiB per-node fallback budget`;
+    state.warnings.push(`${path}: ${error}; skipped`);
+    return { svg: null, error };
+  }
+  if (state.svgBytes + svg.length > SVG_FALLBACK_TOTAL_LIMIT) {
+    const error =
+      `the render does not fit the remaining ${Math.ceil((SVG_FALLBACK_TOTAL_LIMIT - state.svgBytes) / 1024)} KiB of the ` +
+      `${SVG_FALLBACK_TOTAL_LIMIT / 1024} KiB total fallback budget`;
+    state.warnings.push(`${path}: ${error}; skipped`);
+    return { svg: null, error };
+  }
+  return { svg };
+}
+
+/**
+ * Placement and layout still belong to the surrounding tree; appearance does
+ * not. The SVG already bakes in rotation, opacity, blends, effects, fills and
+ * the text outlines, so copying those fields would apply them twice. Hidden and
+ * mask bits are container semantics, not paint, and are safe to carry.
+ */
+function svgFallbackSpec(node: any, key: string, svg: string): Json {
+  const spec: Json = { type: "SVG", name: node.name, key, svg };
+  if (node.visible === false) spec.visible = false;
+  if (node.locked === true) spec.locked = true;
+  if (protectedOf(node)) spec.protected = true;
+  if (node.isMask === true) spec.isMask = true;
+  const parentAuto = node.parent && node.parent.layoutMode && node.parent.layoutMode !== "NONE";
+  if (
+    node.parent && (!parentAuto || node.layoutPositioning === "ABSOLUTE") &&
+    Number.isFinite(Number(node.x)) && Number.isFinite(Number(node.y))
+  ) {
+    spec.position = { x: round(Number(node.x)), y: round(Number(node.y)) };
+  }
+  const layout = childLayout(node);
+  if (layout) spec.layout = layout;
+  if (node.constraints && !parentAuto) {
+    spec.constraints = { horizontal: node.constraints.horizontal, vertical: node.constraints.vertical };
+  }
+  return spec;
+}
+
 async function exportNode(
   ctx: any,
   node: any,
@@ -773,14 +890,31 @@ async function exportNode(
   }
   const path = pathOf(node);
   if (node.visible === false && !state.includeHidden) return null;
-  if (!EXPORTABLE.has(node.type) || (node.type === "FRAME" && kindOf(node) === "SVG")) {
-    const why =
-      node.type === "FRAME" && kindOf(node) === "SVG"
-        ? "the node was created from SVG; the Plugin API does not expose the source string"
-        : `type ${node.type} has no build-spec equivalent`;
-    state.unsupported.push({ path, type: node.type, why });
-    return null;
+
+  let direct = EXPORTABLE.has(node.type);
+  let fallbackWhy = "";
+  if (!direct) {
+    fallbackWhy = NO_SVG_FALLBACK.has(node.type)
+      ? `type ${node.type} is an export region, not a layer with a visual to rebuild`
+      : `type ${node.type} has no build-spec equivalent`;
+  } else if (node.type === "FRAME" && kindOf(node) === "SVG") {
+    direct = false;
+    fallbackWhy = "the node was created from SVG; the Plugin API does not expose the source string";
   }
+
+  let main: any = null;
+  if (direct && node.type === "INSTANCE") {
+    try {
+      main = typeof node.getMainComponentAsync === "function" ? await node.getMainComponentAsync() : node.mainComponent;
+    } catch {
+      main = null;
+    }
+    if (!main) {
+      direct = false;
+      fallbackWhy = "detached instance: its main component cannot be resolved";
+    }
+  }
+
   if (depth > state.maxDepth) {
     state.unsupported.push({ path, type: node.type, why: `deeper than maxDepth ${state.maxDepth}` });
     return null;
@@ -796,21 +930,29 @@ async function exportNode(
     state.warnings.push(`${path}: key "${key}" is already used; this node gets a derived key instead`);
     key = deriveKey(parentKey, String(node.name || node.type), index);
   }
-  state.keys.add(key);
+  if (!direct) {
+    if (state.svgFallback && !NO_SVG_FALLBACK.has(node.type)) {
+      const result = await svgFallbackFor(node, state, path);
+      if (result.svg) {
+        state.keys.add(key);
+        state.svgFallbacks++;
+        state.svgBytes += result.svg.length;
+        state.warnings.push(
+          `${path}: ${fallbackWhy}; exported as an inline SVG render (flattened into vectors: no original child layers, text is outlined, no component identity, overrides, style or variable links)`,
+        );
+        state.nodes++;
+        return svgFallbackSpec(node, key, result.svg);
+      }
+      if (result.error) fallbackWhy = `${fallbackWhy}; SVG fallback skipped: ${result.error}`;
+    }
+    state.unsupported.push({ path, type: node.type, why: fallbackWhy });
+    return null;
+  }
 
+  state.keys.add(key);
   const spec: Json = { type: node.type, name: node.name, key };
   const textSegments = node.type === "TEXT" ? await textSegmentsFor(node, state, path) : null;
   if (node.type === "INSTANCE") {
-    let main: any = null;
-    try {
-      main = typeof node.getMainComponentAsync === "function" ? await node.getMainComponentAsync() : node.mainComponent;
-    } catch {
-      main = null;
-    }
-    if (!main) {
-      state.unsupported.push({ path, type: node.type, why: "detached instance: its main component cannot be resolved" });
-      return null;
-    }
     if (main.key) spec.componentKey = main.key;
     else spec.componentId = main.id;
     const properties: Json = {};
@@ -1047,8 +1189,12 @@ export async function runExportSpec(ctx: any, params: Json = {}): Promise<Json> 
   if (!root || root.removed === true) {
     throw new Error("export_build_spec needs nodeId, or exactly one selected node");
   }
-  if (!EXPORTABLE.has(root.type) || (root.type === "FRAME" && kindOf(root) === "SVG")) {
-    throw new Error(`the root is a ${root.type}; a build spec can describe ${[...EXPORTABLE].join(", ")}`);
+  const directRoot = EXPORTABLE.has(root.type) && !(root.type === "FRAME" && kindOf(root) === "SVG");
+  if (!directRoot && params.svgFallback === false) {
+    throw new Error(
+      `the root is a ${root.type}; a build spec can describe ${[...EXPORTABLE].join(", ")}; ` +
+        `pass svgFallback (default true) to export its appearance as an inline SVG`,
+    );
   }
   if (root.visible === false && params.includeHidden === false) {
     throw new Error("the root is hidden and includeHidden is false; nothing would be exported");
@@ -1063,6 +1209,9 @@ export async function runExportSpec(ctx: any, params: Json = {}): Promise<Json> 
     maxNodes,
     maxDepth,
     includeHidden: params.includeHidden !== false,
+    svgFallback: params.svgFallback !== false,
+    svgFallbacks: 0,
+    svgBytes: 0,
     truncated: false,
     keys: new Set<string>(),
     warnings: [] as string[],
@@ -1072,7 +1221,19 @@ export async function runExportSpec(ctx: any, params: Json = {}): Promise<Json> 
   };
 
   const spec = await exportNode(ctx, root, "", 0, 0, state);
-  if (!spec) throw new Error(`the root could not be exported: ${state.unsupported[0]?.why || "unsupported node"}`);
+  if (!spec) {
+    const why = state.unsupported[0]?.why || "unsupported node";
+    const detail = state.warnings.length ? ` (${state.warnings[state.warnings.length - 1]})` : "";
+    throw new Error(`the root could not be exported: ${why}${detail}`);
+  }
+  const specBytes = JSON.stringify(spec).length;
+  const warnings = [...state.warnings];
+  if (state.truncated) warnings.push(`node cap ${maxNodes} reached; the spec is INCOMPLETE and should not be built as-is`);
+  if (specBytes > MAX_SPEC_BYTES) {
+    warnings.push(
+      `the spec is ${specBytes} bytes; figma_build and figma_patch refuse a spec over ${MAX_SPEC_BYTES} bytes — split the tree or reduce the SVG fallback content`,
+    );
+  }
   return {
     schema: SPEC_EXPORT_SCHEMA,
     source: {
@@ -1084,12 +1245,16 @@ export async function runExportSpec(ctx: any, params: Json = {}): Promise<Json> 
       path: pathOf(root),
     },
     spec,
-    counts: { nodes: state.nodes, scanned: state.scanned, skipped: state.unsupported.length },
+    counts: {
+      nodes: state.nodes,
+      scanned: state.scanned,
+      skipped: state.unsupported.length,
+      svgFallbacks: state.svgFallbacks,
+      svgBytes: state.svgBytes,
+      specBytes,
+    },
     unsupported: state.unsupported,
-    warnings: [
-      ...state.warnings,
-      ...(state.truncated ? [`node cap ${maxNodes} reached; the spec is INCOMPLETE and should not be built as-is`] : []),
-    ],
+    warnings,
     truncated: state.truncated,
     ms: { export: Date.now() - t0 },
   };

@@ -146,10 +146,20 @@ bindings, case, decoration, spacing and links survive a rebuild. Direct
 instance overrides become `overrides` entries with structural paths built from
 the main component's layer names, so a renamed layer still resolves; the
 instance interior itself is recreated from the main component, not carried in
-the spec. Read `unsupported` and `warnings` before building it: an SVG source,
-a detached instance, an override field the build cannot express or a paint the
-spec cannot express has no exact representation. `truncated: true` means the
-spec is incomplete and must not be built as-is.
+the spec. A node the build cannot express — an unsupported type, a frame created
+from SVG, a detached instance — is exported as its inline SVG render when
+`svgFallback` is on (the default). The rebuild is a flattened frame: appearance
+survives, but the original child layers, component identity, overrides and
+style/variable links do not and text becomes outlines; every fallback is named
+in `warnings` and counted in `counts.svgFallbacks`. Slices are never flattened; `svgFallback: false` lists
+those nodes as unsupported instead. A fallback that cannot be rendered or does
+not fit the 128 KiB per-node / 192 KiB total budget is listed as unsupported
+with the reason. A built SVG leaf is re-recognised as `SVG` on the next build,
+so re-sending it updates in place; a changed `svg` replaces its interior while
+keeping the frame's id and key, and an unchanged source is not touched. Read `unsupported` and `warnings` before building it: an
+override field the build cannot express, a mixed value or a paint the spec
+cannot express has no exact representation. `truncated: true` means the spec is
+incomplete and must not be built as-is.
 
 ## Finding things, and checking the result
 

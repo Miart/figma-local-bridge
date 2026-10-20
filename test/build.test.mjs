@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  BUILD_DATA, KEY_DATA, PROTECTED_DATA,
+  BUILD_DATA, KEY_DATA, KIND_DATA, PROTECTED_DATA,
   keyFor, normalizeTree, parseColor, runBuild, runPatch,
 } from "../plugin/ui-build.mjs";
 import { runBatch } from "../plugin/batch.mjs";
@@ -171,7 +171,17 @@ function makeCtx({ textStyles = [], paintStyles = [], localVariables = [] } = {}
     createLine() { const n = defaults("LINE"); byId.set(n.id, n); return n; },
     createText() { const n = defaults("TEXT"); byId.set(n.id, n); return n; },
     createComponent() { const n = defaults("COMPONENT"); byId.set(n.id, n); return n; },
-    createNodeFromSvg() { const n = defaults("FRAME"); n.children = []; byId.set(n.id, n); return n; },
+    createNodeFromSvg(svg) {
+      const n = defaults("FRAME");
+      const raw = String(svg);
+      const vector = defaults("VECTOR");
+      vector.name = raw.includes("v3") ? "Third vector" : raw.includes("v2") ? "Second vector" : "First vector";
+      n.appendChild(vector);
+      n.svgSource = raw;
+      byId.set(n.id, n);
+      byId.set(vector.id, vector);
+      return n;
+    },
     metrics: {
       get undos() { return undos; },
       get triggers() { return triggers; },
@@ -306,6 +316,76 @@ test("dry run plans without writing, then apply creates one keyed tree", async (
   assert.equal(score.characters, "12,480");
   assert.equal(score.fontName.style, "Bold");
   assert.ok(ctx.metrics.fonts.some((f) => f.family === "Inter" && f.style === "Bold"));
+});
+
+test("an SVG spec creates a frame, and a repeat build or patch updates it in place", async () => {
+  const ctx = makeCtx();
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><!-- v1 --><circle cx="12" cy="12" r="12"/></svg>';
+  const spec = {
+    buildId: "icons",
+    root: {
+      type: "SVG", name: "Logo", key: "icons/logo", svg,
+      size: { width: 24, height: 24 },
+      position: { x: 40, y: 60 },
+    },
+  };
+  const dry = await runBuild(ctx, { ...spec, dryRun: true });
+  assert.equal(dry.status, "dry_run");
+  assert.deepEqual(dry.counts.create, 1);
+
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.verification.ok, true);
+  const root = ctx.currentPage.children[0];
+  assert.equal(root.type, "FRAME");
+  assert.equal(root.svgSource, svg);
+  assert.equal(root.getPluginData(KIND_DATA), "SVG");
+  assert.equal(root.getPluginData(BUILD_DATA), "icons");
+  assert.equal(root.getPluginData(KEY_DATA), "icons/logo");
+  assert.equal(root.name, "Logo");
+  assert.equal(root.x, 40);
+  assert.equal(root.y, 60);
+  assert.equal(root.width, 24);
+  assert.equal(root.height, 24);
+  assert.equal(root.children[0].name, "First vector");
+
+  // The second build is an update, not a type change: an SVG-created frame is
+  // still an SVG leaf to the planner even though Figma calls it a FRAME.
+  const again = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(again.status, "applied");
+  assert.equal(again.verification.ok, true);
+  assert.deepEqual(again.created, []);
+  assert.ok(again.updated.includes("icons/logo"));
+  assert.equal(ctx.currentPage.children.length, 1);
+  assert.equal(ctx.currentPage.children[0].id, root.id);
+  assert.equal(root.children[0].name, "First vector");
+
+  // A changed source replaces the interior and keeps the id, key and buildId.
+  const svg2 = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><!-- v2 --><rect width="24" height="24"/></svg>';
+  const changed = await runBuild(ctx, {
+    ...spec,
+    root: { ...spec.root, svg: svg2 },
+    dryRun: false,
+  });
+  assert.equal(changed.status, "applied");
+  assert.equal(changed.verification.ok, true);
+  assert.equal(ctx.currentPage.children[0].id, root.id);
+  assert.equal(root.getPluginData(KEY_DATA), "icons/logo");
+  assert.equal(root.height, 24);
+  assert.equal(root.children[0].name, "Second vector");
+
+  // The same source can also arrive through figma_patch, whose root type
+  // defaults to the stored kind (SVG), not Figma's FRAME.
+  const svg3 = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><!-- v3 --><circle cx="12" cy="12" r="6"/></svg>';
+  const patched = await runPatch(ctx, {
+    buildId: "icons",
+    dryRun: false,
+    patch: { type: "SVG", key: "icons/logo", svg: svg3 },
+  });
+  assert.equal(patched.status, "applied");
+  assert.equal(patched.verification.ok, true);
+  assert.equal(ctx.currentPage.children[0].id, root.id);
+  assert.equal(root.children[0].name, "Third vector");
 });
 
 test("build applies text runs without flattening the base style", async () => {

@@ -254,6 +254,7 @@ export function registerBuildTools(server: McpServer, client: FigmaClient, caps:
     "figma_build",
     "Create or update a declarative, keyed UI tree in ONE transaction. The spec is validated and resolved (fonts, styles, local variables, components) before anything is written; every node gets a stable key in pluginData, so re-sending the same buildId updates instead of duplicating. " +
       "dryRun defaults to TRUE and returns a real plan plus a scope fingerprint. Pass dryRun:false with that fingerprint to apply. An existing root with the same buildId is patched in place; prune:true makes the tree exact by deleting keyed children the spec no longer contains. " +
+      "An SVG leaf is created as a frame; re-sending it updates that frame in place, and a changed svg source replaces its interior while keeping the id and key. " +
       "Refuses type changes, ambiguous component names, unknown keys, position inside auto-layout, component swaps, and unsupported node types.",
     {
       buildId: z
@@ -299,7 +300,7 @@ export function registerBuildTools(server: McpServer, client: FigmaClient, caps:
   server.tool(
     "figma_patch",
     "Update an existing keyed tree by stable key, in ONE transaction. A dry run is a real diff: it reports create/update/delete counts and a scope fingerprint without writing. " +
-      "Missing keys are refused unless allowCreate:true; a key that lives under a different parent is refused rather than duplicated; prune:true deletes keyed children omitted from the patch at each patched level. Text updates load their fonts before writing, and any failure rolls the whole patch back. " +
+      "Missing keys are refused unless allowCreate:true; a key that lives under a different parent is refused rather than duplicated; prune:true deletes keyed children omitted from the patch at each patched level. An SVG leaf keeps its frame id and key while a changed svg source replaces its interior. Text updates load their fonts before writing, and any failure rolls the whole patch back. " +
       "Target with rootNodeId, buildId or rootKey.",
     {
       rootNodeId: figmaNodeId("rootNodeId").optional().describe("The built root, by id"),

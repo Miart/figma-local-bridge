@@ -35,6 +35,9 @@ export const KEY_DATA = "figma-local-bridge.key";
 export const BUILD_DATA = "figma-local-bridge.buildId";
 export const PROTECTED_DATA = "figma-local-bridge.protected";
 export const KIND_DATA = "figma-local-bridge.kind";
+// Stored on a frame created from SVG so a repeat build can tell whether the
+// source actually changed without keeping the whole SVG in plugin data.
+export const SVG_HASH_DATA = "figma-local-bridge.svgHash";
 
 export const MAX_NODES = 500;
 export const MAX_DEPTH = 32;
@@ -1149,9 +1152,9 @@ async function planBuild(ctx: any, p: Json): Promise<Plan> {
     plan.blocking.push(`mode is "create" but buildId "${plan.buildId}" already exists: ${nodeLabel(existingRoot)}`);
   }
   if (existingRoot) {
-    if (existingRoot.type !== normalized.root.type) {
+    if (actualKind(existingRoot) !== normalized.root.type) {
       plan.blocking.push(
-        `${plan.root.key}: existing node is ${existingRoot.type}, spec says ${normalized.root.type}; ` +
+        `${plan.root.key}: existing node is ${actualKind(existingRoot)}, spec says ${normalized.root.type}; ` +
           `changing a node's type would destroy its id and overrides, so it is refused`,
       );
     }
@@ -1173,8 +1176,8 @@ async function planBuild(ctx: any, p: Json): Promise<Plan> {
     }
     if (hits.length === 1) {
       const hit = hits[0];
-      if (hit.type !== n.type) {
-        plan.blocking.push(`${n.key}: existing node is ${hit.type}, spec says ${n.type}; type changes are refused`);
+      if (actualKind(hit) !== n.type) {
+        plan.blocking.push(`${n.key}: existing node is ${actualKind(hit)}, spec says ${n.type}; type changes are refused`);
       }
       if (parentNode && hit.parent && hit.parent.id !== parentNode.id) {
         plan.blocking.push(
@@ -1288,17 +1291,17 @@ async function planPatch(ctx: any, p: Json): Promise<Plan> {
   plan.buildId = buildId;
   plan.root.nodeId = root.id;
   plan.root.key = root.getPluginData(KEY_DATA) || buildId || "";
-  plan.root.type = root.type;
+  plan.root.type = actualKind(root);
   plan.root.name = root.name;
   plan.root.action = "update";
 
   if (!p.patch || typeof p.patch !== "object") throw new Error("patch must be an object");
   const normalized = normalizeTree(
-    { ...p.patch, type: p.patch.type || root.type, key: p.patch.key || plan.root.key || "root" },
+    { ...p.patch, type: p.patch.type || actualKind(root), key: p.patch.key || plan.root.key || "root" },
     { buildId, rootKey: plan.root.key },
   );
-  if (normalized.root.type !== root.type) {
-    throw new Error(`patch root type is ${normalized.root.type}, but ${root.id} is ${root.type}; type changes are refused`);
+  if (normalized.root.type !== actualKind(root)) {
+    throw new Error(`patch root type is ${normalized.root.type}, but ${root.id} is ${actualKind(root)}; type changes are refused`);
   }
   if (normalized.root.key !== plan.root.key) {
     plan.blocking.push(`patch root key is "${normalized.root.key}", but the target root key is "${plan.root.key}"`);
@@ -1330,8 +1333,8 @@ async function planPatch(ctx: any, p: Json): Promise<Plan> {
         }
         plan.planned.create.push(c.key);
       } else {
-        if (hit.type !== c.type) {
-          plan.blocking.push(`${c.key}: existing node is ${hit.type}, patch says ${c.type}; type changes are refused`);
+        if (actualKind(hit) !== c.type) {
+          plan.blocking.push(`${c.key}: existing node is ${actualKind(hit)}, patch says ${c.type}; type changes are refused`);
         }
         if (hit.parent && hit.parent.id !== parentNode.id) {
           plan.blocking.push(
@@ -1984,6 +1987,41 @@ async function createNodeFor(ctx: any, n: NormalizedNode, component: any): Promi
   }
 }
 
+/** A stable fingerprint of an SVG source; a hash is enough to detect a change. */
+function svgHash(svg: string): string {
+  let a = 0x811c9dc5;
+  let b = 0x9e3779b9 ^ svg.length;
+  for (let i = 0; i < svg.length; i++) {
+    const c = svg.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193) >>> 0;
+    b = Math.imul(b ^ c, 0x85ebca6b) >>> 0;
+  }
+  return a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0");
+}
+
+/**
+ * Replace the vectors inside an SVG-created frame without changing its id or
+ * key. `createNodeFromSvg` makes a temporary frame; its children are moved into
+ * the existing frame and the temporary frame is removed. If anything fails the
+ * temporary frame is still removed, and the build's transaction rolls back the
+ * rest.
+ */
+function replaceSvgContents(ctx: any, node: any, svg: string): void {
+  const temp = ctx.createNodeFromSvg(svg);
+  if (!temp) throw new Error("createNodeFromSvg returned no node");
+  try {
+    for (const child of [...(node.children || [])]) child.remove();
+    for (const child of [...(temp.children || [])]) node.appendChild(child);
+    if ("clipsContent" in node && "clipsContent" in temp) node.clipsContent = temp.clipsContent;
+    if ("resize" in node && Number(temp.width) > 0 && Number(temp.height) > 0) {
+      node.resize(Number(temp.width), Number(temp.height));
+    }
+    node.setPluginData(SVG_HASH_DATA, svgHash(svg));
+  } finally {
+    try { temp.remove(); } catch { /* already gone */ }
+  }
+}
+
 async function applyNode(
   ctx: any,
   node: any,
@@ -1997,11 +2035,21 @@ async function applyNode(
     // and makes the first failed build harder to read.
     node.name = n.name;
     assignKey(node, n.key);
-    if (n.type === "SVG") node.setPluginData(KIND_DATA, "SVG");
+    if (n.type === "SVG") {
+      node.setPluginData(KIND_DATA, "SVG");
+      node.setPluginData(SVG_HASH_DATA, svgHash(String(spec.svg)));
+    }
     if (spec.protected === true) node.setPluginData(PROTECTED_DATA, "1");
   } else {
     if (spec.name !== undefined) node.name = String(spec.name);
     if (spec.protected === true) node.setPluginData(PROTECTED_DATA, "1");
+    if (n.type === "SVG") {
+      const source = typeof spec.svg === "string" ? spec.svg : "";
+      if (!source) throw new Error(`${n.key}: SVG has no source string`);
+      let stored = "";
+      try { stored = node.getPluginData(SVG_HASH_DATA); } catch { stored = ""; }
+      if (stored !== svgHash(source)) replaceSvgContents(ctx, node, source);
+    }
   }
 
   applyCommonProps(node, spec, res, ctx);

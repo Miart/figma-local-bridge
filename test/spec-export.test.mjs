@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { runExportSpec } from "../plugin/spec-export.mjs";
-import { BUILD_DATA, KEY_DATA, normalizeTree } from "../plugin/ui-build.mjs";
+import { BUILD_DATA, KEY_DATA, KIND_DATA as KIND_DATA_FOR_TEST, normalizeTree } from "../plugin/ui-build.mjs";
 
 let seq = 0;
 const ALL = new Map();
@@ -113,6 +113,7 @@ function node(type, opts = {}) {
     p.overrides = opts.overrides || [];
     p.getMainComponentAsync = async () => p.main;
   }
+  if (opts.exportAsync) p.exportAsync = opts.exportAsync;
   for (const child of p.children) child.parent = p;
   ALL.set(p.id, p);
   return p;
@@ -556,4 +557,96 @@ test("no node and no single selection is a refusal", async () => {
     () => runExportSpec(makeCtx(), {}),
     /needs nodeId, or exactly one selected node/,
   );
+});
+
+test("an unsupported layer exports as the SVG render the build can rebuild", async () => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" rx="4"/></svg>';
+  const settings = [];
+  const badge = node("GROUP", {
+    name: "Badge", width: 40, height: 20, x: 12, y: 8,
+    exportAsync: async (s) => { settings.push(s); return svg; },
+  });
+  const frame = node("FRAME", { name: "HUD", width: 200, height: 100, children: [badge] });
+  const report = await runExportSpec(makeCtx(), { nodeId: frame.id });
+  const fallback = report.spec.children[0];
+  assert.equal(fallback.type, "SVG");
+  assert.equal(fallback.name, "Badge");
+  assert.equal(fallback.svg, svg);
+  assert.deepEqual(fallback.position, { x: 12, y: 8 });
+  assert.equal(report.counts.svgFallbacks, 1);
+  assert.equal(report.counts.svgBytes, svg.length);
+  assert.equal(report.unsupported.length, 0);
+  assert.ok(report.warnings.some((w) => /no build-spec equivalent/.test(w) && /flattened/.test(w)));
+  assert.equal(settings.length, 1);
+  assert.equal(settings[0].format, "SVG_STRING");
+  assert.equal(settings[0].svgOutlineText, true);
+
+  // The fallback is not just JSON that looks plausible: the build normalizer
+  // accepts it as a leaf and keeps its key.
+  const normalized = normalizeTree(report.spec);
+  assert.equal(normalized.nodes, 2);
+  assert.deepEqual(normalized.keys, [report.spec.key, fallback.key]);
+});
+
+test("an SVG-created frame and a detached instance fall back instead of being dropped", async () => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="12"/></svg>';
+  const logo = node("FRAME", {
+    name: "Logo", width: 24, height: 24,
+    plugin: { [KIND_DATA_FOR_TEST]: "SVG" },
+    exportAsync: async () => svg,
+  });
+  const rootReport = await runExportSpec(makeCtx(), { nodeId: logo.id });
+  assert.equal(rootReport.spec.type, "SVG");
+  assert.equal(rootReport.spec.svg, svg);
+  assert.equal(rootReport.source.type, "FRAME");
+  assert.ok(rootReport.warnings.some((w) => /created from SVG/.test(w)));
+  await assert.rejects(
+    () => runExportSpec(makeCtx(), { nodeId: logo.id, svgFallback: false }),
+    /pass svgFallback/,
+  );
+
+  const lost = node("INSTANCE", {
+    name: "Lost", main: null, width: 30, height: 30,
+    exportAsync: async () => '<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30"></svg>',
+  });
+  const frame = node("FRAME", { name: "Card", children: [lost] });
+  const report = await runExportSpec(makeCtx(), { nodeId: frame.id });
+  assert.equal(report.spec.children[0].type, "SVG");
+  assert.equal(report.spec.children[0].componentKey, undefined);
+  assert.equal(report.spec.children[0].properties, undefined);
+  assert.ok(report.warnings.some((w) => /detached instance/.test(w) && /flattened/.test(w)));
+
+  const off = await runExportSpec(makeCtx(), { nodeId: frame.id, svgFallback: false });
+  assert.equal(off.spec.children, undefined);
+  assert.match(off.unsupported[0].why, /detached instance/);
+});
+
+test("the SVG fallback names a missing exporter and its size budgets", async () => {
+  const missing = node("GROUP", { name: "No exporter" });
+  const missingFrame = node("FRAME", { name: "Missing", children: [missing] });
+  const missingReport = await runExportSpec(makeCtx(), { nodeId: missingFrame.id });
+  assert.equal(missingReport.spec.children, undefined);
+  assert.equal(missingReport.unsupported[0].type, "GROUP");
+  assert.match(missingReport.unsupported[0].why, /no exportAsync/);
+  assert.ok(missingReport.warnings.some((w) => /no exportAsync in this session/.test(w)));
+
+  const huge = '<svg xmlns="http://www.w3.org/2000/svg">' + "x".repeat(129 * 1024) + "</svg>";
+  const oversized = node("GROUP", { name: "Huge", exportAsync: async () => huge });
+  const hugeFrame = node("FRAME", { name: "Huge frame", children: [oversized] });
+  const hugeReport = await runExportSpec(makeCtx(), { nodeId: hugeFrame.id });
+  assert.equal(hugeReport.spec.children, undefined);
+  assert.equal(hugeReport.unsupported[0].type, "GROUP");
+  assert.match(hugeReport.unsupported[0].why, /per-node fallback budget/);
+  assert.ok(hugeReport.warnings.some((w) => /per-node fallback budget/.test(w)));
+
+  const nearly = '<svg xmlns="http://www.w3.org/2000/svg">' + "x".repeat(100 * 1024) + "</svg>";
+  const first = node("GROUP", { name: "First", exportAsync: async () => nearly });
+  const second = node("GROUP", { name: "Second", exportAsync: async () => nearly });
+  const frame = node("FRAME", { name: "Budget", children: [first, second] });
+  const budget = await runExportSpec(makeCtx(), { nodeId: frame.id });
+  assert.equal(budget.counts.svgFallbacks, 1);
+  assert.equal(budget.spec.children.length, 1);
+  assert.match(budget.unsupported[0].why, /no build-spec equivalent/);
+  assert.match(budget.unsupported[0].why, /total fallback budget/);
+  assert.ok(budget.warnings.some((w) => /total fallback budget/.test(w)));
 });

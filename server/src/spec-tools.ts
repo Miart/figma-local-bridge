@@ -22,13 +22,15 @@ export function registerSpecTools(server: McpServer, client: FigmaClient) {
   server.tool(
     "figma_export_build_spec",
     "Turn a live subtree into a figma_build spec. Keys that are already stored are kept; nodes without one get the same derived key the build engine would choose. Fills, strokes and effects use styles or variables when the node is linked to them, and plain values otherwise; rotation, per-corner radii, stroke shape, layout grids, LINE length and text formatting are carried. " +
-      "The reply is deliberately lossy and says where: unsupported node types, SVG source that the Plugin API cannot read, mixed fonts and unrepresentable paints are listed under unsupported/warnings, and direct instance overrides travel as paths plus the fields a rebuild can express while unsupported override fields are named. " +
+      "A node the build cannot express — an unsupported type, a frame created from SVG, a detached instance — is exported as an inline SVG render when svgFallback is on (the default): its appearance survives, but the rebuild is a flattened frame with no original child layers, component identity, overrides, style or variable links and with text outlined, and every fallback is named in warnings. Slices are never flattened. " +
+      "The reply is deliberately lossy and says where: mixed fonts and unrepresentable paints are listed under unsupported/warnings, and direct instance overrides travel as paths plus the fields a rebuild can express while unsupported override fields are named. " +
       "Read-only; never modifies the file. A truncated export is marked truncated and must not be built as-is.",
     {
       nodeId: figmaNodeId().optional().describe("Subtree root; defaults to the single selected node"),
       maxNodes: z.number().int().min(1).max(2000).default(500).describe("Stop after this many nodes; sets truncated"),
       maxDepth: z.number().int().min(0).max(64).default(32).describe("Stop below this depth; skipped nodes are reported"),
       includeHidden: z.boolean().default(true).describe("Include hidden layers in the spec"),
+      svgFallback: z.boolean().default(true).describe("Export a node with no build-spec equivalent as its inline SVG render; the rebuild is flattened"),
       fileKey: fileKeyParam,
     },
     async (a) =>
