@@ -415,13 +415,17 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   nested operations; fewer than two rebuildable children is named and skipped.
   A `SLICE` comes back with its geometry and `exportSettings`. A `COMPONENT_SET`
   is rebuilt from its variant `COMPONENT`s with `figma.combineAsVariants`;
-  non-variant component properties are added back by type and default value, and
-  layer-level `componentPropertyReferences` are remapped to the new names.
-  Variant options come from the variant names, but component and property ids,
-  component keys, existing instances, property descriptions/preferred values/slot
-  settings and definition-level variable bindings do not come back. The `#id`
-  suffix is assigned by Figma, so verification compares definitions and layer
-  references by display name.
+  non-variant component properties are added back by type and default value,
+  their `SLOT` description/preferred values/slot settings and `INSTANCE_SWAP`
+  preferred values are restored, and a definition-level `defaultValue` variable
+  binding on `BOOLEAN`/`TEXT`/`INSTANCE_SWAP` is re-linked when the variable
+  exists. Layer-level `componentPropertyReferences` are remapped to the new
+  names. Variant options come from the variant names, but component and property
+  ids, component keys and existing instances do not come back. The `#id` suffix
+  is assigned by Figma, so verification compares definitions and layer
+  references by display name. A metadata edit or binding the file refuses is
+  named in `propertiesFailed` / `bindingsMissing`; the property and its literal
+  default stay.
 - Style ids, node-level variable bindings and explicit variable modes travel in
   `meta`; per-run text bindings and style ids travel inside the runs. Restore
   re-links a style, variable, collection or mode when it still exists and

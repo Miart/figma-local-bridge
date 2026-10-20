@@ -42,7 +42,7 @@ export const LIMITATIONS: readonly string[] = [
   "text runs are rebuilt (font, size, fills, text/fill style links, variable bindings, case, decoration, line height, letter spacing and hyperlink)",
   "style ids are re-linked when the style still exists; node-level and run-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
-  "a restored COMPONENT_SET is a new set: its variant components are rebuilt, its non-variant properties are added back by type and default value, and layer references are remapped to the new names, while variant options come from the component names, and component/property ids, component keys, existing instances, property descriptions/preferred values/slot settings and definition-level variable bindings do not come back",
+  "a restored COMPONENT_SET is a new set: its variant components are rebuilt, its non-variant properties are added back by type and default value, layer references are remapped to the new names, and property descriptions, preferred values, slot settings and definition-level default-value variable bindings are restored when their property type and a live variable allow it; variant options come from the component names, while component/property ids, component keys and existing instances do not come back",
   "a restored root's own componentPropertyReferences point at its parent component, which is outside the checkpoint, so they are not replayed",
 ];
 
@@ -101,9 +101,9 @@ export interface RestoreReport {
   fontsUnavailable: string[];
   /** Paints restored by value because their variable bindings would not apply. */
   bindingsDropped: string[];
-  /** Node-level variable bindings re-applied because the variable still exists. */
+  /** Variable bindings re-applied because the variable still exists. */
   bindingsRestored: Array<{ path: string; field: string; id: string; name?: string }>;
-  /** Node-level variable bindings the file could not resolve; the value is still restored. */
+  /** Variable bindings the file could not resolve; the value is still restored. */
   bindingsMissing: Array<{ path: string; field: string; id: string; why: string }>;
   /** Direct per-layer overrides re-applied inside a rebuilt INSTANCE. */
   overridesRestored: Array<{ path: string; fields: number }>;
@@ -783,10 +783,10 @@ export async function restoreSubtree(dump: DumpNode, ctx: RestoreContext, opts: 
     await applyStyleLinks(target, dump.meta?.styleIds, ctx, report, "$", dump.state);
     await applyVariableBindings(target, dump.meta?.variableBindings, dump.state, ctx, report, "$");
     if (dump.type === "COMPONENT") {
-      const propertyMap = applyComponentProperties(target, dump.state, report, "$");
+      const propertyMap = await applyComponentProperties(target, dump.state, ctx, report, "$");
       if (propertyMap.size) applyPropertyReferences(target, dump, propertyMap, report, "$");
     } else if (dump.type === "COMPONENT_SET") {
-      const propertyMap = applyComponentProperties(target, dump.state, report, "$");
+      const propertyMap = await applyComponentProperties(target, dump.state, ctx, report, "$");
       for (const b of restored) {
         applyNodeReferences(b.node, b.dump, propertyMap, report, b.path);
         applyPropertyReferences(b.node, b.dump, propertyMap, report, b.path);
@@ -819,7 +819,7 @@ async function buildNode(d: DumpNode, parent: any, ctx: RestoreContext, report: 
     await applyStyleLinks(node, d.meta?.styleIds, ctx, report, path, d.state);
     await applyVariableBindings(node, d.meta?.variableBindings, d.state, ctx, report, path);
     if (d.type === "COMPONENT") {
-      const propertyMap = applyComponentProperties(node, d.state, report, path);
+      const propertyMap = await applyComponentProperties(node, d.state, ctx, report, path);
       if (propertyMap.size) applyPropertyReferences(node, d, propertyMap, report, path);
     }
     if (d.type === "INSTANCE") {
@@ -968,7 +968,7 @@ async function buildComponentSet(d: DumpNode, parent: any, ctx: RestoreContext, 
     await applyFinal(set, d.state, ctx, report, path, false);
     await applyStyleLinks(set, d.meta?.styleIds, ctx, report, path, d.state);
     await applyVariableBindings(set, d.meta?.variableBindings, d.state, ctx, report, path);
-    const propertyMap = applyComponentProperties(set, d.state, report, path);
+    const propertyMap = await applyComponentProperties(set, d.state, ctx, report, path);
     // Walk the variants we built, not set.children: Figma may reorder them by
     // position when combining, and a reference must not land on the wrong one.
     for (const b of built) {
@@ -1182,7 +1182,95 @@ async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: R
  * full property name to the rebuilt one, which is what a layer-level reference
  * needs: addComponentProperty assigns a new suffix.
  */
-function applyComponentProperties(node: any, state: Dict, report: RestoreReport, path: string): Map<string, string> {
+/** Metadata that editComponentProperty supports for this property type. */
+function propertyMetadataUpdate(type: string, def: any): Dict | null {
+  const update: Dict = {};
+  if ((type === "INSTANCE_SWAP" || type === "SLOT") && Array.isArray((def as any).preferredValues)) {
+    update.preferredValues = copy((def as any).preferredValues);
+  }
+  if (type === "SLOT") {
+    if (typeof (def as any).description === "string") update.description = (def as any).description;
+    if (isObj((def as any).slotSettings)) update.slotSettings = copy((def as any).slotSettings);
+  }
+  return Object.keys(update).length ? update : null;
+}
+
+function applyPropertyMetadata(
+  node: any,
+  key: string,
+  base: string,
+  type: string,
+  def: any,
+  report: RestoreReport,
+  path: string,
+): string {
+  const update = propertyMetadataUpdate(type, def);
+  if (!update) return key;
+  if (typeof node.editComponentProperty !== "function") {
+    report.propertiesFailed.push({ path, name: base, why: "this node cannot edit component property metadata" });
+    return key;
+  }
+  try {
+    const full = node.editComponentProperty(key, update);
+    return typeof full === "string" && full ? full : key;
+  } catch (e) {
+    report.propertiesFailed.push({ path, name: base, why: msg(e) });
+    return key;
+  }
+}
+
+async function applyPropertyDefaultBinding(
+  node: any,
+  key: string,
+  base: string,
+  type: string,
+  def: any,
+  ctx: RestoreContext,
+  report: RestoreReport,
+  path: string,
+): Promise<string> {
+  const alias = (def as any)?.boundVariables?.defaultValue;
+  if (alias === undefined) return key;
+  const field = `componentProperty.${base}.defaultValue`;
+  if (type === "VARIANT" || type === "SLOT") {
+    report.bindingsMissing.push({
+      path,
+      field,
+      id: String((alias as any)?.id ?? ""),
+      why: `${type} component property default values cannot be variable-bound`,
+    });
+    return key;
+  }
+  if (!isAlias(alias)) {
+    report.bindingsMissing.push({ path, field, id: String((alias as any)?.id ?? ""), why: "the recorded binding is not a variable alias" });
+    return key;
+  }
+  const resolved = await resolveVariable(alias, ctx);
+  if (!resolved.variable) {
+    report.bindingsMissing.push({ path, field, id: alias.id, why: resolved.why ?? "unresolved" });
+    return key;
+  }
+  if (typeof node.editComponentProperty !== "function") {
+    report.bindingsMissing.push({ path, field, id: alias.id, why: "this node cannot edit component property defaults" });
+    return key;
+  }
+  try {
+    const full = node.editComponentProperty(key, { defaultValue: { type: "VARIABLE_ALIAS", id: resolved.variable.id } });
+    report.bindingsRestored.push({ path, field, id: resolved.variable.id, name: resolved.variable.name });
+    return typeof full === "string" && full ? full : key;
+  } catch (e) {
+    report.bindingsMissing.push({ path, field, id: alias.id, why: msg(e) });
+    return key;
+  }
+}
+
+async function applyComponentProperties(
+  node: any,
+  state: Dict,
+  ctx: RestoreContext,
+  report: RestoreReport,
+  path: string,
+): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   const defs = state?.componentPropertyDefinitions;
   if (!defs || !isObj(defs) || !("componentPropertyDefinitions" in node) || typeof node.addComponentProperty !== "function") return map;
@@ -1209,21 +1297,29 @@ function applyComponentProperties(node: any, state: Dict, report: RestoreReport,
     const base = key.split("#")[0];
     const sig = signature(def);
     const match = initial.find((x) => !x.used && x.base === base && x.sig === sig);
+    let full: string;
     if (match) {
       match.used = true;
-      map.set(key, match.key);
-      continue;
+      full = match.key;
+    } else {
+      if (type === "VARIANT") {
+        report.notes.push(`${path}: variant property "${base}" was not inferred from the rebuilt variant names`);
+        continue;
+      }
+      try {
+        const added = node.addComponentProperty(base, type, (def as any).defaultValue);
+        if (typeof added !== "string" || !added) continue;
+        full = added;
+      } catch (e) {
+        report.notes.push(`${path}: component property "${base}" not restored: ${msg(e)}`);
+        continue;
+      }
     }
-    if (type === "VARIANT") {
-      report.notes.push(`${path}: variant property "${base}" was not inferred from the rebuilt variant names`);
-      continue;
-    }
-    try {
-      const full = node.addComponentProperty(base, type, (def as any).defaultValue);
-      if (typeof full === "string" && full) map.set(key, full);
-    } catch (e) {
-      report.notes.push(`${path}: component property "${base}" not restored: ${msg(e)}`);
-    }
+    map.set(key, full);
+    const afterMetadata = applyPropertyMetadata(node, full, base, type, def, report, path);
+    if (afterMetadata !== full) map.set(key, afterMetadata);
+    const afterBinding = await applyPropertyDefaultBinding(node, afterMetadata, base, type, def, ctx, report, path);
+    if (afterBinding !== afterMetadata) map.set(key, afterBinding);
   }
   return map;
 }

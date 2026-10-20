@@ -130,11 +130,29 @@ function node(type, props = {}) {
     parent: null,
     resizes: 0,
     resize(w, h) { this.resizes++; this.width = w; this.height = h; },
-    addComponentProperty(name, type, defaultValue) {
+    addComponentProperty(name, type, defaultValue, options) {
       if (!this.componentPropertyDefinitions) this.componentPropertyDefinitions = {};
       this._propertySeq = (this._propertySeq ?? 0) + 1;
       const key = `${name}#${this._propertySeq}:1`;
-      this.componentPropertyDefinitions[key] = { type, defaultValue };
+      this.componentPropertyDefinitions[key] = { type, defaultValue, ...(options ? JSON.parse(JSON.stringify(options)) : {}) };
+      return key;
+    },
+    editComponentProperty(name, update) {
+      const defs = this.componentPropertyDefinitions ?? {};
+      const key = name in defs ? name : Object.keys(defs).find((k) => k.split("#")[0] === name);
+      if (!key) throw new Error(`unknown component property ${name}`);
+      const def = defs[key];
+      if (update.name !== undefined) def.name = update.name;
+      if (update.defaultValue !== undefined) {
+        if (update.defaultValue && update.defaultValue.type === "VARIABLE_ALIAS") {
+          def.boundVariables = { ...(def.boundVariables ?? {}), defaultValue: update.defaultValue };
+        } else {
+          def.defaultValue = update.defaultValue;
+        }
+      }
+      if (update.preferredValues !== undefined) def.preferredValues = update.preferredValues;
+      if (update.description !== undefined) def.description = update.description;
+      if (update.slotSettings !== undefined) def.slotSettings = update.slotSettings;
       return key;
     },
     setBoundVariable(field, variable) {
@@ -808,6 +826,58 @@ const errors = async (fn) => {
   check("restore: layer property references follow the rebuilt property name",
     !!labelKey && set.children[0].componentPropertyReferences.visible === labelKey &&
     set.children[0].children[0].componentPropertyReferences.characters === labelKey);
+}
+
+{
+  const figma = fakeFigma([], { variables: [{ id: "V:label", name: "labels/play" }] });
+  const target = node("FRAME");
+  const defs = {
+    "Label#1:2": {
+      type: "TEXT", defaultValue: "Play",
+      boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "V:label" } },
+    },
+    "Icon#2:3": {
+      type: "SLOT", defaultValue: "",
+      preferredValues: [{ type: "COMPONENT", key: "C:icon" }],
+      description: "Choose an icon",
+      slotSettings: { minChildren: 1, maxChildren: 2, stretchChildOnInsert: true },
+    },
+    "Swap#3:4": {
+      type: "INSTANCE_SWAP", defaultValue: "C:icon",
+      preferredValues: [{ type: "COMPONENT", key: "C:icon" }],
+    },
+    "Broken#4:5": {
+      type: "TEXT", defaultValue: "Fallback",
+      boundVariables: { defaultValue: { type: "VARIABLE_ALIAS", id: "V:missing" } },
+    },
+  };
+  const src = node("FRAME", { children: [node("COMPONENT_SET", {
+    name: "Button", componentPropertyDefinitions: defs,
+    children: [
+      node("COMPONENT", { name: "Size=Small" }),
+      node("COMPONENT", { name: "Size=Large" }),
+    ],
+  })] });
+  const { root } = await dumpSubtree(src);
+  const report = await restoreSubtree(root, ctxFor(figma, target), {});
+  const set = target.children[0];
+  const def = (base) => Object.entries(set.componentPropertyDefinitions).find(([k]) => k.split("#")[0] === base)?.[1];
+  const label = def("Label");
+  const icon = def("Icon");
+  const swap = def("Swap");
+  const broken = def("Broken");
+  check("restore: component property metadata is applied",
+    icon?.description === "Choose an icon" &&
+    icon?.preferredValues?.[0]?.key === "C:icon" &&
+    icon?.slotSettings?.minChildren === 1 && icon?.slotSettings?.maxChildren === 2 &&
+    icon?.slotSettings?.stretchChildOnInsert === true &&
+    swap?.preferredValues?.[0]?.key === "C:icon" &&
+    label?.defaultValue === "Play" && broken?.defaultValue === "Fallback");
+  check("restore: component property default-value bindings are restored or named",
+    label?.boundVariables?.defaultValue?.id === "V:label" &&
+    report.bindingsRestored.some((b) => b.field === "componentProperty.Label.defaultValue" && b.id === "V:label") &&
+    report.bindingsMissing.some((b) => b.field === "componentProperty.Broken.defaultValue" && b.id === "V:missing") &&
+    report.propertiesFailed.length === 0);
 }
 
 {
