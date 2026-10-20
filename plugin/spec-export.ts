@@ -465,7 +465,17 @@ async function exportNode(
     if (node.textDecoration && node.textDecoration !== "NONE") spec.textDecoration = node.textDecoration;
     if (Number(node.paragraphSpacing) > 0) spec.paragraphSpacing = round(Number(node.paragraphSpacing));
     if (Number(node.paragraphIndent) > 0) spec.paragraphIndent = round(Number(node.paragraphIndent));
-    if (node.hyperlink) state.warnings.push(`${path}: the text hyperlink is not representable and was omitted`);
+    const link = node.hyperlink;
+    if (isObj(link) && (link.type === "URL" || link.type === "NODE") && typeof link.value === "string" && link.value) {
+      spec.hyperlink = { type: link.type, value: link.value };
+      if (link.type === "NODE") {
+        state.warnings.push(`${path}: the text hyperlink points at node ${link.value}; a NODE link is file-local and will not resolve in another file`);
+      }
+    } else if (isMixed(link)) {
+      state.warnings.push(`${path}: text hyperlinks are mixed across runs; the spec can carry one link and they were omitted`);
+    } else if (link) {
+      state.warnings.push(`${path}: the text hyperlink is unreadable and was omitted`);
+    }
   }
 
   state.nodes++;

@@ -50,7 +50,7 @@ export function registerCheckpointTools(server: McpServer, client: FigmaClient, 
     "figma_checkpoint",
     "Save a subtree as data, compare it against the live document, and rebuild it — the alternative to an undo stack the Plugin API does not offer. " +
       'action "save" writes an inspectable JSON file; "show" diffs the live subtree against it; "restore" replaces the target\'s children from it in ONE transaction, dry run first, and verifies itself by dumping the subtree again. ' +
-      "Refuses what it cannot promise: node types it cannot rebuild, truncated dumps, a group or instance target, and any restore not asked for out loud. A save says what a checkpoint-v1 rebuild does not carry (instance interiors, per-run text styling, component identity); style ids and node-level variable bindings are re-linked when still present, and every missing link is reported.",
+      "Refuses what it cannot promise: node types it cannot rebuild, truncated dumps, a group or instance target, and any restore not asked for out loud. A save says what a checkpoint-v1 rebuild does not carry (instance interiors, per-run text styling and mixed hyperlinks, component identity); style ids and node-level variable bindings are re-linked when still present, and every missing link is reported.",
     {
       action: z.enum(["save", "show", "list", "drop", "restore"]).describe("save | show (compare live, read-only) | list | drop (a local file) | restore (dry run unless dryRun: false)"),
       nodeId: figmaNodeId("nodeId").optional().describe("The subtree root. save: defaults to the selection; show/restore: defaults to the checkpoint's own root"),

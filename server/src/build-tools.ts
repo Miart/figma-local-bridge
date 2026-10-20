@@ -123,6 +123,11 @@ const buildNodeSchema: z.ZodType<any> = z.lazy(() =>
       textDecoration: z.enum(["NONE", "UNDERLINE", "STRIKETHROUGH"]).optional(),
       paragraphSpacing: z.number().min(0).optional(),
       paragraphIndent: z.number().min(0).optional(),
+      hyperlink: z
+        .object({ type: z.enum(["URL", "NODE"]), value: z.string().min(1) })
+        .nullable()
+        .optional()
+        .describe("TEXT only. A URL link, or a NODE link to a node id in the same file; null clears it on patch"),
 
       fills: z.union([paintSchema, z.array(paintSchema)]).optional(),
       strokes: z.union([paintSchema, z.array(paintSchema)]).optional(),
@@ -165,7 +170,7 @@ const buildNodeSchema: z.ZodType<any> = z.lazy(() =>
       componentName: z.string().optional().describe("Exact local component name; ambiguous names are refused"),
       componentSetKey: z.string().optional(),
       properties: z.record(z.union([z.string(), z.boolean()])).optional().describe("Instance component properties / variants"),
-      overrides: z.record(z.any()).optional().describe("Map of layer name or key -> {text, visible, opacity, fills, strokes, fontSize, size}"),
+      overrides: z.record(z.any()).optional().describe("Map of layer name or key -> {text, visible, opacity, fills, strokes, fontSize, hyperlink, size}"),
 
       svg: z.string().optional(),
       protected: z.boolean().optional().describe("Refuse prune deletion of this node"),

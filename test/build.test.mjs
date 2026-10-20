@@ -122,6 +122,7 @@ function makeCtx() {
     fontSize: type === "TEXT" ? 16 : undefined,
     letterSpacing: type === "TEXT" ? { unit: "PIXELS", value: 0 } : undefined,
     textAlignHorizontal: type === "TEXT" ? "LEFT" : undefined,
+    hyperlink: type === "TEXT" ? null : undefined,
     componentProperties: {},
   });
 
@@ -198,6 +199,15 @@ test("unsupported containers are a refusal, not a silent frame", () => {
   assert.throws(() => normalizeTree({ type: "INSTANCE", name: "i" }), /needs component/);
 });
 
+test("a hyperlink is text-only and normalized", () => {
+  const text = normalizeTree({ type: "TEXT", text: "Docs", hyperlink: { type: "url", value: " https://example.com " } });
+  assert.deepEqual(text.root.spec.hyperlink, { type: "URL", value: "https://example.com" });
+  assert.equal(normalizeTree({ type: "TEXT", text: "Off", hyperlink: null }).root.spec.hyperlink, null);
+  assert.throws(() => normalizeTree({ type: "FRAME", hyperlink: { type: "URL", value: "https://example.com" } }), /only valid on TEXT/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "x", hyperlink: { type: "EMAIL", value: "a@b.c" } }), /URL or NODE/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "x", hyperlink: { type: "URL", value: "  " } }), /non-empty/);
+});
+
 // ---------------------------------------------------------------- build
 
 test("dry run plans without writing, then apply creates one keyed tree", async () => {
@@ -258,6 +268,7 @@ test("build carries rotation, per-corner radii, stroke shape and text formatting
         type: "TEXT", name: "Label", text: "Hello",
         textCase: "UPPER", textDecoration: "UNDERLINE",
         paragraphSpacing: 6, paragraphIndent: 4,
+        hyperlink: { type: "URL", value: "https://example.com/docs" },
       }, {
         type: "LINE", name: "Divider", length: 120, rotation: 30,
       }],
@@ -291,6 +302,7 @@ test("build carries rotation, per-corner radii, stroke shape and text formatting
   assert.equal(label.textDecoration, "UNDERLINE");
   assert.equal(label.paragraphSpacing, 6);
   assert.equal(label.paragraphIndent, 4);
+  assert.deepEqual(label.hyperlink, { type: "URL", value: "https://example.com/docs" });
 
   assert.throws(
     () => normalizeTree({ type: "FRAME", strokeCap: "POINTY" }),
@@ -358,7 +370,7 @@ test("patch updates by key, creates only on allowCreate, and prunes on request",
     root: {
       type: "FRAME", name: "HUD",
       children: [
-        { type: "TEXT", name: "Score", text: "1" },
+        { type: "TEXT", name: "Score", text: "1", hyperlink: { type: "URL", value: "https://example.com/score" } },
         { type: "RECTANGLE", name: "Old", fills: "#ff0000" },
       ],
     },
@@ -392,13 +404,14 @@ test("patch updates by key, creates only on allowCreate, and prunes on request",
     patch: {
       type: "FRAME",
       children: [
-        { type: "TEXT", key: score.getPluginData(KEY_DATA), text: "99" },
+        { type: "TEXT", key: score.getPluginData(KEY_DATA), text: "99", hyperlink: null },
         { type: "TEXT", key: "hud/missing", text: "x" },
       ],
     },
   });
   assert.equal(updated.status, "applied");
   assert.equal(score.characters, "99");
+  assert.equal(score.hyperlink, null);
   assert.ok(old.removed);
   assert.ok(!root.children.includes(old));
   assert.equal(root.children.length, 2);
@@ -478,7 +491,7 @@ test("batch applies all ops in one transaction and guards each target fingerprin
   const dry = await runBatch(ctx, {
     dryRun: true,
     ops: [
-      { op: "set_text", key: score.getPluginData(KEY_DATA), text: "42", fontSize: 20 },
+      { op: "set_text", key: score.getPluginData(KEY_DATA), text: "42", fontSize: 20, hyperlink: { type: "URL", value: "https://example.com/score" } },
       { op: "set_fill", key: bar.getPluginData(KEY_DATA), fills: "#00ff00" },
       { op: "resize", key: bar.getPluginData(KEY_DATA), width: 120, height: 12 },
       { op: "rename", key: bar.getPluginData(KEY_DATA), name: "Progress" },
@@ -490,7 +503,7 @@ test("batch applies all ops in one transaction and guards each target fingerprin
     dryRun: false,
     expectedFingerprints: dry.fingerprints,
     ops: [
-      { op: "set_text", key: score.getPluginData(KEY_DATA), text: "42", fontSize: 20 },
+      { op: "set_text", key: score.getPluginData(KEY_DATA), text: "42", fontSize: 20, hyperlink: { type: "URL", value: "https://example.com/score" } },
       { op: "set_fill", key: bar.getPluginData(KEY_DATA), fills: "#00ff00" },
       { op: "resize", key: bar.getPluginData(KEY_DATA), width: 120, height: 12 },
       { op: "rename", key: bar.getPluginData(KEY_DATA), name: "Progress" },
@@ -501,6 +514,7 @@ test("batch applies all ops in one transaction and guards each target fingerprin
   assert.equal(applied.status, "applied");
   assert.equal(applied.failed, 0);
   assert.equal(score.characters, "42");
+  assert.deepEqual(score.hyperlink, { type: "URL", value: "https://example.com/score" });
   assert.equal(score.fontSize, 20);
   assert.equal(bar.fills[0].color.g, 1);
   assert.equal(bar.width, 120);

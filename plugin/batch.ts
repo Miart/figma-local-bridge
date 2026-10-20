@@ -14,7 +14,7 @@
  */
 
 import {
-  KEY_DATA, PROTECTED_DATA, parseColor, fontSpec, applyContainerLayout, applyChildLayout,
+  KEY_DATA, PROTECTED_DATA, parseColor, fontSpec, hyperlinkFromSpec, applyContainerLayout, applyChildLayout,
 } from "./ui-build";
 import { snapshot, STRICT } from "./fingerprint";
 
@@ -149,6 +149,7 @@ function assertType(n: any, type: string, op: string, index: number): void {
 async function preflightText(ctx: any, op: Json, n: any, index: number): Promise<Json> {
   assertType(n, "TEXT", op.op, index);
   if (op.text !== undefined && typeof op.text !== "string") throw new Error(`op[${index}].text must be a string`);
+  if (op.hyperlink !== undefined) hyperlinkFromSpec(op.hyperlink, `op[${index}].hyperlink`);
   if (op.font !== undefined && !fontSpec(op.font)) throw new Error(`op[${index}].font must be "Family/Style" or {family,style}`);
   if (op.font !== undefined && op.textStyle !== undefined) {
     throw new Error(`op[${index}]: font and textStyle are exclusive; a text style already carries a font`);
@@ -343,6 +344,7 @@ async function applyOp(ctx: any, op: Json, target: any, plan: Json): Promise<Jso
         }
       }
       if (op.text !== undefined) target.characters = String(op.text);
+      if (op.hyperlink !== undefined) target.hyperlink = hyperlinkFromSpec(op.hyperlink, `op.hyperlink`);
       if (op.fontSize !== undefined) target.fontSize = Number(op.fontSize);
       if (op.textAutoResize !== undefined) target.textAutoResize = op.textAutoResize;
       return { ...plan, status: "updated", nodeId: target.id };

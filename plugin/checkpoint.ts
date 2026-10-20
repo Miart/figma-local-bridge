@@ -11,8 +11,9 @@
  *   - an INSTANCE comes back as an instance of its main component, with
  *     component properties re-applied — the overridden leaves inside it are not
  *     captured, so it shows the main component's current content;
- *   - per-run text styling is not rebuilt; a run COUNT is recorded, so a
- *     mixed-font node reports as different instead of passing as equivalent;
+ *   - per-run text styling and mixed hyperlinks are not rebuilt; a run COUNT
+ *     is recorded, so a mixed-font node reports as different instead of
+ *     passing as equivalent;
  *   - style ids, node-level variable bindings and explicit modes travel in
  *     `meta` and are re-linked by id when they still exist; every one that does
  *     not is reported instead of passing as restored;
@@ -37,7 +38,7 @@ export const MAX_DEPTH = 40;
  */
 export const LIMITATIONS: readonly string[] = [
   "instance interiors are not captured: a restored INSTANCE shows its main component's current content (component properties are re-applied)",
-  "per-run text styling is not rebuilt; the run count is recorded so a mixed-font node reports as different",
+  "per-run text styling and mixed hyperlinks are not rebuilt; the run count is recorded so a mixed-font node reports as different",
   "style ids are re-linked when the style still exists; node-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
   "per-range text bindings are not rebuilt (text runs are not either); a single binding across the whole text is restored",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
@@ -227,6 +228,8 @@ function readText(node: any): Dict {
   t.letterSpacing = isMixedValue(node.letterSpacing) ? "mixed" : copy(node.letterSpacing);
   t.align = [node.textAlignHorizontal, node.textAlignVertical];
   t.autoResize = node.textAutoResize;
+  if (isMixedValue(node.hyperlink)) t.hyperlink = "mixed";
+  else if (node.hyperlink) t.hyperlink = copy(node.hyperlink);
   if (node.textCase && node.textCase !== "ORIGINAL") t.textCase = copy(node.textCase);
   if (node.textDecoration && node.textDecoration !== "NONE") t.textDecoration = copy(node.textDecoration);
   if (typeof node.paragraphSpacing === "number" && node.paragraphSpacing) t.paragraphSpacing = node.paragraphSpacing;
@@ -1017,6 +1020,13 @@ async function applyText(node: any, text: Dict, ctx: RestoreContext, report: Res
     if (text.textDecoration) soft("text decoration", () => { node.textDecoration = text.textDecoration; });
     if (typeof text.paragraphSpacing === "number") soft("paragraph spacing", () => { node.paragraphSpacing = text.paragraphSpacing; });
     if (typeof text.paragraphIndent === "number") soft("paragraph indent", () => { node.paragraphIndent = text.paragraphIndent; });
+  }
+  if (text.hyperlink !== undefined) {
+    if (text.hyperlink === "mixed") {
+      report.notes.push(`${path}: this text has MIXED hyperlinks; checkpoint-v1 restores the characters without the per-run links`);
+    } else {
+      soft("hyperlink", () => { node.hyperlink = text.hyperlink; });
+    }
   }
   if (Array.isArray(text.align)) {
     soft("alignment", () => {

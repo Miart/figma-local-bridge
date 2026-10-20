@@ -189,6 +189,16 @@ function validatePoint(v: any, path: string): { x: number; y: number } {
   return { x: validateNumber(v.x, `${path}.x`), y: validateNumber(v.y, `${path}.y`) };
 }
 
+export function hyperlinkFromSpec(v: any, path: string): { type: "URL" | "NODE"; value: string } | null {
+  if (v === null) return null;
+  if (!isObj(v)) throw new Error(`${path} must be {type:"URL"|"NODE", value} or null`);
+  const type = String(v.type || "").toUpperCase();
+  if (type !== "URL" && type !== "NODE") throw new Error(`${path}.type must be URL or NODE`);
+  const value = typeof v.value === "string" ? v.value.trim() : "";
+  if (!value) throw new Error(`${path}.value must be a non-empty string`);
+  return { type, value };
+}
+
 function validateSize(v: any, path: string): { width: number; height: number } {
   if (!isObj(v)) throw new Error(`${path} must be {width,height}`);
   return {
@@ -309,6 +319,10 @@ function validateNode(
     if (raw[k] !== undefined) validateNumber(raw[k], `${path}.${k}`, { min: 0 });
   }
   if (raw.font !== undefined && !fontSpec(raw.font)) throw new Error(`${path}.font must be "Family/Style" or {family,style}`);
+  if (raw.hyperlink !== undefined) {
+    if (type !== "TEXT") throw new Error(`${path}.hyperlink is only valid on TEXT`);
+    out.spec.hyperlink = hyperlinkFromSpec(raw.hyperlink, `${path}.hyperlink`);
+  }
 
   if (type === "TEXT") {
     if (raw.text !== undefined && typeof raw.text !== "string") throw new Error(`${path}.text must be a string`);
@@ -1443,6 +1457,7 @@ async function ensureTextFont(ctx: any, node: any, spec: Json, res: Resources): 
 async function applyTextProps(ctx: any, node: any, spec: Json, res: Resources): Promise<void> {
   await ensureTextFont(ctx, node, spec, res);
   if (spec.text !== undefined) node.characters = String(spec.text);
+  if (spec.hyperlink !== undefined) node.hyperlink = spec.hyperlink;
   if (spec.fontSize !== undefined) node.fontSize = Number(spec.fontSize);
   if (spec.textAutoResize !== undefined) node.textAutoResize = spec.textAutoResize;
   if (spec.textAlignHorizontal !== undefined) node.textAlignHorizontal = spec.textAlignHorizontal;
@@ -1507,6 +1522,9 @@ async function applyOverrides(ctx: any, instance: any, overrides: Json, res: Res
       target.characters = String(override.text);
     }
     if (override.fontSize !== undefined && target.type === "TEXT") target.fontSize = Number(override.fontSize);
+    if (override.hyperlink !== undefined && target.type === "TEXT") {
+      target.hyperlink = hyperlinkFromSpec(override.hyperlink, `override "${name}".hyperlink`);
+    }
     if (override.size !== undefined && "resize" in target) {
       target.resize(Number(override.size.width), Number(override.size.height));
     }

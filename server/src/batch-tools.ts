@@ -95,6 +95,11 @@ const opSchema = z.discriminatedUnion("op", [
     fontSize: z.number().positive().optional(),
     textStyle: z.string().optional().describe("Local text style name or id"),
     textAutoResize: z.enum(["NONE", "WIDTH_AND_HEIGHT", "HEIGHT", "TRUNCATE"]).optional(),
+    hyperlink: z
+      .object({ type: z.enum(["URL", "NODE"]), value: z.string().min(1) })
+      .nullable()
+      .optional()
+      .describe("Set or clear a text hyperlink; URL, or a NODE link to a node id in the same file"),
   }),
   z.object({
     op: z.literal("set_name"),

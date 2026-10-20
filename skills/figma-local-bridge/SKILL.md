@@ -74,7 +74,8 @@ half a design applied.
   spec no longer contains; protected nodes are skipped and reported. The tree
   also carries rotation (degrees), per-corner radii, stroke cap/join/miter,
   masks, layout grids, layout inclusion flags, text case/decoration/paragraph
-  spacing, and an exact `LINE` length.
+  spacing, text hyperlinks (URL, or NODE by node id), and an exact `LINE`
+  length.
 - `figma_patch` takes a sparse tree under `rootNodeId`, `buildId` or
   `rootKey`. Children match by key. A missing key is refused unless
   `allowCreate:true`; a key under the wrong parent is refused rather than
@@ -107,10 +108,11 @@ To bring a hand-made tree into this language, `figma_export_build_spec`
 returns a spec that `figma_build` accepts. It keeps keys that already exist,
 derives the same key the build engine would for nodes without one, and turns
 style/variable links into `fillStyle`/`strokeStyle`/`textStyle`/`effectStyle`
-or `variable`. Read `unsupported` and `warnings` before building it: an SVG
-source, a detached instance, an instance interior, a mixed font or a
-per-corner radius has no exact representation. `truncated: true` means the
-spec is incomplete and must not be built as-is.
+or `variable`. URL text links travel in the spec; a NODE link is exported with
+a file-local warning, and mixed links are named. Read `unsupported` and
+`warnings` before building it: an SVG source, a detached instance, an instance
+interior, a mixed font or per-range text styling has no exact representation.
+`truncated: true` means the spec is incomplete and must not be built as-is.
 
 ## Finding things, and checking the result
 
@@ -307,8 +309,8 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
 - `action: "save"` records a subtree as data (`nodeId`; a page is refused) into
   one JSON file per file key. The reply carries a `summary` and the
   `limitations` a rebuild cannot carry — instance interiors, per-run text
-  styling, component identity. Read them before telling anyone the subtree will
-  come back exactly.
+  styling and mixed hyperlinks, component identity. Read them before telling
+  anyone the subtree will come back exactly.
 - `action: "show"` diffs the live subtree against the file field by field and
   reports the semantic fingerprint next to it. That is how "has this drifted
   already?" gets answered before a rebuild is chosen.
@@ -325,12 +327,14 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   variable exists; when it does not, the paint returns by value and
   `bindingsDropped` names it. Per-range text bindings are not rebuilt (the text
   runs are not either); `bindingsMissing` names them instead of flattening them.
+- A whole-text hyperlink is saved and restored by value. A NODE link stays
+  file-local; mixed per-run links are named as a loss, not flattened to one.
 - Afterwards the server dumps the subtree **again** and diffs it against the
   checkpoint: `verification.verified: true` means no field differs. When it is
   false, `verification.diff` names every field with both values and
   `verification.notes` says which differences checkpoint-v1 knows it causes
-  (HUG sizing, per-run text). Say so — never call a rebuild "restored" when it
-  is not.
+  (HUG sizing, per-run text, mixed hyperlinks). Say so — never call a rebuild
+  "restored" when it is not.
 - Refused with a reason: a truncated dump (restoring it would delete whatever
   the dump never reached), a `GROUP` / `INSTANCE` / page target, and node types
   checkpoint-v1 cannot rebuild — unless `allowPartial: true`, which rebuilds the

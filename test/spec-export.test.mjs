@@ -89,6 +89,7 @@ function node(type, opts = {}) {
     p.textDecoration = opts.textDecoration || "NONE";
     p.paragraphSpacing = opts.paragraphSpacing || 0;
     p.paragraphIndent = opts.paragraphIndent || 0;
+    p.hyperlink = opts.hyperlink === undefined ? null : opts.hyperlink;
   }
   if (type === "INSTANCE") {
     p.main = opts.main || null;
@@ -136,6 +137,7 @@ test("exports a keyed card with styles, text and auto layout", async () => {
     fontName: { family: "Inter", style: "Bold" }, fontSize: 24,
     textStyleId: "S:text", fillStyleId: "S:text",
     textCase: "UPPER", textDecoration: "UNDERLINE", paragraphSpacing: 3, paragraphIndent: 2,
+    hyperlink: { type: "URL", value: "https://example.com/title" },
   });
   const bg = node("RECTANGLE", {
     name: "Bg", key: "bg", width: 320, height: 120,
@@ -191,6 +193,7 @@ test("exports a keyed card with styles, text and auto layout", async () => {
   assert.equal(madeTitle.textDecoration, "UNDERLINE");
   assert.equal(madeTitle.paragraphSpacing, 3);
   assert.equal(madeTitle.paragraphIndent, 2);
+  assert.deepEqual(madeTitle.hyperlink, { type: "URL", value: "https://example.com/title" });
   assert.equal(madeTitle.font, undefined, "the style's own font is not re-declared");
   assert.equal(report.truncated, false);
 
@@ -225,6 +228,23 @@ test("layout grids and line length survive the round trip", async () => {
 
   const normalized = normalizeTree(report.spec);
   assert.equal(normalized.nodes, 2);
+});
+
+test("URL links export, while NODE links and mixed runs are named", async () => {
+  const url = node("TEXT", { name: "Docs", hyperlink: { type: "URL", value: "https://example.com/docs" } });
+  const urlReport = await runExportSpec(makeCtx(), { nodeId: url.id });
+  assert.deepEqual(urlReport.spec.hyperlink, { type: "URL", value: "https://example.com/docs" });
+  assert.equal(normalizeTree(urlReport.spec).root.spec.hyperlink.value, "https://example.com/docs");
+
+  const nodeLink = node("TEXT", { name: "Jump", hyperlink: { type: "NODE", value: "1:2" } });
+  const nodeReport = await runExportSpec(makeCtx(), { nodeId: nodeLink.id });
+  assert.deepEqual(nodeReport.spec.hyperlink, { type: "NODE", value: "1:2" });
+  assert.ok(nodeReport.warnings.some((w) => /NODE link is file-local/.test(w)));
+
+  const mixed = node("TEXT", { name: "Runs", hyperlink: Symbol("mixed") });
+  const mixedReport = await runExportSpec(makeCtx(), { nodeId: mixed.id });
+  assert.equal(mixedReport.spec.hyperlink, undefined);
+  assert.ok(mixedReport.warnings.some((w) => /mixed across runs/.test(w)));
 });
 
 test("variables, derived keys and unsupported nodes are named", async () => {

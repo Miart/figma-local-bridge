@@ -224,10 +224,14 @@ const errors = async (fn) => {
 {
   // A mixed field means "the API refuses to name one value". Writing a guess
   // would flatten the difference, so it is recorded as the string "mixed".
-  const t = node("TEXT", { fills: Symbol("mixed"), strokeWeight: Symbol("mixed"), fontName: Symbol("mixed") });
+  const t = node("TEXT", {
+    fills: Symbol("mixed"), strokeWeight: Symbol("mixed"), fontName: Symbol("mixed"),
+    hyperlink: Symbol("mixed"),
+  });
   const { root } = await dumpSubtree(t);
   check("dump: mixed fills and strokes are recorded, not guessed", root.state.fills === "mixed" && root.state.strokeWeight === "mixed");
   check("dump: mixed font is recorded", root.state.text.font === "mixed");
+  check("dump: mixed hyperlinks are recorded as a loss", root.state.text.hyperlink === "mixed");
 }
 
 {
@@ -393,7 +397,10 @@ const errors = async (fn) => {
   });
   withChildren(src, [
     node("RECTANGLE", { name: "bg", x: 1, y: 2, width: 30, height: 20, cornerRadius: 4, fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }] }),
-    node("TEXT", { name: "label", characters: "PLAY", fontSize: 18, width: 40, height: 12 }),
+    node("TEXT", {
+      name: "label", characters: "PLAY", fontSize: 18, width: 40, height: 12,
+      hyperlink: { type: "URL", value: "https://example.com/play" },
+    }),
     node("GROUP", { name: "cluster", x: 50, y: 60, children: [node("ELLIPSE", { name: "dot", x: 3, y: 4, width: 8, height: 8 })] }),
   ]);
   const { root } = await dumpSubtree(src);
@@ -412,6 +419,7 @@ const errors = async (fn) => {
     target.children[2].type === "GROUP" && target.children[2].x === 50 && target.children[2].y === 60 &&
     target.children[2].children[0].type === "ELLIPSE");
   check("restore: text characters and size are set", target.children[1].characters === "PLAY" && target.children[1].fontSize === 18);
+  check("restore: a text hyperlink comes back", target.children[1].hyperlink?.value === "https://example.com/play");
   const round = await dumpSubtree(target);
   const strip = (n) => ({ type: n.type, name: n.name, state: dropVolatile(n.state), children: (n.children ?? []).map(strip) });
   const dropVolatile = (s) => {
@@ -590,6 +598,7 @@ const errors = async (fn) => {
     children: [node("TEXT", {
       characters: "AB",
       fills: Symbol("mixed"),
+      hyperlink: Symbol("mixed"),
       boundVariables: {
         fontSize: [{ type: "VARIABLE_ALIAS", id: a.id }, { type: "VARIABLE_ALIAS", id: b.id }],
         textRangeFills: [{ type: "VARIABLE_ALIAS", id: a.id }],
@@ -602,6 +611,8 @@ const errors = async (fn) => {
     report.bindingsMissing.some((x) => x.field === "fontSize" && /per-range/.test(x.why)) &&
     report.bindingsMissing.some((x) => x.field === "textRangeFills" && /per-range/.test(x.why)) &&
     target.children[0].boundVariables === undefined);
+  check("restore: mixed hyperlinks are named, not flattened",
+    report.notes.some((n) => /MIXED hyperlinks/.test(n)));
 }
 
 {
