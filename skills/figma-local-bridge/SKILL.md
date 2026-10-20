@@ -61,6 +61,75 @@ barrier is global. Prefer the specific tools over raw code:
 - Writes can be off: `FIGMA_BRIDGE_WRITE=0` leaves the mutating tools
   unregistered, and `figma_use` additionally needs `FIGMA_BRIDGE_DESTRUCTIVE=1`.
 
+## Declarative editing: build, patch, batch
+
+These three tools are the preferred way to change a tree. They resolve every
+target and every resource **before** the first write, so a typo cannot leave
+half a design applied.
+
+- `figma_build` takes a `buildId` and a full tree. The root gets that id in
+  `pluginData`; every node gets a stable key (`parent/slug#index` unless you
+  supply one). Re-send the same buildId and it updates in place — never
+  duplicates. `prune:true` makes the tree exact by deleting keyed children the
+  spec no longer contains; protected nodes are skipped and reported.
+- `figma_patch` takes a sparse tree under `rootNodeId`, `buildId` or
+  `rootKey`. Children match by key. A missing key is refused unless
+  `allowCreate:true`; a key under the wrong parent is refused rather than
+  duplicated. `prune:true` deletes omitted keyed children at patched levels.
+- `figma_batch_edit` takes up to 200 small ops on many targets in one
+  transaction. Targets are `nodeId` or stable `key`. Ops: `set_text`,
+  `set_name`/`rename`, `set_fill`, `set_stroke`, `resize`, `move`,
+  `set_visible`, `set_opacity`, `set_layout`, `set_variant`,
+  `set_constraints`, `duplicate`, `reparent`. Every target, font, paint style
+  and variant property is resolved first; a failed op rolls the whole batch
+  back unless `stopOnError:false`, which reports the exact failure and what
+  did apply.
+
+The safe sequence for all three:
+
+1. Call with `dryRun:true` (the default). Read the plan, `planId`,
+   `fingerprints` / `fingerprint`, and any warnings.
+2. If the plan is right, call again with `dryRun:false`, the returned
+   `planId`, and the returned fingerprint(s).
+3. The apply refuses a different plan or a target that moved since the dry run
+   **before** the plugin writes anything. A failed apply is rolled back and
+   says so; never retry a blind write.
+
+A batch cannot target a node created by an earlier `duplicate` in the same
+batch — its key does not exist at plan time. Split that into two calls.
+`figma_build` / `figma_patch` do not implicitly move a keyed node to another
+parent; use `batch` with `reparent` when a move is intended.
+
+To bring a hand-made tree into this language, `figma_export_build_spec`
+returns a spec that `figma_build` accepts. It keeps keys that already exist,
+derives the same key the build engine would for nodes without one, and turns
+style/variable links into `fillStyle`/`strokeStyle`/`textStyle`/`effectStyle`
+or `variable`. Read `unsupported` and `warnings` before building it: an SVG
+source, a detached instance, an instance interior, a mixed font or a
+per-corner radius has no exact representation. `truncated: true` means the
+spec is incomplete and must not be built as-is.
+
+## Finding things, and checking the result
+
+- `figma_index` returns a compact flat index of a page/subtree: id, stable
+  key, name, type, path, depth, size, child count, build root. Use it to learn
+  the shape before inspecting one subtree. It stops at `maxNodes` and says so.
+- `figma_search` finds nodes by name, stable key or text — substring, regex or
+  glob — with `types`, `keyPrefix` and `hasKey` filters. It returns the match
+  fields, a text snippet and the path, not the whole tree.
+- `figma_audit` is read-only. It reports duplicate keys, unkeyed nodes inside a
+  built tree, literal fills/strokes that are neither a paint style nor a
+  variable, text without a text style, placeholder copy, detached instances,
+  WCAG AA contrast against the effective background, default names, and
+  opt-in off-scale spacing/radius. A contrast finding is exact for solid text
+  on a solid effective background; gradients/images are reported as unknown,
+  not guessed.
+- `figma_design_system` snapshots styles, variables (with modes and values) and
+  components. `inventory` returns it, `export` writes a JSON file with a
+  sha256, and `diff` compares that file to the live file by stable key. It is
+  read-only: syncing values back into Figma still goes through the specific
+  write tools.
+
 ## The snippet standard library (`flb`)
 
 `use_figma` runs its body with three arguments: `figma`, `console` and `flb`.
@@ -244,6 +313,10 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   transaction. It is a **dry run by default** and names what would be deleted
   and created; a real rebuild needs `dryRun: false`, `allowDestructive: true`
   and a bridge started with `FIGMA_BRIDGE_DESTRUCTIVE=1`.
+- Style ids travel in `meta`; restore re-links them when the style still exists
+  and reports every one that does not. Paints and fonts are restored by value
+  either way, so a lost style leaves a correct-looking but unlinked node — and
+  `stylesMissing` names it.
 - Afterwards the server dumps the subtree **again** and diffs it against the
   checkpoint: `verification.verified: true` means no field differs. When it is
   false, `verification.diff` names every field with both values and

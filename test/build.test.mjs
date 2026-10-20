@@ -1,0 +1,533 @@
+// Unit tests for the declarative build/patch engine against a stub Plugin API.
+//
+// The point is not "does it create a rectangle". It is the invariants that make
+// a second call safe: deterministic keys, update-in-place instead of duplicate,
+// a real dry run that writes nothing, keyed patch/prune, and a fingerprint that
+// refuses to land a stale plan on a changed document.
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  BUILD_DATA, KEY_DATA, PROTECTED_DATA,
+  keyFor, normalizeTree, parseColor, runBuild, runPatch,
+} from "../plugin/ui-build.mjs";
+import { runBatch } from "../plugin/batch.mjs";
+
+// ---------------------------------------------------------------- stub
+
+let seq = 0;
+const nextId = () => `${++seq}:${seq}`;
+
+function makeCtx() {
+  const byId = new Map();
+  const fonts = [];
+  let undos = 0;
+  let triggers = 0;
+
+  const defaults = (type) => ({
+    id: nextId(), type, name: type, x: 0, y: 0, width: 100, height: 100,
+    opacity: 1, blendMode: "NORMAL", visible: true, locked: false,
+    fills: [], strokes: [], strokeWeight: 1, strokeAlign: "INSIDE", strokeDashes: [],
+    cornerRadius: 0, effects: [],
+    constraints: { horizontal: "MIN", vertical: "MIN" },
+    layoutMode: "NONE", itemSpacing: 0,
+    paddingTop: 0, paddingRight: 0, paddingBottom: 0, paddingLeft: 0,
+    primaryAxisAlignItems: "MIN", counterAxisAlignItems: "MIN",
+    primaryAxisSizingMode: "FIXED", counterAxisSizingMode: "FIXED",
+    layoutWrap: "NO_WRAP", counterAxisSpacing: null, clipsContent: false,
+    layoutGrow: 0, layoutAlign: "INHERIT", layoutPositioning: "AUTO",
+    layoutSizingHorizontal: "FIXED", layoutSizingVertical: "FIXED",
+    absoluteBoundingBox: null, removed: false, parent: null, children: [],
+    pluginData: {},
+    getPluginData(k) { return this.pluginData[k] || ""; },
+    setPluginData(k, v) { this.pluginData[k] = String(v); },
+    appendChild(child) {
+      if (child.parent) {
+        const i = child.parent.children.indexOf(child);
+        if (i >= 0) child.parent.children.splice(i, 1);
+      }
+      child.parent = this;
+      this.children.push(child);
+    },
+    insertChild(index, child) {
+      if (child.parent) {
+        const i = child.parent.children.indexOf(child);
+        if (i >= 0) child.parent.children.splice(i, 1);
+      }
+      child.parent = this;
+      this.children.splice(Math.max(0, Math.min(index, this.children.length)), 0, child);
+    },
+    clone() {
+      const copy = defaults(this.type);
+      copy.name = this.name;
+      copy.x = this.x;
+      copy.y = this.y;
+      copy.width = this.width;
+      copy.height = this.height;
+      copy.opacity = this.opacity;
+      copy.visible = this.visible;
+      copy.fills = JSON.parse(JSON.stringify(this.fills || []));
+      copy.strokes = JSON.parse(JSON.stringify(this.strokes || []));
+      copy.strokeWeight = this.strokeWeight;
+      copy.effects = JSON.parse(JSON.stringify(this.effects || []));
+      copy.pluginData = { ...this.pluginData };
+      delete copy.pluginData[BUILD_DATA];
+      if (this.type === "TEXT") {
+        copy.characters = this.characters;
+        copy.fontName = this.fontName ? { ...this.fontName } : this.fontName;
+        copy.fontSize = this.fontSize;
+        copy.textAutoResize = this.textAutoResize;
+      }
+      byId.set(copy.id, copy);
+      for (const child of this.children) copy.appendChild(child.clone());
+      return copy;
+    },
+    remove() {
+      if (this.parent) {
+        const i = this.parent.children.indexOf(this);
+        if (i >= 0) this.parent.children.splice(i, 1);
+      }
+      this.removed = true;
+      this.parent = null;
+    },
+    resize(w, h) { this.width = Number(w); this.height = Number(h); },
+    findOne(pred) {
+      for (const c of this.children) {
+        if (pred(c)) return c;
+        const hit = c.findOne ? c.findOne(pred) : null;
+        if (hit) return hit;
+      }
+      return null;
+    },
+    findAll(pred) {
+      const out = [];
+      const visit = (n) => {
+        for (const c of n.children || []) {
+          if (pred(c)) out.push(c);
+          visit(c);
+        }
+      };
+      visit(this);
+      return out;
+    },
+    getMainComponentAsync() { return Promise.resolve(this.mainComponent || null); },
+    setProperties(props) { this.properties = { ...(this.properties || {}), ...props }; },
+    getRangeAllFontNames() { return this.fontName ? [this.fontName] : []; },
+    textAutoResize: "NONE",
+    characters: type === "TEXT" ? "" : undefined,
+    fontName: type === "TEXT" ? { family: "Inter", style: "Regular" } : undefined,
+    fontSize: type === "TEXT" ? 16 : undefined,
+    letterSpacing: type === "TEXT" ? { unit: "PIXELS", value: 0 } : undefined,
+    textAlignHorizontal: type === "TEXT" ? "LEFT" : undefined,
+    componentProperties: {},
+  });
+
+  const ctx = {
+    mixed: Symbol("mixed"),
+    root: null,
+    currentPage: null,
+    viewport: { center: { x: 0, y: 0 } },
+    loadFontAsync(f) { fonts.push(f); return Promise.resolve(); },
+    commitUndo() { undos++; },
+    triggerUndo() { triggers++; },
+    getNodeByIdAsync(id) { return Promise.resolve(byId.get(id) || null); },
+    async getLocalTextStylesAsync() { return []; },
+    async getLocalPaintStylesAsync() { return []; },
+    async getLocalEffectStylesAsync() { return []; },
+    variables: {
+      async getLocalVariablesAsync() { return []; },
+      setBoundVariableForPaint(p) { return p; },
+    },
+    createFrame() { const n = defaults("FRAME"); byId.set(n.id, n); return n; },
+    createRectangle() { const n = defaults("RECTANGLE"); byId.set(n.id, n); return n; },
+    createEllipse() { const n = defaults("ELLIPSE"); byId.set(n.id, n); return n; },
+    createLine() { const n = defaults("LINE"); byId.set(n.id, n); return n; },
+    createText() { const n = defaults("TEXT"); byId.set(n.id, n); return n; },
+    createComponent() { const n = defaults("COMPONENT"); byId.set(n.id, n); return n; },
+    createNodeFromSvg() { const n = defaults("FRAME"); n.children = []; byId.set(n.id, n); return n; },
+    metrics: {
+      get undos() { return undos; },
+      get triggers() { return triggers; },
+      get fonts() { return fonts.slice(); },
+      byId,
+    },
+  };
+
+  const root = defaults("DOCUMENT");
+  const page = defaults("PAGE");
+  root.children = [page];
+  page.parent = root;
+  ctx.root = root;
+  ctx.currentPage = page;
+  byId.set(root.id, root);
+  byId.set(page.id, page);
+  return ctx;
+}
+
+// ---------------------------------------------------------------- pure
+
+test("colour parsing accepts the shapes agents actually write", () => {
+  assert.deepEqual(parseColor("#ff0000"), { r: 1, g: 0, b: 0, a: 1 });
+  assert.deepEqual(parseColor("#00ff0080"), { r: 0, g: 1, b: 0, a: 128 / 255 });
+  const rgba = parseColor("rgba(0, 128, 255, .5)");
+  assert.ok(Math.abs(rgba.r) < 1e-9 && Math.abs(rgba.g - 128 / 255) < 1e-9 && Math.abs(rgba.a - 0.5) < 1e-9);
+  assert.deepEqual(parseColor({ r: 255, g: 0, b: 0 }), { r: 1, g: 0, b: 0, a: 1 });
+  assert.throws(() => parseColor("red-ish"), /cannot parse colour/);
+});
+
+test("keys are deterministic and duplicate keys are refused", () => {
+  const a = normalizeTree({ type: "FRAME", name: "HUD", children: [
+    { type: "TEXT", name: "Score", text: "0" },
+    { type: "TEXT", name: "Score", text: "1" },
+  ] }, { buildId: "hud" });
+  assert.equal(a.root.key, "hud");
+  assert.equal(a.root.children[0].key, keyFor("hud", "TEXT", "Score", 0));
+  assert.equal(a.root.children[1].key, keyFor("hud", "TEXT", "Score", 1));
+  assert.throws(
+    () => normalizeTree({ type: "FRAME", key: "r", children: [{ type: "TEXT", key: "x", text: "a" }, { type: "TEXT", key: "x", text: "b" }] }),
+    /duplicate key/,
+  );
+});
+
+test("unsupported containers are a refusal, not a silent frame", () => {
+  assert.throws(() => normalizeTree({ type: "GROUP", children: [] }), /not supported/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "x", children: [] }), /cannot have children/);
+  assert.throws(() => normalizeTree({ type: "INSTANCE", name: "i" }), /needs component/);
+});
+
+// ---------------------------------------------------------------- build
+
+test("dry run plans without writing, then apply creates one keyed tree", async () => {
+  const ctx = makeCtx();
+  const spec = {
+    buildId: "hud",
+    root: {
+      type: "FRAME", name: "HUD",
+      size: { width: 360, height: 200 },
+      fills: "#101820",
+      layout: { mode: "VERTICAL", gap: 8, padding: 16 },
+      children: [
+        { type: "TEXT", name: "Score", text: "12,480", font: "Inter/Bold", fontSize: 32, fills: "#ffffff" },
+        { type: "FRAME", name: "Bar", size: { width: 328, height: 8 }, fills: "#33cc99" },
+      ],
+    },
+  };
+
+  const dry = await runBuild(ctx, { ...spec, dryRun: true });
+  assert.equal(dry.status, "dry_run");
+  assert.equal(dry.counts.create, 3);
+  assert.equal(dry.root.nodeId, null);
+  assert.equal(ctx.currentPage.children.length, 0);
+  assert.equal(ctx.metrics.undos, 0);
+  assert.ok(dry.fingerprint);
+  assert.deepEqual(dry.fonts, ["Inter/Bold"]);
+
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.created.length, 3);
+  assert.equal(applied.verification.ok, true);
+  assert.equal(ctx.currentPage.children.length, 1);
+  const root = ctx.currentPage.children[0];
+  assert.equal(root.getPluginData(BUILD_DATA), "hud");
+  assert.equal(root.getPluginData(KEY_DATA), "hud");
+  const score = root.children[0];
+  assert.equal(score.getPluginData(KEY_DATA), keyFor("hud", "TEXT", "Score", 0));
+  assert.equal(score.characters, "12,480");
+  assert.equal(score.fontName.style, "Bold");
+  assert.ok(ctx.metrics.fonts.some((f) => f.family === "Inter" && f.style === "Bold"));
+});
+
+test("re-sending the same build updates in place and never duplicates", async () => {
+  const ctx = makeCtx();
+  const first = {
+    buildId: "hud",
+    root: { type: "FRAME", name: "HUD", children: [{ type: "TEXT", name: "Score", text: "1" }] },
+  };
+  await runBuild(ctx, { ...first, dryRun: false });
+  const rootId = ctx.currentPage.children[0].id;
+
+  const dry = await runBuild(ctx, { ...first, dryRun: true });
+  assert.equal(dry.status, "dry_run");
+  assert.equal(dry.root.nodeId, rootId);
+  assert.equal(dry.counts.create, 0);
+  assert.equal(dry.counts.update, 2);
+
+  const second = {
+    buildId: "hud",
+    root: { type: "FRAME", name: "HUD", children: [{ type: "TEXT", name: "Score", text: "2" }] },
+  };
+  const applied = await runBuild(ctx, { ...second, dryRun: false });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.created.length, 0);
+  assert.equal(ctx.currentPage.children.length, 1);
+  assert.equal(ctx.currentPage.children[0].children.length, 1);
+  assert.equal(ctx.currentPage.children[0].children[0].characters, "2");
+});
+
+test("a fingerprint mismatch refuses before the write", async () => {
+  const ctx = makeCtx();
+  const spec = { buildId: "hud", root: { type: "FRAME", name: "HUD", children: [{ type: "TEXT", name: "Score", text: "1" }] } };
+  await runBuild(ctx, { ...spec, dryRun: false });
+  const dry = await runBuild(ctx, { ...spec, dryRun: true });
+  const root = ctx.currentPage.children[0];
+
+  // A human (or another tool) moves the document after the plan.
+  root.children[0].characters = "changed by someone else";
+  const refused = await runBuild(ctx, {
+    ...spec,
+    dryRun: false,
+    expectedFingerprint: dry.fingerprint,
+  });
+  assert.equal(refused.status, "refused");
+  assert.equal(refused.reason, "FINGERPRINT_MISMATCH");
+  assert.equal(root.children[0].characters, "changed by someone else");
+});
+
+// ---------------------------------------------------------------- patch
+
+test("patch updates by key, creates only on allowCreate, and prunes on request", async () => {
+  const ctx = makeCtx();
+  await runBuild(ctx, {
+    buildId: "hud",
+    dryRun: false,
+    root: {
+      type: "FRAME", name: "HUD",
+      children: [
+        { type: "TEXT", name: "Score", text: "1" },
+        { type: "RECTANGLE", name: "Old", fills: "#ff0000" },
+      ],
+    },
+  });
+  const root = ctx.currentPage.children[0];
+  const score = root.children[0];
+  const old = root.children[1];
+
+  const blocked = await runPatch(ctx, {
+    buildId: "hud",
+    dryRun: true,
+    patch: { type: "FRAME", children: [{ type: "TEXT", name: "Missing", key: "hud/missing", text: "x" }] },
+  });
+  assert.equal(blocked.status, "blocked");
+  assert.ok(blocked.blocking.some((b) => b.includes("no node with this key")));
+
+  const created = await runPatch(ctx, {
+    buildId: "hud",
+    allowCreate: true,
+    dryRun: false,
+    patch: { type: "FRAME", children: [{ type: "TEXT", name: "Missing", key: "hud/missing", text: "x" }] },
+  });
+  assert.equal(created.status, "applied");
+  assert.ok(root.children.some((c) => c.getPluginData(KEY_DATA) === "hud/missing"));
+
+  // Update the existing score by its key, and make the root exact (drop Old).
+  const updated = await runPatch(ctx, {
+    buildId: "hud",
+    prune: true,
+    dryRun: false,
+    patch: {
+      type: "FRAME",
+      children: [
+        { type: "TEXT", key: score.getPluginData(KEY_DATA), text: "99" },
+        { type: "TEXT", key: "hud/missing", text: "x" },
+      ],
+    },
+  });
+  assert.equal(updated.status, "applied");
+  assert.equal(score.characters, "99");
+  assert.ok(old.removed);
+  assert.ok(!root.children.includes(old));
+  assert.equal(root.children.length, 2);
+});
+
+test("a protected node survives prune and is reported", async () => {
+  const ctx = makeCtx();
+  await runBuild(ctx, {
+    buildId: "hud",
+    dryRun: false,
+    root: {
+      type: "FRAME", name: "HUD",
+      children: [
+        { type: "TEXT", name: "Score", text: "1" },
+        { type: "RECTANGLE", name: "Keep", key: "keep", protected: true },
+      ],
+    },
+  });
+  const root = ctx.currentPage.children[0];
+  const keep = root.children[1];
+  assert.equal(keep.getPluginData(PROTECTED_DATA), "1");
+
+  const applied = await runPatch(ctx, {
+    buildId: "hud",
+    prune: true,
+    dryRun: false,
+    patch: { type: "FRAME", children: [{ type: "TEXT", key: keyFor("hud", "TEXT", "Score", 0), text: "2" }] },
+  });
+  assert.equal(applied.status, "applied");
+  assert.ok(root.children.includes(keep));
+  assert.ok(applied.warnings.some((w) => w.includes("protected")));
+});
+
+// ---------------------------------------------------------------- batch
+
+async function batchFixture() {
+  const ctx = makeCtx();
+  await runBuild(ctx, {
+    buildId: "hud",
+    dryRun: false,
+    root: {
+      type: "FRAME", name: "HUD", size: { width: 360, height: 200 },
+      children: [
+        { type: "TEXT", name: "Score", text: "1" },
+        { type: "RECTANGLE", name: "Bar", size: { width: 100, height: 8 }, fills: "#ff0000" },
+        { type: "FRAME", name: "Box", size: { width: 100, height: 50 }, children: [] },
+      ],
+    },
+  });
+  const root = ctx.currentPage.children[0];
+  return { ctx, root, score: root.children[0], bar: root.children[1], box: root.children[2] };
+}
+
+test("batch dry run resolves every target and writes nothing", async () => {
+  const { ctx, root, score, bar } = await batchFixture();
+  const undosBefore = ctx.metrics.undos;
+  const dry = await runBatch(ctx, {
+    dryRun: true,
+    ops: [
+      { op: "set_text", key: score.getPluginData(KEY_DATA), text: "42" },
+      { op: "set_fill", key: bar.getPluginData(KEY_DATA), fills: "#00ff00" },
+      { op: "resize", key: bar.getPluginData(KEY_DATA), width: 120, height: 12 },
+      { op: "rename", key: bar.getPluginData(KEY_DATA), name: "Progress" },
+    ],
+  });
+  assert.equal(dry.status, "dry_run");
+  assert.equal(dry.ops.length, 4);
+  assert.ok(dry.fingerprints[score.id] && dry.fingerprints[bar.id]);
+  assert.equal(score.characters, "1");
+  assert.equal(bar.width, 100);
+  assert.equal(ctx.metrics.undos, undosBefore);
+});
+
+test("batch applies all ops in one transaction and guards each target fingerprint", async () => {
+  const { ctx, root, score, bar, box } = await batchFixture();
+  const dry = await runBatch(ctx, {
+    dryRun: true,
+    ops: [
+      { op: "set_text", key: score.getPluginData(KEY_DATA), text: "42", fontSize: 20 },
+      { op: "set_fill", key: bar.getPluginData(KEY_DATA), fills: "#00ff00" },
+      { op: "resize", key: bar.getPluginData(KEY_DATA), width: 120, height: 12 },
+      { op: "rename", key: bar.getPluginData(KEY_DATA), name: "Progress" },
+      { op: "reparent", key: score.getPluginData(KEY_DATA), parentId: box.id },
+    ],
+  });
+  const applied = await runBatch(ctx, {
+    dryRun: false,
+    expectedFingerprints: dry.fingerprints,
+    ops: [
+      { op: "set_text", key: score.getPluginData(KEY_DATA), text: "42", fontSize: 20 },
+      { op: "set_fill", key: bar.getPluginData(KEY_DATA), fills: "#00ff00" },
+      { op: "resize", key: bar.getPluginData(KEY_DATA), width: 120, height: 12 },
+      { op: "rename", key: bar.getPluginData(KEY_DATA), name: "Progress" },
+      { op: "reparent", key: score.getPluginData(KEY_DATA), parentId: box.id },
+    ],
+  });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.failed, 0);
+  assert.equal(score.characters, "42");
+  assert.equal(score.fontSize, 20);
+  assert.equal(bar.fills[0].color.g, 1);
+  assert.equal(bar.width, 120);
+  assert.equal(bar.name, "Progress");
+  assert.equal(score.parent, box);
+  assert.ok(ctx.metrics.undos > 0);
+  assert.equal(ctx.metrics.triggers, 0);
+
+  const before = score.characters;
+  score.characters = "changed";
+  const refused = await runBatch(ctx, {
+    dryRun: false,
+    expectedFingerprints: dry.fingerprints,
+    ops: [{ op: "set_text", key: score.getPluginData(KEY_DATA), text: "nope" }],
+  });
+  assert.equal(refused.status, "refused");
+  assert.equal(refused.reason, "FINGERPRINT_MISMATCH");
+  assert.equal(score.characters, "changed");
+  assert.equal(before, "42");
+});
+
+test("batch duplicate is idempotent by newKey and rekeys its descendants", async () => {
+  const { ctx, root, box } = await batchFixture();
+  const first = await runBatch(ctx, {
+    dryRun: false,
+    ops: [{ op: "duplicate", key: box.getPluginData(KEY_DATA), newKey: "hud/box-copy", name: "Box copy" }],
+  });
+  assert.equal(first.status, "applied");
+  assert.equal(first.ops[0].status, "created");
+  const copy = ctx.metrics.byId.get(first.ops[0].nodeId);
+  assert.equal(copy.name, "Box copy");
+  assert.equal(copy.getPluginData(KEY_DATA), "hud/box-copy");
+  assert.equal(copy.parent, root);
+
+  const again = await runBatch(ctx, {
+    dryRun: true,
+    ops: [{ op: "duplicate", key: box.getPluginData(KEY_DATA), newKey: "hud/box-copy" }],
+  });
+  assert.equal(again.ops[0].status, "noop");
+  assert.equal(again.ops[0].existingNodeId, copy.id);
+  assert.equal(root.children.filter((c) => c.getPluginData(KEY_DATA) === "hud/box-copy").length, 1);
+});
+
+test("batch refuses a protected target and an unknown key during preflight", async () => {
+  const ctx = makeCtx();
+  await runBuild(ctx, {
+    buildId: "hud", dryRun: false,
+    root: {
+      type: "FRAME", name: "HUD",
+      children: [{ type: "TEXT", name: "Keep", key: "keep", text: "1", protected: true }],
+    },
+  });
+  const root = ctx.currentPage.children[0];
+  await assert.rejects(
+    () => runBatch(ctx, { dryRun: true, ops: [{ op: "set_text", key: "keep", text: "2" }] }),
+    /protected/,
+  );
+  await assert.rejects(
+    () => runBatch(ctx, { dryRun: true, ops: [{ op: "set_text", key: "nope", text: "2" }] }),
+    /no node with key/,
+  );
+  assert.equal(root.children[0].characters, "1");
+});
+
+test("a patch key under the wrong parent is refused instead of duplicated", async () => {
+  const ctx = makeCtx();
+  await runBuild(ctx, {
+    buildId: "hud",
+    dryRun: false,
+    root: {
+      type: "FRAME", name: "HUD", children: [
+        { type: "FRAME", name: "Left", children: [{ type: "TEXT", name: "Score", text: "1" }] },
+        { type: "FRAME", name: "Right", children: [] },
+      ],
+    },
+  });
+  const root = ctx.currentPage.children[0];
+  const score = root.children[0].children[0];
+  const right = root.children[1];
+
+  const blocked = await runPatch(ctx, {
+    buildId: "hud",
+    dryRun: true,
+    patch: {
+      type: "FRAME",
+      children: [
+        { type: "FRAME", key: root.children[0].getPluginData(KEY_DATA), children: [] },
+        { type: "FRAME", key: root.children[1].getPluginData(KEY_DATA), children: [
+          { type: "TEXT", key: score.getPluginData(KEY_DATA), text: "2" },
+        ] },
+      ],
+    },
+  });
+  assert.equal(blocked.status, "blocked");
+  assert.ok(blocked.blocking.some((b) => b.includes("lives under")));
+  assert.equal(score.parent, root.children[0]);
+  assert.equal(right.children.length, 0);
+});

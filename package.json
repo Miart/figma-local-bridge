@@ -1,9 +1,40 @@
 {
   "name": "figma-local-bridge",
-  "version": "0.3.0",
-  "private": true,
+  "version": "0.4.0",
   "type": "module",
   "description": "Local MCP bridge for Figma: OpenCode <-> MCP(stdio) <-> WebSocket <-> Figma plugin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Miart/figma-local-bridge.git"
+  },
+  "homepage": "https://github.com/Miart/figma-local-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/Miart/figma-local-bridge/issues"
+  },
+  "keywords": [
+    "figma",
+    "mcp",
+    "model-context-protocol",
+    "design",
+    "plugin"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "figma-local-bridge": "server/dist/index.js"
+  },
+  "main": "server/dist/index.js",
+  "files": [
+    "server/dist",
+    "plugin/code.js",
+    "plugin/ui.html",
+    "plugin/manifest.json",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build:plugin": "node plugin/build.mjs",
     "build:server": "tsc -p tsconfig.json",

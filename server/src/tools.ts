@@ -10,6 +10,12 @@ import { registerCheckpointTools } from "./checkpoint-tools.js";
 import { registerOpsTools } from "./ops-tools.js";
 import { registerExportTools } from "./export-tools.js";
 import { registerJournalTools } from "./journal-tools.js";
+import { registerBuildTools } from "./build-tools.js";
+import { registerBatchTools } from "./batch-tools.js";
+import { registerAuditTools } from "./audit-tools.js";
+import { registerIndexTools } from "./index-tools.js";
+import { registerDesignSystemTools } from "./design-system-tools.js";
+import { registerSpecTools } from "./spec-tools.js";
 
 export interface Capabilities {
   read: boolean;
@@ -101,6 +107,17 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   // The journal is local and needs neither the daemon nor the plugin: it answers
   // from a file, which is the point — it works when the live half is gone.
   registerJournalTools(server);
+  // Build/patch are safe to register in both modes: a dry run is read-only, and
+  // the apply half checks caps.write at call time.
+  registerBuildTools(server, client, caps);
+  // Batch is the same deal: the dry run is a read, the apply checks caps.write.
+  registerBatchTools(server, client, caps);
+  // Audit, index and search are read-only and belong in both modes.
+  registerAuditTools(server, client);
+  registerIndexTools(server, client);
+  registerDesignSystemTools(server, client);
+  // The reverse of build is a read of the document; it belongs in both modes.
+  registerSpecTools(server, client);
 
   if (!caps.write) {
     server.tool(

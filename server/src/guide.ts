@@ -39,6 +39,13 @@ replayed (the answer came from the opId cache, so the method did not run again;
 a replay is safe). After "may or may not have been applied", re-check with
 figma_inspect before retrying; after "not sent", retrying is free.
 
+Prefer figma_build/patch for a keyed tree and figma_batch_edit for many small
+edits: all three default to dryRun:true, return a planId and fingerprints, and
+refuse an apply whose plan or targets changed. figma_audit, figma_index,
+figma_search, figma_design_system and figma_export_build_spec are read-only.
+The last one turns a live subtree back into a figma_build spec; read its
+unsupported/warnings, and never build a result marked truncated.
+
 Writes are serialized, so a call can wait behind another write for longer than
 its caller waits. When one times out, figma_ops (opId from the error) says
 whether it is still queued, running, or already finished and what it returned;

@@ -16,6 +16,12 @@ plugin/session-key.mjs
 plugin/checkpoint.mjs
 plugin/helpers.mjs
 plugin/exports.mjs
+plugin/ui-build.mjs
+plugin/batch.mjs
+plugin/audit.mjs
+plugin/index.mjs
+plugin/design-system.mjs
+plugin/spec-export.mjs
 
 # logs and OS junk
 *.log

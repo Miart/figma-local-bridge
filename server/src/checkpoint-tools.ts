@@ -313,7 +313,9 @@ export function registerCheckpointTools(server: McpServer, client: FigmaClient, 
               (!wet ? `\nRun again with dryRun: false and allowDestructive: true to perform it.` : "") +
               (report.skipped.length ? `\n${report.skipped.length} node(s) skipped.` : "") +
               (report.fontsUnavailable.length ? `\nFonts unavailable: ${report.fontsUnavailable.join(", ")} (the text came back in the fallback font).` : "") +
-              (report.bindingsDropped.length ? `\n${report.bindingsDropped.length} paint(s) came back by value: their variable bindings are gone.` : "");
+              (report.bindingsDropped.length ? `\n${report.bindingsDropped.length} paint(s) came back by value: their variable bindings are gone.` : "") +
+              ((report.stylesRestored?.length ?? 0) ? `\n${report.stylesRestored.length} style link(s) restored.` : "") +
+              ((report.stylesMissing?.length ?? 0) ? `\n${report.stylesMissing.length} style link(s) could not be restored; their values came back unlinked.` : "");
 
             return content(
               caption +
@@ -334,6 +336,8 @@ export function registerCheckpointTools(server: McpServer, client: FigmaClient, 
                     skipped: fold(report.skipped ?? [], 20),
                     fontsUnavailable: report.fontsUnavailable ?? [],
                     bindingsDropped: fold(report.bindingsDropped ?? [], 20),
+                    stylesRestored: fold(report.stylesRestored ?? [], 20),
+                    stylesMissing: fold(report.stylesMissing ?? [], 20),
                     propertiesFailed: fold(report.propertiesFailed ?? [], 20),
                     notes: fold(report.notes ?? [], 20),
                     drift: { identical: drift.identical, differences: drift.total, diff: fold(drift.differences, 25), notes: drift.notes },

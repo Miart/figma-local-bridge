@@ -195,7 +195,9 @@ try {
   check("all 4 core tools exposed", missingCore.length === 0,
     missingCore.length ? "missing: " + missingCore.join(",") : core.join(","));
 
-  const parity = ["figma_use", "figma_get_metadata", "figma_whoami"];
+  const parity = ["figma_use", "figma_get_metadata", "figma_whoami",
+    "figma_build", "figma_patch", "figma_batch_edit", "figma_audit", "figma_index", "figma_search", "figma_design_system",
+    "figma_export_build_spec"];
   const missingParity = parity.filter((c) => !names.includes(c));
   check("parity tools exposed", missingParity.length === 0,
     missingParity.length ? "missing: " + missingParity.join(",") : parity.join(","));

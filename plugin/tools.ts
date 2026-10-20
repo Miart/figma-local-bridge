@@ -23,6 +23,12 @@ import { DUMP_SCHEMA, LIMITATIONS, dumpSubtree, restoreSubtree } from "./checkpo
 import { sessionKey } from "./session-key";
 import { makeHelpers } from "./helpers";
 import { atlasManifest, handoffPreviewRefusal, nineSliceDescriptor, pngSize, stateList, webHandoff } from "./exports";
+import { runBuild, runPatch } from "./ui-build";
+import { runBatch } from "./batch";
+import { runAudit } from "./audit";
+import { runIndex, runSearch } from "./index";
+import { runDesignSystem } from "./design-system";
+import { runExportSpec } from "./spec-export";
 
 const NS = "figma-local-bridge";
 const MAX_NODES = 1500;
@@ -785,6 +791,9 @@ export const MUTATING_METHODS: ReadonlySet<string> = new Set([
   "set_page",
   "set_selection",
   "checkpoint_restore",
+  "build",
+  "patch",
+  "batch",
 ]);
 
 export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
@@ -1690,6 +1699,58 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
    * subtree again and comparing, which is the caller's job: a module that
    * verifies its own write against its own data proves nothing.
    */
+  /**
+   * Declarative build: validate + resolve + plan, then create/update a keyed
+   * tree in one transaction. `dryRun` defaults to true; apply requires the
+   * caller to say `dryRun: false` out loud.
+   */
+  async build(p: Json) {
+    return runBuild(figma, p);
+  },
+
+  /**
+   * Patch a keyed tree. Missing keys are a refusal unless `allowCreate` is
+   * true; existing keys are updated in place so ids and overrides survive.
+   */
+  async patch(p: Json) {
+    return runPatch(figma, p);
+  },
+
+  /**
+   * Multi-target edit in one transaction. Targets are nodeId or stable key;
+   * every target, font, style and variant is resolved before the first write.
+   */
+  async batch(p: Json) {
+    return runBatch(figma, p);
+  },
+
+  /** Read-only design-system audit: keys, hardcoded paints, text styles, contrast. */
+  async audit(p: Json) {
+    return runAudit(figma, p);
+  },
+
+  /** Read-only flat page index and targeted search. */
+  async index(p: Json) {
+    return runIndex(figma, p);
+  },
+
+  async search(p: Json) {
+    return runSearch(figma, p);
+  },
+
+  /** Local styles, variables and components as one comparable snapshot. */
+  async design_system(p: Json) {
+    return runDesignSystem(figma, p);
+  },
+
+  /**
+   * The reverse of build: a live subtree as a build spec, with every loss
+   * (unsupported node, mixed value, instance interior) named in the reply.
+   */
+  async export_spec(p: Json) {
+    return runExportSpec(figma, p);
+  },
+
   async checkpoint_restore(p: Json) {
     if (!p.dump || typeof p.dump !== "object") {
       throw new Error("checkpoint_restore needs `dump`: the subtree from a checkpoint_dump reply.");

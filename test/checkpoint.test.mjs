@@ -23,6 +23,7 @@ const nextId = () => `${++seq}:${seq}`;
 const COMMON = () => ({
   x: 0, y: 0, width: 100, height: 100, rotation: 0,
   opacity: 1, blendMode: "NORMAL", visible: true, locked: false,
+  fillStyleId: "", strokeStyleId: "", effectStyleId: "", textStyleId: "",
   fills: [], strokes: [], strokeWeight: 1, strokeAlign: "INSIDE",
   strokeCap: "NONE", strokeJoin: "MITER", dashPattern: [],
   cornerRadius: 0, effects: [],
@@ -479,6 +480,36 @@ const errors = async (fn) => {
   const report = await restoreSubtree(root, ctxFor(guard, target), {});
   check("bindings: the paint comes back by value and the dropped binding is reported",
     target.children[0].fills[0].color.r === 1 && report.bindingsDropped.join(",") === "$.children[0].state.fills");
+}
+
+{
+  // A style link is not the same as the paint value. The dump records both, and
+  // a restore re-links by id when the file still has the style.
+  const figma = fakeFigma();
+  const styles = new Map([["S:fill", { id: "S:fill", name: "brand/primary", type: "PAINT" }]]);
+  figma.getStyleByIdAsync = async (id) => styles.get(id) ?? null;
+  const target = node("FRAME");
+  const src = node("FRAME", {
+    name: "Card",
+    fillStyleId: "S:fill",
+    children: [node("RECTANGLE", { name: "bg", fillStyleId: "S:fill" })],
+  });
+  const { root } = await dumpSubtree(src);
+  check("styles: the dump keeps style ids next to the paint values",
+    root.meta.styleIds.fillStyleId === "S:fill" && root.children[0].meta.styleIds.fillStyleId === "S:fill");
+
+  const report = await restoreSubtree(root, ctxFor(figma, target), {});
+  check("styles: an existing style is re-linked on the root and the rebuilt leaf",
+    target.fillStyleId === "S:fill" && target.children[0].fillStyleId === "S:fill" &&
+    report.stylesRestored.length === 2 && report.stylesMissing.length === 0);
+
+  const missing = fakeFigma();
+  missing.getStyleByIdAsync = async () => null;
+  const target2 = node("FRAME");
+  const report2 = await restoreSubtree(root, ctxFor(missing, target2), {});
+  check("styles: a style the file lost is reported, and the value still comes back",
+    target2.children[0].fillStyleId === "" && report2.stylesMissing.length === 2 &&
+    report2.notes.length === 0);
 }
 
 {

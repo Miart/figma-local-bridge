@@ -37,7 +37,7 @@ export const MAX_DEPTH = 40;
 export const LIMITATIONS: readonly string[] = [
   "instance interiors are not captured: a restored INSTANCE shows its main component's current content (component properties are re-applied)",
   "per-run text styling is not rebuilt; the run count is recorded so a mixed-font node reports as different",
-  "variable bindings, style ids and explicit modes are recorded in meta and not restored",
+  "variable bindings and explicit modes are recorded in meta and not restored; style ids are re-linked when the style still exists, and the paint/font value is restored even when it does not",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
   "a BOOLEAN_OPERATION is not rebuilt (its inputs are not recoverable from the API)",
 ];
@@ -97,6 +97,10 @@ export interface RestoreReport {
   fontsUnavailable: string[];
   /** Paints restored by value because their variable bindings would not apply. */
   bindingsDropped: string[];
+  /** Style links re-applied because the style still exists in the file. */
+  stylesRestored: Array<{ path: string; field: string; id: string; name?: string }>;
+  /** Style links the file no longer has; the paint/font value is still restored. */
+  stylesMissing: Array<{ path: string; field: string; id: string; why: string }>;
   propertiesFailed: Array<{ path: string; name: string; why: string }>;
   notes: string[];
   wouldRemove?: Array<{ id: string; name: string; type: string }>;
@@ -262,14 +266,20 @@ function readMeta(node: any): Dict | undefined {
     /* ignore */
   }
   const styles: string[] = [];
+  const styleIds: Dict = {};
   for (const k of ["fillStyleId", "strokeStyleId", "effectStyleId", "textStyleId"]) {
     try {
-      if (node[k] && !isMixedValue(node[k]) && node[k] !== "") styles.push(k.replace("StyleId", ""));
+      const id = node[k];
+      if (id && !isMixedValue(id) && id !== "") {
+        styles.push(k.replace("StyleId", ""));
+        styleIds[k] = id;
+      }
     } catch {
       /* ignore */
     }
   }
   if (styles.length) meta.styles = styles;
+  if (Object.keys(styleIds).length) meta.styleIds = styleIds;
   if (node.type === "COMPONENT" || node.type === "COMPONENT_SET") {
     try {
       if (node.key) meta.componentKey = node.key;
@@ -392,6 +402,8 @@ export async function restoreSubtree(dump: DumpNode, ctx: RestoreContext, opts: 
     skipped: [],
     fontsUnavailable: [],
     bindingsDropped: [],
+    stylesRestored: [],
+    stylesMissing: [],
     propertiesFailed: [],
     notes: [],
   };
@@ -458,7 +470,10 @@ export async function restoreSubtree(dump: DumpNode, ctx: RestoreContext, opts: 
     await buildNode(children[i], target, ctx, report, `$.children[${i}]`, opts);
   }
 
-  if (dump.type === target.type) await applyFinal(target, dump.state, ctx, report, "$", true);
+  if (dump.type === target.type) {
+    await applyFinal(target, dump.state, ctx, report, "$", true);
+    await applyStyleLinks(target, dump.meta?.styleIds, ctx, report, "$");
+  }
   return report;
 }
 
@@ -479,6 +494,7 @@ async function buildNode(d: DumpNode, parent: any, ctx: RestoreContext, report: 
       await buildNode(kids[i], node, ctx, report, `${path}.children[${i}]`, opts);
     }
     await applyFinal(node, d.state, ctx, report, path, false);
+    await applyStyleLinks(node, d.meta?.styleIds, ctx, report, path);
     report.created++;
     return node;
   } catch (e) {
@@ -519,6 +535,7 @@ async function buildGroup(d: DumpNode, parent: any, ctx: RestoreContext, report:
     group.name = d.name;
     applyLayout(group, d.state, report, path);
     await applyFinal(group, d.state, ctx, report, path, false);
+    await applyStyleLinks(group, d.meta?.styleIds, ctx, report, path);
     report.created++;
     return group;
   } catch (e) {
@@ -719,6 +736,37 @@ function applyPaints(node: any, field: string, value: any, report: RestoreReport
       report.bindingsDropped.push(`${path}.state.${field}`);
     } catch (e) {
       report.notes.push(`${path}: ${field} not restored: ${msg(e)}`);
+    }
+  }
+}
+
+/**
+ * Re-link a style by its stable id. The paint/font VALUE is already restored,
+ * so a style the file no longer owns leaves a correct-looking node with no
+ * link — and this is reported rather than presented as a full restore.
+ */
+async function applyStyleLinks(node: any, ids: Dict | undefined, ctx: RestoreContext, report: RestoreReport, path: string): Promise<void> {
+  if (!ids) return;
+  for (const [field, id] of Object.entries(ids)) {
+    if (!(field in node)) continue;
+    const styleId = String(id);
+    try {
+      const style = ctx.figma.getStyleByIdAsync ? await ctx.figma.getStyleByIdAsync(styleId) : null;
+      if (!style) {
+        report.stylesMissing.push({ path, field, id: styleId, why: "the style no longer exists in this file" });
+        continue;
+      }
+      if (field === "textStyleId" && style.fontName && ctx.loadFont) {
+        try { await ctx.loadFont(style.fontName); } catch { /* the setter reports the real problem */ }
+      }
+      if (field === "textStyleId" && typeof node.setTextStyleIdAsync === "function") {
+        await node.setTextStyleIdAsync(styleId);
+      } else {
+        node[field] = styleId;
+      }
+      report.stylesRestored.push({ path, field, id: styleId, name: style.name });
+    } catch (e) {
+      report.stylesMissing.push({ path, field, id: styleId, why: msg(e) });
     }
   }
 }

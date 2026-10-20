@@ -66,6 +66,71 @@ await build({
   logLevel: "warning",
 });
 
+// ui-build.ts is the declarative build/patch engine. It takes the Plugin API as
+// an argument, never reaches for the global, so the planner and the apply path
+// can be driven by a stub in plain Node.
+await build({
+  entryPoints: [join(here, "ui-build.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "ui-build.mjs"),
+  logLevel: "warning",
+});
+
+// batch.ts is the multi-target edit engine. Same rule as ui-build: the Plugin
+// API is an argument, so the preflight and apply paths are testable in Node.
+await build({
+  entryPoints: [join(here, "batch.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "batch.mjs"),
+  logLevel: "warning",
+});
+
+// audit.ts is read-only, but it is exactly the kind of code that must be tested
+// against the shipped module: its rules are promises about what a finding means.
+await build({
+  entryPoints: [join(here, "audit.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "audit.mjs"),
+  logLevel: "warning",
+});
+
+// index.ts is the read-only page index/search; its node cap and match semantics
+// are exactly what a test needs to pin.
+await build({
+  entryPoints: [join(here, "index.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "index.mjs"),
+  logLevel: "warning",
+});
+
+// spec-export.ts turns a live subtree back into a figma_build spec.
+await build({
+  entryPoints: [join(here, "spec-export.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "spec-export.mjs"),
+  logLevel: "warning",
+});
+
+// design-system.ts is the comparable snapshot behind the sync diff.
+await build({
+  entryPoints: [join(here, "design-system.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "design-system.mjs"),
+  logLevel: "warning",
+});
+
 // The tool table, so a test can check MUTATING_METHODS against the methods that
 // actually exist. tools.ts only touches `figma` inside its handlers, never at
 // module scope, which is what makes it loadable here.
@@ -144,4 +209,4 @@ await build({
 });
 
 console.log("plugin built ->", join(here, "code.js"));
-console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs, helpers.mjs, exports.mjs");
+console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs, helpers.mjs, exports.mjs, ui-build.mjs, batch.mjs, audit.mjs, index.mjs, design-system.mjs, spec-export.mjs");

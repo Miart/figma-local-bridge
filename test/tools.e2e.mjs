@@ -85,7 +85,9 @@ try {
   const expected = ["figma_whoami", "figma_get_metadata", "figma_get_design_context", "figma_get_layout_tree", "figma_get_screenshot",
     "figma_get_variable_defs", "figma_get_libraries", "figma_search_design_system", "figma_get_figjam",
     "figma_download_assets", "figma_get_code_connect_map", "figma_use", "figma_upload_assets", "figma_add_code_connect_map",
-    "figma_compare", "figma_checkpoint", "figma_ops", "figma_cancel"];
+    "figma_compare", "figma_checkpoint", "figma_ops", "figma_cancel",
+    "figma_build", "figma_patch", "figma_batch_edit", "figma_audit", "figma_index", "figma_search", "figma_design_system",
+    "figma_export_build_spec"];
   const missing = expected.filter((n) => !tools.includes(n));
   check("all parity tools are registered", missing.length === 0, "missing: " + missing.join(","));
 
@@ -119,6 +121,109 @@ try {
         return ok({ ok: true, result: { id: "5:5" }, logs: ["hello"], changed: true, ms: { code: 12, index: 345, total: 360 }, nodes: { before: 3, after: 4 } },
           env.params.code.includes("replayed") ? { replayed: true, rev: 8 } : undefined);
       case "import_images": return ok({ created: env.params.files.map((f) => ({ name: f.name, bytes: Buffer.from(f.base64, "base64").length })) });
+      case "build":
+        return ok({
+          status: env.params.dryRun === false ? "applied" : "dry_run",
+          schema: "build-v1",
+          buildId: env.params.buildId,
+          root: { key: env.params.buildId, type: "FRAME", name: "HUD", nodeId: env.params.dryRun === false ? "7:1" : null, action: env.params.dryRun === false ? "update" : "create" },
+          parent: { id: "0:1", name: "Page 1", type: "PAGE" },
+          counts: { nodes: 2, create: env.params.dryRun === false ? 0 : 2, update: env.params.dryRun === false ? 2 : 0, unchanged: 0, delete: 0 },
+          planned: { create: env.params.dryRun === false ? [] : ["hud", "hud/title#0"], update: env.params.dryRun === false ? ["hud", "hud/title#0"] : [], delete: [], unchanged: [] },
+          fingerprint: "fp-test",
+          fonts: ["Inter/Regular"], styles: { text: [], paint: [], effect: [] }, variables: [], components: [],
+          warnings: [], blocking: [], prune: false,
+          planId: env.params.planId,
+          verification: { ok: true, missing: [], typeMismatch: [] },
+        });
+      case "design_system":
+        return ok({
+          schema: "design-system-v1",
+          file: { name: "Test file", key: "FILEKEY" },
+          include: env.params.include || ["styles", "variables", "components"],
+          styles: [{ kind: "paint", id: "S:1", key: "style-key", name: "brand/primary", type: "PAINT", paints: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }] }],
+          variables: [],
+          components: [],
+          counts: { styles: 1, variables: 0, components: 0, total: 1 },
+          truncated: false,
+          warnings: [],
+        });
+      case "export_spec":
+        return ok({
+          schema: "build-spec-export/v1",
+          source: { id: env.params.nodeId || "1:2", name: "Card", type: "FRAME", key: "card", buildId: null, path: "Page 1 / Card" },
+          spec: { type: "FRAME", name: "Card", key: "card", size: { width: 100, height: 50 }, fills: [], children: [] },
+          counts: { nodes: 1, scanned: 1, skipped: 0 },
+          unsupported: [], warnings: [], truncated: false,
+          ms: { export: 4 },
+        });
+      case "index":
+        return ok({
+          schema: "index-v1",
+          scope: { id: "0:1", name: "Actual", type: "PAGE" },
+          nodes: [{ id: "1:2", key: "hud", name: "HUD", type: "FRAME", path: "Actual / HUD", depth: 0, visible: true, size: [10, 10], childCount: 1 }],
+          counts: { nodes: 1, byType: { FRAME: 1 } },
+          settings: { includeHidden: false, includeText: false, maxNodes: 1000, maxDepth: null },
+          truncated: false,
+          warnings: [],
+        });
+      case "search":
+        return ok({
+          schema: "search-v1",
+          scope: { id: "0:1", name: "Actual", type: "PAGE" },
+          query: { text: env.params.query, mode: env.params.mode, caseSensitive: false, fields: ["name", "key", "text"] },
+          filters: { types: null, keyPrefix: null, hasKey: null, includeHidden: true },
+          matches: [{ id: "1:2", key: "hud", name: "HUD", type: "FRAME", path: "Actual / HUD", depth: 0, visible: true, size: [10, 10], childCount: 1, matchedIn: ["name"] }],
+          counts: { matches: 1, listed: 1, byField: { name: 1 }, byType: { FRAME: 1 }, scanned: 1 },
+          truncated: false,
+          resultsTruncated: 0,
+          warnings: [],
+        });
+      case "audit":
+        return ok({
+          schema: "audit-v1",
+          scope: { id: env.params.rootNodeId || "0:1", name: "Card", type: "FRAME" },
+          rules: [{ id: "contrast", description: "text contrast", severity: "error" }],
+          nodesScanned: 4,
+          truncated: false,
+          includeHidden: false,
+          counts: { error: 1, warning: 0, info: 0, total: 1 },
+          byRule: { contrast: 1 },
+          findings: [{ rule: "contrast", severity: "error", nodeId: "1:3", nodeKey: "hud/title#0", name: "Title", type: "TEXT", path: "Card / Title", detail: "contrast 2.1:1", ratio: 2.1 }],
+          findingsTruncated: 0,
+          warnings: [],
+        });
+      case "batch":
+        return ok({
+          status: env.params.dryRun === false ? "applied" : "dry_run",
+          schema: "batch-v1",
+          ops: env.params.ops.map((op, index) => ({
+            index, op: op.op,
+            target: { id: "1:2", name: "Card", type: "FRAME", key: "hud" },
+            status: env.params.dryRun === false ? "updated" : "planned",
+            nodeId: env.params.dryRun === false ? "1:2" : undefined,
+          })),
+          fingerprints: { "1:2": "fp-test" },
+          applied: env.params.dryRun === false ? env.params.ops.length : 0,
+          failed: 0,
+          warnings: [],
+          planId: env.params.planId,
+        });
+      case "patch":
+        return ok({
+          status: env.params.dryRun === false ? "applied" : "dry_run",
+          schema: "build-v1",
+          buildId: env.params.buildId,
+          root: { key: "hud", type: "FRAME", name: "HUD", nodeId: "7:1", action: "update" },
+          parent: { id: "0:1", name: "Page 1", type: "PAGE" },
+          counts: { nodes: 1, create: 0, update: 1, unchanged: 0, delete: 0 },
+          planned: { create: [], update: ["hud"], delete: [], unchanged: [] },
+          fingerprint: "fp-test",
+          fonts: [], styles: { text: [], paint: [], effect: [] }, variables: [], components: [],
+          warnings: [], blocking: [], prune: false,
+          planId: env.params.planId,
+          verification: { ok: true, missing: [], typeMismatch: [] },
+        });
       case "ops": {
         const report = {
           file: { key: "FILEKEY", name: "Test file" },
@@ -256,6 +361,169 @@ try {
   fs.writeFileSync(svg, "<svg/>");
   const upSvg = await c.rpc("tools/call", { name: "figma_upload_assets", arguments: { paths: [svg] } });
   check("upload_assets rejects SVG with a pointer to figma_use", JSON.stringify(upSvg.result?.content ?? upSvg.error).includes("unsupported image type"));
+
+  // figma_build / figma_patch: the server mints a content planId, keeps a dry
+  // run read-only, and refuses to apply a spec that changed after the preview.
+  const buildSeenBefore = seen.length;
+  const buildDry = c.text(await c.rpc("tools/call", {
+    name: "figma_build",
+    arguments: {
+      buildId: "hud",
+      root: { type: "FRAME", name: "HUD", children: [{ type: "TEXT", name: "Title", text: "Hi" }] },
+    },
+  }));
+  const buildReq = seen[buildSeenBefore];
+  check("figma_build defaults to a dry run and sends a content planId",
+    buildDry.status === "dry_run" && buildReq.method === "build" && typeof buildReq.params.planId === "string" && buildReq.params.dryRun === true,
+    JSON.stringify({ dry: buildDry.status, method: buildReq.method, planId: buildReq.params.planId, dryRun: buildReq.params.dryRun }));
+
+  const buildApplied = c.text(await c.rpc("tools/call", {
+    name: "figma_build",
+    arguments: {
+      buildId: "hud", dryRun: false, planId: buildDry.planId, expectedFingerprint: buildDry.fingerprint,
+      root: { type: "FRAME", name: "HUD", children: [{ type: "TEXT", name: "Title", text: "Hi" }] },
+    },
+  }));
+  check("figma_build applies with the planId from the dry run",
+    buildApplied.status === "applied" && buildApplied.verification.ok === true && buildApplied.planId === buildDry.planId,
+    JSON.stringify(buildApplied).slice(0, 200));
+
+  const seenBeforeMismatch = seen.length;
+  const mismatch = await c.rpc("tools/call", {
+    name: "figma_build",
+    arguments: {
+      buildId: "hud", dryRun: false, planId: "not-the-plan",
+      root: { type: "FRAME", name: "HUD", children: [{ type: "TEXT", name: "Title", text: "Different" }] },
+    },
+  });
+  const mismatchMsg = String(mismatch.error?.message ?? mismatch.result?.content?.[0]?.text ?? JSON.stringify(mismatch));
+  check("figma_build refuses a planId that belongs to another spec before it reaches the plugin",
+    /PLAN_MISMATCH/.test(mismatchMsg) && seen.length === seenBeforeMismatch,
+    mismatchMsg.slice(0, 160));
+
+  const patchDry = c.text(await c.rpc("tools/call", {
+    name: "figma_patch",
+    arguments: {
+      buildId: "hud",
+      patch: { type: "FRAME", children: [{ type: "TEXT", name: "Title", text: "Hello" }] },
+    },
+  }));
+  check("figma_patch defaults to a dry-run diff",
+    patchDry.status === "dry_run" && patchDry.counts.update === 1 && patchDry.planId && patchDry.fingerprint === "fp-test",
+    JSON.stringify(patchDry).slice(0, 200));
+
+  const batchSeenBefore = seen.length;
+  const batchDry = c.text(await c.rpc("tools/call", {
+    name: "figma_batch_edit",
+    arguments: { ops: [{ op: "set_text", nodeId: "1:2", text: "Hello" }] },
+  }));
+  const batchReq = seen[batchSeenBefore];
+  check("figma_batch_edit defaults to a dry run with per-target fingerprints",
+    batchDry.status === "dry_run" && batchDry.ops.length === 1 && batchDry.fingerprints["1:2"] === "fp-test" &&
+      batchReq.method === "batch" && batchReq.params.dryRun === true && typeof batchReq.params.planId === "string",
+    JSON.stringify(batchDry).slice(0, 200));
+
+  const batchApplied = c.text(await c.rpc("tools/call", {
+    name: "figma_batch_edit",
+    arguments: {
+      dryRun: false,
+      planId: batchDry.planId,
+      expectedFingerprints: batchDry.fingerprints,
+      ops: [{ op: "set_text", nodeId: "1:2", text: "Hello" }],
+    },
+  }));
+  check("figma_batch_edit applies the same ops with the dry-run planId",
+    batchApplied.status === "applied" && batchApplied.failed === 0 && batchApplied.planId === batchDry.planId,
+    JSON.stringify(batchApplied).slice(0, 200));
+
+  const batchSeenMismatch = seen.length;
+  const batchMismatch = await c.rpc("tools/call", {
+    name: "figma_batch_edit",
+    arguments: {
+      dryRun: false,
+      planId: "not-the-plan",
+      ops: [{ op: "set_text", nodeId: "1:2", text: "Different" }],
+    },
+  });
+  const batchMismatchMsg = String(batchMismatch.error?.message ?? batchMismatch.result?.content?.[0]?.text ?? JSON.stringify(batchMismatch));
+  check("figma_batch_edit refuses a planId that belongs to another op list",
+    /PLAN_MISMATCH/.test(batchMismatchMsg) && seen.length === batchSeenMismatch,
+    batchMismatchMsg.slice(0, 160));
+
+  const auditSeenBefore = seen.length;
+  const audit = c.text(await c.rpc("tools/call", {
+    name: "figma_audit",
+    arguments: { rootNodeId: "1:2", rules: ["contrast"] },
+  }));
+  const auditReq = seen[auditSeenBefore];
+  check("figma_audit sends the subtree and the selected rules, and carries findings through",
+    auditReq.method === "audit" && auditReq.params.rootNodeId === "1:2" &&
+      audit.schema === "audit-v1" && audit.findings[0].rule === "contrast" && audit.counts.error === 1,
+    JSON.stringify(audit).slice(0, 200));
+
+  const indexSeenBefore = seen.length;
+  const index = c.text(await c.rpc("tools/call", {
+    name: "figma_index",
+    arguments: { maxNodes: 10, includeText: true },
+  }));
+  const indexReq = seen[indexSeenBefore];
+  check("figma_index sends its cap and returns a flat index",
+    indexReq.method === "index" && indexReq.params.maxNodes === 10 && indexReq.params.includeText === true &&
+      index.schema === "index-v1" && index.nodes[0].path === "Actual / HUD",
+    JSON.stringify(index).slice(0, 200));
+
+  const searchSeenBefore = seen.length;
+  const search = c.text(await c.rpc("tools/call", {
+    name: "figma_search",
+    arguments: { query: "hud", mode: "regex", types: ["FRAME"] },
+  }));
+  const searchReq = seen[searchSeenBefore];
+  check("figma_search passes mode, types and query through and returns match metadata",
+    searchReq.method === "search" && searchReq.params.mode === "regex" && searchReq.params.types[0] === "FRAME" &&
+      search.schema === "search-v1" && search.matches[0].matchedIn[0] === "name",
+    JSON.stringify(search).slice(0, 200));
+
+  const dsSeenBefore = seen.length;
+  const ds = c.text(await c.rpc("tools/call", {
+    name: "figma_design_system",
+    arguments: { include: ["styles"] },
+  }));
+  const dsReq = seen[dsSeenBefore];
+  check("figma_design_system inventories styles without writing",
+    dsReq.method === "design_system" && dsReq.params.include[0] === "styles" &&
+      ds.schema === "design-system-v1" && ds.counts.styles === 1 && ds.styles[0].key === "style-key",
+    JSON.stringify(ds).slice(0, 200));
+
+  const dsPath = join(dir, "design-system.json");
+  const exported = c.text(await c.rpc("tools/call", {
+    name: "figma_design_system",
+    arguments: { action: "export", path: dsPath, include: ["styles"] },
+  }));
+  const saved = JSON.parse(fs.readFileSync(dsPath, "utf8"));
+  check("figma_design_system export writes a re-readable snapshot with a hash",
+    exported.action === "export" && exported.bytes > 0 && /^[a-f0-9]{64}$/.test(exported.sha256) &&
+      saved.schema === "design-system-v1" && saved.styles[0].name === "brand/primary",
+    JSON.stringify(exported).slice(0, 200));
+
+  const dsDiff = c.text(await c.rpc("tools/call", {
+    name: "figma_design_system",
+    arguments: { action: "diff", path: dsPath, include: ["styles"] },
+  }));
+  check("figma_design_system diff compares by stable key and reports no drift",
+    dsDiff.action === "diff" && dsDiff.counts.added === 0 && dsDiff.counts.removed === 0 &&
+      dsDiff.counts.changed === 0 && dsDiff.counts.unchanged === 1,
+    JSON.stringify(dsDiff).slice(0, 200));
+
+  const specSeenBefore = seen.length;
+  const spec = c.text(await c.rpc("tools/call", {
+    name: "figma_export_build_spec",
+    arguments: { nodeId: "1:2", maxNodes: 25 },
+  }));
+  const specReq = seen[specSeenBefore];
+  check("figma_export_build_spec sends the root and cap, and returns a build spec",
+    specReq.method === "export_spec" && specReq.params.nodeId === "1:2" && specReq.params.maxNodes === 25 &&
+      spec.schema === "build-spec-export/v1" && spec.spec.key === "card" && spec.counts.nodes === 1,
+    JSON.stringify(spec).slice(0, 200));
 
   // figma_ops / figma_cancel: half the answer is the plugin's queue, half is what
   // THIS session is still waiting for. Both halves have to be in the reply, and
