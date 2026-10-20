@@ -184,6 +184,129 @@ async function paintsFor(
   return { paints };
 }
 
+async function paintsToSpec(
+  ctx: any,
+  paints: any,
+  vars: Map<string, any>,
+  warnings: string[],
+  path: string,
+): Promise<any[] | null> {
+  if (!Array.isArray(paints)) return null;
+  const out: any[] = [];
+  for (let i = 0; i < paints.length; i++) {
+    const p = await paintToSpec(ctx, paints[i], vars, warnings, `${path}[${i}]`);
+    if (p) out.push(p);
+  }
+  return out;
+}
+
+const TEXT_SEGMENT_FIELDS = [
+  "fontName", "fontSize", "fills", "textCase", "textDecoration",
+  "lineHeight", "letterSpacing", "hyperlink", "textStyleId", "fillStyleId",
+];
+
+const same = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
+
+const plain = (v: any) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
+
+function compactFont(value: any): { family: string; style: string } | null {
+  if (!isObj(value) || typeof value.family !== "string" || !value.family) return null;
+  return { family: value.family, style: String(value.style || "Regular") };
+}
+
+function compactLink(value: any): { type: "URL" | "NODE"; value: string } | null {
+  if (!isObj(value) || (value.type !== "URL" && value.type !== "NODE") || typeof value.value !== "string" || !value.value) {
+    return null;
+  }
+  return { type: value.type, value: value.value };
+}
+
+/**
+ * A mixed text node is read as Figma's own styled segments, so the spec does not
+ * have to guess one font and lose the rest. Returning null means the node is
+ * uniform (or the host could not read segments); the caller keeps the existing
+ * one-style export path.
+ */
+async function textSegmentsFor(node: any, state: any, path: string): Promise<any[] | null> {
+  if (typeof node.getStyledTextSegments !== "function") return null;
+  try {
+    const segs = node.getStyledTextSegments(TEXT_SEGMENT_FIELDS);
+    if (!Array.isArray(segs) || segs.length <= 1) return null;
+    const usable = segs.every((s: any) => s && Number.isInteger(s.start) && Number.isInteger(s.end) && s.end > s.start);
+    if (!usable) {
+      state.warnings.push(`${path}: per-run text styling has unreadable character offsets; the spec carries one base style`);
+      return null;
+    }
+    return segs;
+  } catch (e) {
+    state.warnings.push(`${path}: per-run text styling could not be read (${errMsg(e)}); the spec carries one base style`);
+    return null;
+  }
+}
+
+/**
+ * Emit only the runs that differ from the first segment. The first segment
+ * becomes the node's base style, so a run is the exception, not the whole text.
+ */
+async function textRunsFor(
+  ctx: any,
+  segments: any[],
+  baseFills: any[] | null,
+  vars: Map<string, any>,
+  warnings: string[],
+  path: string,
+): Promise<any[]> {
+  const base = segments[0];
+  const baseFont = compactFont(base.fontName);
+  const baseLink = compactLink(base.hyperlink);
+  const baseCase = String(base.textCase || "ORIGINAL");
+  const baseDecoration = String(base.textDecoration || "NONE");
+  const runs: any[] = [];
+  let styleIdsDiffer = false;
+  let fillStyleIdsDiffer = false;
+
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i];
+    const at = `${path}.runs[${i - 1}]`;
+    const run: any = { start: seg.start, end: seg.end };
+    let changed = false;
+
+    const font = compactFont(seg.fontName);
+    if (font && !same(font, baseFont)) { run.font = font; changed = true; }
+    if (Number.isFinite(Number(seg.fontSize)) && Number(seg.fontSize) !== Number(base.fontSize)) {
+      run.fontSize = round(Number(seg.fontSize));
+      changed = true;
+    }
+    const segFills = await paintsToSpec(ctx, seg.fills, vars, warnings, `${at}.fills`);
+    if (segFills && baseFills && !same(segFills, baseFills)) { run.fills = segFills; changed = true; }
+    const textCase = String(seg.textCase || "ORIGINAL");
+    if (textCase !== baseCase) { run.textCase = textCase; changed = true; }
+    const decoration = String(seg.textDecoration || "NONE");
+    if (decoration !== baseDecoration) { run.textDecoration = decoration; changed = true; }
+    if (!same(seg.lineHeight, base.lineHeight)) { run.lineHeight = plain(seg.lineHeight); changed = true; }
+    if (!same(seg.letterSpacing, base.letterSpacing)) { run.letterSpacing = plain(seg.letterSpacing); changed = true; }
+    const link = compactLink(seg.hyperlink);
+    if (!same(link, baseLink)) {
+      run.hyperlink = link;
+      changed = true;
+      if (link?.type === "NODE") {
+        warnings.push(`${at}: the text hyperlink points at node ${link.value}; a NODE link is file-local and will not resolve in another file`);
+      }
+    }
+    if (!same(seg.textStyleId ?? "", base.textStyleId ?? "")) styleIdsDiffer = true;
+    if (!same(seg.fillStyleId ?? "", base.fillStyleId ?? "")) fillStyleIdsDiffer = true;
+    if (changed) runs.push(run);
+  }
+
+  if (styleIdsDiffer) {
+    warnings.push(`${path}: text style ids vary across runs; per-run text style links are not representable, so literal run styling was exported`);
+  }
+  if (fillStyleIdsDiffer) {
+    warnings.push(`${path}: fill style ids vary across runs; per-run fill style links are not representable, so literal run fills were exported`);
+  }
+  return runs;
+}
+
 function effectsFor(node: any, warnings: string[], path: string): any[] | undefined {
   if (!Array.isArray(node.effects)) return undefined;
   const out: any[] = [];
@@ -328,6 +451,7 @@ async function exportNode(
   state.keys.add(key);
 
   const spec: Json = { type: node.type, name: node.name, key };
+  const textSegments = node.type === "TEXT" ? await textSegmentsFor(node, state, path) : null;
   if (node.type === "INSTANCE") {
     let main: any = null;
     try {
@@ -420,9 +544,28 @@ async function exportNode(
   if (node.itemReverseZIndex === true) spec.itemReverseZIndex = true;
   if (node.strokesIncludedInLayout === true) spec.strokesIncludedInLayout = true;
 
-  const fills = await paintsFor(ctx, node, "fills", state.styles, state.vars, state.warnings, path);
-  if (fills?.style) spec.fillStyle = fills.style;
-  else if (fills) spec.fills = fills.paints;
+  let baseFillsSpec: any[] | null = null;
+  if (textSegments) {
+    const style = await styleInfo(ctx, node.fillStyleId, state.styles);
+    if (style) spec.fillStyle = style.name;
+    else {
+      if (node.fillStyleId && !isMixed(node.fillStyleId)) {
+        state.warnings.push(`${path}: fill style id ${node.fillStyleId} no longer resolves; exported literal paints instead`);
+      }
+      baseFillsSpec = await paintsToSpec(ctx, textSegments[0].fills, state.vars, state.warnings, `${path}.fills`);
+      if (baseFillsSpec) spec.fills = baseFillsSpec;
+      else state.warnings.push(`${path}: the base run's fills could not be read and were omitted`);
+    }
+    // The style carries the base paints; the literal version is still needed to
+    // decide which later runs differ from them.
+    if (!baseFillsSpec) {
+      baseFillsSpec = await paintsToSpec(ctx, textSegments[0].fills, state.vars, state.warnings, `${path}.fills`);
+    }
+  } else {
+    const fills = await paintsFor(ctx, node, "fills", state.styles, state.vars, state.warnings, path);
+    if (fills?.style) spec.fillStyle = fills.style;
+    else if (fills) spec.fills = fills.paints;
+  }
   const strokes = await paintsFor(ctx, node, "strokes", state.styles, state.vars, state.warnings, path);
   if (strokes?.style) spec.strokeStyle = strokes.style;
   else if (strokes) spec.strokes = strokes.paints;
@@ -447,35 +590,67 @@ async function exportNode(
     spec.text = typeof node.characters === "string" ? node.characters : "";
     const style = await styleInfo(ctx, node.textStyleId, state.styles);
     if (style) spec.textStyle = style.name;
-    if (isObj(node.fontName)) {
-      if (!style || (style.fontName && (style.fontName.family !== node.fontName.family || style.fontName.style !== node.fontName.style))) {
-        spec.font = { family: node.fontName.family, style: node.fontName.style };
+    if (textSegments) {
+      const base = textSegments[0];
+      const baseFont = compactFont(base.fontName);
+      if (baseFont) {
+        if (!style || !style.fontName || style.fontName.family !== baseFont.family || style.fontName.style !== baseFont.style) {
+          spec.font = baseFont;
+        }
+      } else {
+        state.warnings.push(`${path}: the first text run has no readable font`);
       }
-    } else if (!style) {
-      state.warnings.push(`${path}: text uses MIXED fonts; the spec can only carry one font`);
+      if (Number.isFinite(Number(base.fontSize))) spec.fontSize = round(Number(base.fontSize));
+      if (base.lineHeight) spec.lineHeight = plain(base.lineHeight);
+      if (base.letterSpacing) spec.letterSpacing = plain(base.letterSpacing);
+      if (base.textCase && base.textCase !== "ORIGINAL") spec.textCase = base.textCase;
+      if (base.textDecoration && base.textDecoration !== "NONE") spec.textDecoration = base.textDecoration;
+      const baseLink = compactLink(base.hyperlink);
+      if (baseLink) {
+        spec.hyperlink = baseLink;
+        if (baseLink.type === "NODE") {
+          state.warnings.push(`${path}: the text hyperlink points at node ${baseLink.value}; a NODE link is file-local and will not resolve in another file`);
+        }
+      }
+      const runs = await textRunsFor(ctx, textSegments, baseFillsSpec, state.vars, state.warnings, path);
+      if (runs.length) spec.runs = runs;
+      if (isMixed(node.textStyleId)) {
+        state.warnings.push(`${path}: text style ids are mixed across runs; per-run text style links are not representable, so literal run styling was exported`);
+      }
+      if (isMixed(node.fillStyleId)) {
+        state.warnings.push(`${path}: fill style ids are mixed across runs; per-run fill style links are not representable, so literal run fills were exported`);
+      }
+    } else {
+      if (isObj(node.fontName)) {
+        if (!style || (style.fontName && (style.fontName.family !== node.fontName.family || style.fontName.style !== node.fontName.style))) {
+          spec.font = { family: node.fontName.family, style: node.fontName.style };
+        }
+      } else if (!style) {
+        state.warnings.push(`${path}: text uses MIXED fonts; the spec can only carry one font`);
+      }
+      if (!isMixed(node.fontSize) && Number.isFinite(Number(node.fontSize))) spec.fontSize = round(Number(node.fontSize));
+      if (!isMixed(node.lineHeight) && node.lineHeight) spec.lineHeight = node.lineHeight;
+      if (!isMixed(node.letterSpacing) && node.letterSpacing) spec.letterSpacing = node.letterSpacing;
+      if (node.textCase && node.textCase !== "ORIGINAL") spec.textCase = node.textCase;
+      if (node.textDecoration && node.textDecoration !== "NONE") spec.textDecoration = node.textDecoration;
+      const link = node.hyperlink;
+      if (isObj(link) && (link.type === "URL" || link.type === "NODE") && typeof link.value === "string" && link.value) {
+        spec.hyperlink = { type: link.type, value: link.value };
+        if (link.type === "NODE") {
+          state.warnings.push(`${path}: the text hyperlink points at node ${link.value}; a NODE link is file-local and will not resolve in another file`);
+        }
+      } else if (isMixed(link)) {
+        state.warnings.push(`${path}: text hyperlinks are mixed across runs; the spec can carry one link and they were omitted`);
+      } else if (link) {
+        state.warnings.push(`${path}: the text hyperlink is unreadable and was omitted`);
+      }
     }
-    if (!isMixed(node.fontSize) && Number.isFinite(Number(node.fontSize))) spec.fontSize = round(Number(node.fontSize));
     if (textAutoResize) spec.textAutoResize = textAutoResize;
     for (const k of ["textAlignHorizontal", "textAlignVertical"]) {
       if (node[k]) spec[k] = node[k];
     }
-    if (!isMixed(node.lineHeight) && node.lineHeight) spec.lineHeight = node.lineHeight;
-    if (!isMixed(node.letterSpacing) && node.letterSpacing) spec.letterSpacing = node.letterSpacing;
-    if (node.textCase && node.textCase !== "ORIGINAL") spec.textCase = node.textCase;
-    if (node.textDecoration && node.textDecoration !== "NONE") spec.textDecoration = node.textDecoration;
     if (Number(node.paragraphSpacing) > 0) spec.paragraphSpacing = round(Number(node.paragraphSpacing));
     if (Number(node.paragraphIndent) > 0) spec.paragraphIndent = round(Number(node.paragraphIndent));
-    const link = node.hyperlink;
-    if (isObj(link) && (link.type === "URL" || link.type === "NODE") && typeof link.value === "string" && link.value) {
-      spec.hyperlink = { type: link.type, value: link.value };
-      if (link.type === "NODE") {
-        state.warnings.push(`${path}: the text hyperlink points at node ${link.value}; a NODE link is file-local and will not resolve in another file`);
-      }
-    } else if (isMixed(link)) {
-      state.warnings.push(`${path}: text hyperlinks are mixed across runs; the spec can carry one link and they were omitted`);
-    } else if (link) {
-      state.warnings.push(`${path}: the text hyperlink is unreadable and was omitted`);
-    }
   }
 
   state.nodes++;

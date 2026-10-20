@@ -63,6 +63,14 @@ const BY_TYPE = (t) => {
       layoutGrow: 0, layoutPositioning: "AUTO",
       minWidth: null, minHeight: null, maxWidth: null, maxHeight: null,
       getStyledTextSegments: () => [{ characters: "hello" }],
+      setRangeFontName(start, end, value) { (this.rangeOps ||= []).push({ field: "font", start, end, value }); },
+      setRangeFontSize(start, end, value) { (this.rangeOps ||= []).push({ field: "fontSize", start, end, value }); },
+      setRangeFills(start, end, value) { (this.rangeOps ||= []).push({ field: "fills", start, end, value }); },
+      setRangeTextCase(start, end, value) { (this.rangeOps ||= []).push({ field: "textCase", start, end, value }); },
+      setRangeTextDecoration(start, end, value) { (this.rangeOps ||= []).push({ field: "textDecoration", start, end, value }); },
+      setRangeLineHeight(start, end, value) { (this.rangeOps ||= []).push({ field: "lineHeight", start, end, value }); },
+      setRangeLetterSpacing(start, end, value) { (this.rangeOps ||= []).push({ field: "letterSpacing", start, end, value }); },
+      setRangeHyperlink(start, end, value) { (this.rangeOps ||= []).push({ field: "hyperlink", start, end, value }); },
     };
   }
   if (t === "ELLIPSE") return { arcData: { startingAngle: 0, endingAngle: 6.283, innerRadius: 0 } };
@@ -235,8 +243,8 @@ const errors = async (fn) => {
 }
 
 {
-  // Per-run styling cannot be rebuilt, so the run COUNT is state: a loss has to
-  // show up in a comparison instead of passing as equivalent.
+  // A run COUNT alone is the old checkpoint shape: a loss has to show up in a
+  // comparison instead of passing as equivalent. New dumps also carry the runs.
   const t = node("TEXT", {
     characters: "AB",
     getStyledTextSegments: () => [{ characters: "A" }, { characters: "B" }],
@@ -246,6 +254,91 @@ const errors = async (fn) => {
   const plain = node("TEXT");
   check("dump: uniform text records no run count", (await dumpSubtree(plain)).root.state.text.runs === undefined);
 }
+
+{
+  // Per-run styling is carried as state now: font, size, fills, case,
+  // decoration, line height, letter spacing and hyperlink.
+  const segments = [
+    {
+      characters: "A", start: 0, end: 1,
+      fontName: { family: "Inter", style: "Bold" }, fontSize: 24,
+      fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: 1 }],
+      textCase: "ORIGINAL", textDecoration: "NONE",
+      lineHeight: { unit: "PIXELS", value: 28 }, letterSpacing: { unit: "PIXELS", value: 1 },
+      hyperlink: null,
+    },
+    {
+      characters: "B", start: 1, end: 2,
+      fontName: { family: "Inter", style: "Regular" }, fontSize: 12,
+      fills: [{ type: "SOLID", color: { r: 0, g: 0, b: 1 }, opacity: 1 }],
+      textCase: "UPPER", textDecoration: "UNDERLINE",
+      lineHeight: { unit: "AUTO" }, letterSpacing: { unit: "PERCENT", value: 0 },
+      hyperlink: { type: "URL", value: "https://example.com" },
+    },
+  ];
+  const t = node("TEXT", {
+    characters: "AB", fontName: Symbol("mixed"), fontSize: Symbol("mixed"),
+    fills: Symbol("mixed"), lineHeight: Symbol("mixed"), letterSpacing: Symbol("mixed"),
+    hyperlink: Symbol("mixed"), getStyledTextSegments: () => segments,
+  });
+  const { root } = await dumpSubtree(t);
+  check("dump: mixed text records the runs themselves", root.state.text.runs === 2 && root.state.text.textRuns.length === 2);
+  check("dump: run fonts and sizes travel", root.state.text.textRuns[0].font.style === "Bold" && root.state.text.textRuns[1].fontSize === 12);
+  check("dump: run fills, case and decoration travel", root.state.text.textRuns[0].fills[0].color.r === 1 && root.state.text.textRuns[1].textCase === "UPPER" && root.state.text.textRuns[1].textDecoration === "UNDERLINE");
+  check("dump: run hyperlink difference is explicit", root.state.text.textRuns[0].hyperlink === null && root.state.text.textRuns[1].hyperlink.value === "https://example.com");
+}
+
+{
+  // The restore writes every run back; the base font is only a starting point
+  // for the character setter, not a replacement for the recorded runs.
+  const segments = [
+    {
+      characters: "A", start: 0, end: 1,
+      fontName: { family: "Inter", style: "Bold" }, fontSize: 24,
+      fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: 1 }],
+      textCase: "ORIGINAL", textDecoration: "NONE",
+      lineHeight: { unit: "PIXELS", value: 28 }, letterSpacing: { unit: "PIXELS", value: 1 },
+      hyperlink: null, textStyleId: "S:first", fillStyleId: "S:fill-first",
+    },
+    {
+      characters: "B", start: 1, end: 2,
+      fontName: { family: "Inter", style: "Regular" }, fontSize: 12,
+      fills: [{ type: "SOLID", color: { r: 0, g: 0, b: 1 }, opacity: 1 }],
+      textCase: "UPPER", textDecoration: "UNDERLINE",
+      lineHeight: { unit: "AUTO" }, letterSpacing: { unit: "PERCENT", value: 0 },
+      hyperlink: { type: "URL", value: "https://example.com" }, textStyleId: "S:second", fillStyleId: "S:fill-second",
+    },
+  ];
+  const figma = fakeFigma();
+  const target = node("FRAME");
+  const src = node("FRAME", {
+    children: [node("TEXT", {
+      characters: "AB", fontName: Symbol("mixed"), fontSize: Symbol("mixed"),
+      fills: Symbol("mixed"), lineHeight: Symbol("mixed"), letterSpacing: Symbol("mixed"),
+      hyperlink: Symbol("mixed"), getStyledTextSegments: () => segments,
+    })],
+  });
+  const { root } = await dumpSubtree(src);
+  const loaded = [];
+  const report = await restoreSubtree(root, ctxFor(figma, target, { loadFont: async (f) => { loaded.push(`${f.family}/${f.style}`); } }), {});
+  const text = target.children[0];
+  const ops = text.rangeOps || [];
+  check("restore: every run font is loaded and applied", loaded.includes("Inter/Bold") && loaded.includes("Inter/Regular") &&
+    ops.some((o) => o.field === "font" && o.start === 0 && o.end === 1 && o.value.style === "Bold") &&
+    ops.some((o) => o.field === "font" && o.start === 1 && o.end === 2 && o.value.style === "Regular"));
+  check("restore: run size, fills and case come back", ops.some((o) => o.field === "fontSize" && o.value === 24) &&
+    ops.some((o) => o.field === "fills" && o.value[0].color.b === 1) && ops.some((o) => o.field === "textCase" && o.value === "UPPER"));
+  check("restore: run decoration, line height, spacing and hyperlink come back",
+    ops.some((o) => o.field === "textDecoration" && o.value === "UNDERLINE") &&
+    ops.some((o) => o.field === "lineHeight" && o.value.value === 28) &&
+    ops.some((o) => o.field === "letterSpacing" && o.value.value === 1) &&
+    ops.some((o) => o.field === "hyperlink" && o.value && o.value.value === "https://example.com"));
+  check("restore: mixed fonts are not reported as a loss when runs exist",
+    !report.notes.some((n) => /MIXED fonts/.test(n)) && !report.notes.some((n) => /MIXED hyperlinks/.test(n)));
+  check("restore: per-run style links are named, not pretended",
+    report.notes.some((n) => /per-run text and fill style links/.test(n)));
+}
+
 
 {
   const frame = node("FRAME", {

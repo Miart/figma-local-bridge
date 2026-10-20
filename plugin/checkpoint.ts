@@ -11,9 +11,9 @@
  *   - an INSTANCE comes back as an instance of its main component, with
  *     component properties re-applied — the overridden leaves inside it are not
  *     captured, so it shows the main component's current content;
- *   - per-run text styling and mixed hyperlinks are not rebuilt; a run COUNT
- *     is recorded, so a mixed-font node reports as different instead of
- *     passing as equivalent;
+ *   - per-run text variable bindings and per-run style links are not rebuilt;
+ *     the runs themselves (font, size, fills, case, decoration, line height,
+ *     letter spacing and hyperlink) are;
  *   - style ids, node-level variable bindings and explicit modes travel in
  *     `meta` and are re-linked by id when they still exist; every one that does
  *     not is reported instead of passing as restored;
@@ -38,9 +38,9 @@ export const MAX_DEPTH = 40;
  */
 export const LIMITATIONS: readonly string[] = [
   "instance interiors are not captured: a restored INSTANCE shows its main component's current content (component properties are re-applied)",
-  "per-run text styling and mixed hyperlinks are not rebuilt; the run count is recorded so a mixed-font node reports as different",
+  "text runs are rebuilt (font, size, fills, case, decoration, line height, letter spacing and hyperlink); per-run variable bindings and per-run style links are not",
   "style ids are re-linked when the style still exists; node-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
-  "per-range text bindings are not rebuilt (text runs are not either); a single binding across the whole text is restored",
+  "per-range text bindings are not rebuilt; a single binding across the whole text is restored",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
   "a BOOLEAN_OPERATION is not rebuilt (its inputs are not recoverable from the API)",
 ];
@@ -128,6 +128,7 @@ const msg = (e: any) => String(e && e.message ? e.message : e);
  * real value in these fields is an object, a number or a string.
  */
 const isMixedValue = (v: any) => typeof v === "symbol";
+const isObj = (v: any) => !!v && typeof v === "object" && !Array.isArray(v);
 
 function copy(v: any): any {
   if (v === undefined || isMixedValue(v)) return undefined;
@@ -220,6 +221,20 @@ export function readState(node: any): Dict {
   return s;
 }
 
+function readTextRun(seg: any): Dict {
+  const out: Dict = { start: seg.start, end: seg.end };
+  if (!isMixedValue(seg.fontName) && isObj(seg.fontName)) out.font = copy(seg.fontName);
+  if (!isMixedValue(seg.fontSize) && Number.isFinite(Number(seg.fontSize))) out.fontSize = Number(seg.fontSize);
+  if (Array.isArray(seg.fills)) out.fills = list(seg.fills) ?? [];
+  if (seg.textCase) out.textCase = copy(seg.textCase);
+  if (seg.textDecoration) out.textDecoration = copy(seg.textDecoration);
+  if (seg.lineHeight && !isMixedValue(seg.lineHeight)) out.lineHeight = copy(seg.lineHeight);
+  if (seg.letterSpacing && !isMixedValue(seg.letterSpacing)) out.letterSpacing = copy(seg.letterSpacing);
+  if (seg.hyperlink === null) out.hyperlink = null;
+  else if (seg.hyperlink && !isMixedValue(seg.hyperlink)) out.hyperlink = copy(seg.hyperlink);
+  return out;
+}
+
 function readText(node: any): Dict {
   const t: Dict = { characters: node.characters };
   t.font = isMixedValue(node.fontName) ? "mixed" : copy(node.fontName);
@@ -234,12 +249,19 @@ function readText(node: any): Dict {
   if (node.textDecoration && node.textDecoration !== "NONE") t.textDecoration = copy(node.textDecoration);
   if (typeof node.paragraphSpacing === "number" && node.paragraphSpacing) t.paragraphSpacing = node.paragraphSpacing;
   if (typeof node.paragraphIndent === "number" && node.paragraphIndent) t.paragraphIndent = node.paragraphIndent;
-  // The run count is deliberately part of the STATE, not of meta: the rebuild
-  // cannot reproduce runs, so the count makes that loss show up in a comparison
-  // instead of passing as "equivalent".
+  // Runs are part of STATE: a rebuild that loses them must show up in the
+  // comparison. `runs` keeps the old count for older checkpoints; `textRuns`
+  // carries the values a restore writes back.
   try {
-    const segs = node.getStyledTextSegments(["fontName"]);
-    if (Array.isArray(segs) && segs.length > 1) t.runs = segs.length;
+    const segs = node.getStyledTextSegments([
+      "fontName", "fontSize", "fills", "textCase", "textDecoration",
+      "lineHeight", "letterSpacing", "hyperlink",
+    ]);
+    if (Array.isArray(segs) && segs.length > 1) {
+      t.runs = segs.length;
+      const usable = segs.every((s: any) => s && Number.isInteger(s.start) && Number.isInteger(s.end) && s.end > s.start);
+      if (usable) t.textRuns = segs.map(readTextRun);
+    }
   } catch {
     /* fonts not loaded: the run count is simply unknown */
   }
@@ -309,6 +331,23 @@ function readMeta(node: any): Dict | undefined {
   }
   if (styles.length) meta.styles = styles;
   if (Object.keys(styleIds).length) meta.styleIds = styleIds;
+  if (node.type === "TEXT" && typeof node.getStyledTextSegments === "function") {
+    try {
+      const segs = node.getStyledTextSegments(["textStyleId", "fillStyleId"]);
+      if (Array.isArray(segs) && segs.length > 1) {
+        const textStyleIds = [...new Set(segs.map((s: any) => s.textStyleId).filter((id: any) => typeof id === "string" && id))];
+        const fillStyleIds = [...new Set(segs.map((s: any) => s.fillStyleId).filter((id: any) => typeof id === "string" && id))];
+        if (textStyleIds.length > 1 || fillStyleIds.length > 1) {
+          meta.textRunStyles = {
+            ...(textStyleIds.length > 1 ? { textStyleIds } : {}),
+            ...(fillStyleIds.length > 1 ? { fillStyleIds } : {}),
+          };
+        }
+      }
+    } catch {
+      /* style ids are optional; the run values are still recorded */
+    }
+  }
   if (node.type === "COMPONENT" || node.type === "COMPONENT_SET") {
     try {
       if (node.key) meta.componentKey = node.key;
@@ -505,7 +544,7 @@ export async function restoreSubtree(dump: DumpNode, ctx: RestoreContext, opts: 
   }
 
   if (dump.type === target.type) {
-    await applyFinal(target, dump.state, ctx, report, "$", true);
+    await applyFinal(target, dump.state, ctx, report, "$", true, dump.meta);
     await applyStyleLinks(target, dump.meta?.styleIds, ctx, report, "$");
     await applyVariableBindings(target, dump.meta?.variableBindings, dump.state, ctx, report, "$");
   }
@@ -529,7 +568,7 @@ async function buildNode(d: DumpNode, parent: any, ctx: RestoreContext, report: 
     for (let i = 0; i < kids.length; i++) {
       await buildNode(kids[i], node, ctx, report, `${path}.children[${i}]`, opts);
     }
-    await applyFinal(node, d.state, ctx, report, path, false);
+    await applyFinal(node, d.state, ctx, report, path, false, d.meta);
     await applyStyleLinks(node, d.meta?.styleIds, ctx, report, path);
     await applyVariableBindings(node, d.meta?.variableBindings, d.state, ctx, report, path);
     report.created++;
@@ -572,7 +611,7 @@ async function buildGroup(d: DumpNode, parent: any, ctx: RestoreContext, report:
     group.name = d.name;
     await applyVariableModes(group, d.meta?.variableModes, ctx, report, path);
     applyLayout(group, d.state, report, path);
-    await applyFinal(group, d.state, ctx, report, path, false);
+    await applyFinal(group, d.state, ctx, report, path, false, d.meta);
     await applyStyleLinks(group, d.meta?.styleIds, ctx, report, path);
     await applyVariableBindings(group, d.meta?.variableBindings, d.state, ctx, report, path);
     report.created++;
@@ -677,7 +716,7 @@ function ownsSize(node: any, state: Dict): boolean {
 }
 
 /** Phase B: size, position and appearance. `isRoot` keeps the target where it is. */
-async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: RestoreReport, path: string, isRoot: boolean): Promise<void> {
+async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: RestoreReport, path: string, isRoot: boolean, meta?: Dict): Promise<void> {
   const soft = (what: string, fn: () => void) => {
     try {
       fn();
@@ -737,7 +776,7 @@ async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: R
   if (state.visible === false) soft("visibility", () => { node.visible = false; });
   if (state.locked === true) soft("locked", () => { node.locked = true; });
 
-  if (node.type === "TEXT") await applyText(node, state.text, ctx, report, path);
+  if (node.type === "TEXT") await applyText(node, state.text, ctx, report, path, meta);
   if (node.type === "INSTANCE" && state.instance?.properties) applyInstanceProperties(node, state.instance.properties, report, path);
   if (node.type === "VECTOR" && state.vector) {
     // setVectorNetworkAsync is the only way back into a vector: the network is
@@ -862,13 +901,13 @@ async function applyVariableBindings(node: any, bindings: Dict | undefined, stat
 
     if (field === "textRangeFills") {
       // The paints already carry a whole-text binding when there is one. A
-      // mixed fill cannot be represented by one paint, and the runs are not
-      // rebuilt either — name it instead of pretending the binding came back.
+      // mixed fill has per-range bindings; text runs are restored, but the
+      // aliases attached to those runs are not.
       if (state?.fills === "mixed") {
         for (const alias of (Array.isArray(value) ? value : [value]).filter(isAlias)) {
           report.bindingsMissing.push({
             path, field, id: alias.id,
-            why: "per-range text fill bindings are not rebuilt (text runs are not either)",
+            why: "per-range text fill bindings are not rebuilt; literal run fills were restored without the binding",
           });
         }
       }
@@ -909,7 +948,7 @@ async function applyVariableBindings(node: any, bindings: Dict | undefined, stat
     if (ids.length > 1) {
       report.bindingsMissing.push({
         path, field, id: ids.join(","),
-        why: `${aliases.length} different per-range bindings; checkpoint restores one value and does not rebuild text runs`,
+        why: `${aliases.length} different per-range bindings; text runs are restored but their variable bindings are not`,
       });
       continue;
     }
@@ -973,30 +1012,69 @@ function applyInstanceProperties(node: any, props: Dict, report: RestoreReport, 
   }
 }
 
-async function applyText(node: any, text: Dict, ctx: RestoreContext, report: RestoreReport, path: string): Promise<void> {
+async function applyText(node: any, text: Dict, ctx: RestoreContext, report: RestoreReport, path: string, meta?: Dict): Promise<void> {
   if (!text) return;
   const fallback = ctx.fallbackFont ?? { family: "Inter", style: "Regular" };
-  const font = text.font;
-  let styled = font && font !== "mixed";
+  const runs: Dict[] = Array.isArray(text.textRuns)
+    ? text.textRuns.filter((r: any) => r && Number.isInteger(r.start) && Number.isInteger(r.end) && r.end > r.start)
+    : [];
+  const hasRuns = runs.length > 0;
+  const firstRun = hasRuns ? runs[0] : null;
+  const recordedFont = text.font && text.font !== "mixed" ? text.font : null;
+  let baseFont = recordedFont || (firstRun && firstRun.font) || null;
+  let styled = !!baseFont;
 
-  if (styled) {
-    if (!ctx.loadFont) styled = true;
-    else {
-      try {
-        await ctx.loadFont(font);
-      } catch {
-        styled = false;
-        report.fontsUnavailable.push(`${font.family} ${font.style}`);
-        report.notes.push(`${path}: font "${font.family} ${font.style}" is not available — the text comes back in ${fallback.family} ${fallback.style}`);
+  if (baseFont && ctx.loadFont) {
+    try {
+      await ctx.loadFont(baseFont);
+    } catch {
+      styled = false;
+      report.fontsUnavailable.push(`${baseFont.family} ${baseFont.style}`);
+      if (hasRuns) {
+        report.notes.push(`${path}: base font "${baseFont.family} ${baseFont.style}" is not available — the recorded runs are applied without it`);
+      } else {
+        report.notes.push(`${path}: font "${baseFont.family} ${baseFont.style}" is not available — the text comes back in ${fallback.family} ${fallback.style}`);
       }
     }
-  } else {
-    report.notes.push(`${path}: this text uses MIXED fonts; checkpoint-v1 restores the characters in ${fallback.family} ${fallback.style}, not the runs`);
+  }
+  if (!baseFont) {
+    if (!hasRuns) {
+      report.notes.push(`${path}: this text uses MIXED fonts and the checkpoint has no run data; the characters come back in ${fallback.family} ${fallback.style}`);
+    }
+  }
+  if (hasRuns && meta?.textRunStyles) {
+    const parts: string[] = [];
+    if (Array.isArray(meta.textRunStyles.textStyleIds) && meta.textRunStyles.textStyleIds.length) parts.push("text");
+    if (Array.isArray(meta.textRunStyles.fillStyleIds) && meta.textRunStyles.fillStyleIds.length) parts.push("fill");
+    if (parts.length) {
+      report.notes.push(`${path}: per-run ${parts.join(" and ")} style links are not rebuilt; literal run values were restored`);
+    }
   }
 
+  const runFontReady: boolean[] = runs.map(() => true);
+  if (ctx.loadFont) {
+    for (let i = 0; i < runs.length; i++) {
+      const f = runs[i].font;
+      if (!f) continue;
+      try {
+        await ctx.loadFont(f);
+      } catch {
+        runFontReady[i] = false;
+        const key = `${f.family} ${f.style}`;
+        if (!report.fontsUnavailable.includes(key)) report.fontsUnavailable.push(key);
+        report.notes.push(`${path}: run ${i} font "${key}" is not available — that run's font was not restored`);
+      }
+    }
+  }
+  // Characters need *some* loaded font even when every run carries its own:
+  // the character setter runs before the ranges are applied. If the recorded
+  // base font is unavailable, fall back for the base and let the run fonts
+  // replace it range by range.
   if (!styled && ctx.loadFont) {
     try {
       await ctx.loadFont(fallback);
+      baseFont = fallback;
+      styled = true;
     } catch (e) {
       report.notes.push(`${path}: even ${fallback.family} ${fallback.style} failed to load: ${msg(e)}`);
     }
@@ -1011,23 +1089,80 @@ async function applyText(node: any, text: Dict, ctx: RestoreContext, report: Res
   };
 
   soft("characters", () => { node.characters = text.characters ?? ""; });
-  if (styled) {
-    soft("font", () => { node.fontName = font; });
-    if (typeof text.fontSize === "number") soft("font size", () => { node.fontSize = text.fontSize; });
-    if (text.lineHeight && text.lineHeight !== "mixed") soft("line height", () => { node.lineHeight = text.lineHeight; });
-    if (text.letterSpacing && text.letterSpacing !== "mixed") soft("letter spacing", () => { node.letterSpacing = text.letterSpacing; });
-    if (text.textCase) soft("text case", () => { node.textCase = text.textCase; });
-    if (text.textDecoration) soft("text decoration", () => { node.textDecoration = text.textDecoration; });
-    if (typeof text.paragraphSpacing === "number") soft("paragraph spacing", () => { node.paragraphSpacing = text.paragraphSpacing; });
-    if (typeof text.paragraphIndent === "number") soft("paragraph indent", () => { node.paragraphIndent = text.paragraphIndent; });
-  }
+  if (styled) soft("font", () => { node.fontName = baseFont; });
+  if (typeof text.fontSize === "number") soft("font size", () => { node.fontSize = text.fontSize; });
+  if (text.lineHeight && text.lineHeight !== "mixed") soft("line height", () => { node.lineHeight = text.lineHeight; });
+  if (text.letterSpacing && text.letterSpacing !== "mixed") soft("letter spacing", () => { node.letterSpacing = text.letterSpacing; });
+  if (text.textCase && text.textCase !== "mixed") soft("text case", () => { node.textCase = text.textCase; });
+  if (text.textDecoration && text.textDecoration !== "mixed") soft("text decoration", () => { node.textDecoration = text.textDecoration; });
+  if (typeof text.paragraphSpacing === "number") soft("paragraph spacing", () => { node.paragraphSpacing = text.paragraphSpacing; });
+  if (typeof text.paragraphIndent === "number") soft("paragraph indent", () => { node.paragraphIndent = text.paragraphIndent; });
   if (text.hyperlink !== undefined) {
     if (text.hyperlink === "mixed") {
-      report.notes.push(`${path}: this text has MIXED hyperlinks; checkpoint-v1 restores the characters without the per-run links`);
+      if (!hasRuns) {
+        report.notes.push(`${path}: this text has MIXED hyperlinks and the checkpoint has no run data; the characters come back without the per-run links`);
+      }
     } else {
       soft("hyperlink", () => { node.hyperlink = text.hyperlink; });
     }
   }
+
+  if (hasRuns) {
+    const length = typeof node.characters === "string" ? node.characters.length : 0;
+    for (let i = 0; i < runs.length; i++) {
+      const run = runs[i];
+      const start = Number(run.start);
+      const end = Number(run.end);
+      if (start >= length || end > length) {
+        report.notes.push(`${path}: run ${i} range ${start}..${end} is outside the restored text (${length} characters)`);
+        continue;
+      }
+      const runSoft = (what: string, fn: () => void) => {
+        try {
+          fn();
+        } catch (e) {
+          report.notes.push(`${path}: run ${i} ${what} not restored: ${msg(e)}`);
+        }
+      };
+      if (run.font && runFontReady[i] && typeof node.setRangeFontName === "function") {
+        runSoft("font", () => { node.setRangeFontName(start, end, run.font); });
+      }
+      if (run.fontSize !== undefined && typeof node.setRangeFontSize === "function") {
+        runSoft("font size", () => { node.setRangeFontSize(start, end, Number(run.fontSize)); });
+      }
+      if (run.fills !== undefined && typeof node.setRangeFills === "function") {
+        runSoft("fills", () => {
+          try {
+            node.setRangeFills(start, end, run.fills);
+          } catch {
+            const stripped = run.fills.map((p: any) => {
+              if (!p || typeof p !== "object") return p;
+              const { boundVariables, ...rest } = p;
+              return rest;
+            });
+            node.setRangeFills(start, end, stripped);
+            report.bindingsDropped.push(`${path}.state.text.textRuns[${i}].fills`);
+          }
+        });
+      }
+      if (run.textCase !== undefined && typeof node.setRangeTextCase === "function") {
+        runSoft("text case", () => { node.setRangeTextCase(start, end, run.textCase); });
+      }
+      if (run.textDecoration !== undefined && typeof node.setRangeTextDecoration === "function") {
+        runSoft("text decoration", () => { node.setRangeTextDecoration(start, end, run.textDecoration); });
+      }
+      if (run.lineHeight !== undefined && typeof node.setRangeLineHeight === "function") {
+        runSoft("line height", () => { node.setRangeLineHeight(start, end, run.lineHeight); });
+      }
+      if (run.letterSpacing !== undefined && typeof node.setRangeLetterSpacing === "function") {
+        runSoft("letter spacing", () => { node.setRangeLetterSpacing(start, end, run.letterSpacing); });
+      }
+      if (run.hyperlink !== undefined && typeof node.setRangeHyperlink === "function") {
+        runSoft("hyperlink", () => { node.setRangeHyperlink(start, end, run.hyperlink); });
+      }
+    }
+  }
+
   if (Array.isArray(text.align)) {
     soft("alignment", () => {
       node.textAlignHorizontal = text.align[0];

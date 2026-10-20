@@ -116,6 +116,14 @@ function makeCtx() {
     getMainComponentAsync() { return Promise.resolve(this.mainComponent || null); },
     setProperties(props) { this.properties = { ...(this.properties || {}), ...props }; },
     getRangeAllFontNames() { return this.fontName ? [this.fontName] : []; },
+    setRangeFontName(start, end, value) { (this.rangeOps ||= []).push({ field: "font", start, end, value }); },
+    setRangeFontSize(start, end, value) { (this.rangeOps ||= []).push({ field: "fontSize", start, end, value }); },
+    setRangeFills(start, end, value) { (this.rangeOps ||= []).push({ field: "fills", start, end, value }); },
+    setRangeTextCase(start, end, value) { (this.rangeOps ||= []).push({ field: "textCase", start, end, value }); },
+    setRangeTextDecoration(start, end, value) { (this.rangeOps ||= []).push({ field: "textDecoration", start, end, value }); },
+    setRangeLineHeight(start, end, value) { (this.rangeOps ||= []).push({ field: "lineHeight", start, end, value }); },
+    setRangeLetterSpacing(start, end, value) { (this.rangeOps ||= []).push({ field: "letterSpacing", start, end, value }); },
+    setRangeHyperlink(start, end, value) { (this.rangeOps ||= []).push({ field: "hyperlink", start, end, value }); },
     textAutoResize: "NONE",
     characters: type === "TEXT" ? "" : undefined,
     fontName: type === "TEXT" ? { family: "Inter", style: "Regular" } : undefined,
@@ -208,6 +216,30 @@ test("a hyperlink is text-only and normalized", () => {
   assert.throws(() => normalizeTree({ type: "TEXT", text: "x", hyperlink: { type: "URL", value: "  " } }), /non-empty/);
 });
 
+test("text runs are ordered, bounded and text-only", () => {
+  const text = normalizeTree({
+    type: "TEXT", text: "Hello",
+    runs: [
+      { start: 0, end: 2, font: "Inter/Bold", fontSize: 24, fills: "#ff0000", textCase: "UPPER", hyperlink: null },
+      { start: 2, end: 5, lineHeight: 20, letterSpacing: 1, textDecoration: "UNDERLINE" },
+    ],
+  });
+  assert.deepEqual(text.root.spec.runs[0].font, { family: "Inter", style: "Bold" });
+  assert.deepEqual(text.root.spec.runs[1].lineHeight, { unit: "PIXELS", value: 20 });
+  assert.equal(text.root.spec.runs[0].hyperlink, null);
+
+  assert.throws(() => normalizeTree({ type: "FRAME", runs: [] }), /only valid on TEXT/);
+  assert.throws(() => normalizeTree({ type: "TEXT", runs: [{ start: 0, end: 1, fontSize: 12 }] }), /needs text/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "x", runs: [{ start: 0, end: 2, fontSize: 12 }] }), /past the text length/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [
+    { start: 0, end: 2, fontSize: 12 },
+    { start: 1, end: 3, fontSize: 14 },
+  ] }), /ordered and non-overlapping/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1 }] }), /at least one/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, font: " " }] }), /font/);
+  assert.throws(() => normalizeTree({ type: "TEXT", text: "abc", runs: [{ start: 0, end: 1, textCase: "SHOUT" }] }), /textCase/);
+});
+
 // ---------------------------------------------------------------- build
 
 test("dry run plans without writing, then apply creates one keyed tree", async () => {
@@ -248,6 +280,52 @@ test("dry run plans without writing, then apply creates one keyed tree", async (
   assert.equal(score.characters, "12,480");
   assert.equal(score.fontName.style, "Bold");
   assert.ok(ctx.metrics.fonts.some((f) => f.family === "Inter" && f.style === "Bold"));
+});
+
+test("build applies text runs without flattening the base style", async () => {
+  const ctx = makeCtx();
+  const spec = {
+    buildId: "runs",
+    root: {
+      type: "FRAME", name: "Runs",
+      size: { width: 320, height: 80 },
+      children: [{
+        type: "TEXT", name: "Label", key: "runs/label", text: "Hello!",
+        font: "Inter/Regular", fontSize: 16, fills: "#111111",
+        runs: [
+          {
+            start: 0, end: 2, font: "Inter/Bold", fontSize: 24, fills: "#ff0000",
+            textCase: "UPPER", textDecoration: "UNDERLINE", lineHeight: 28,
+            letterSpacing: 1, hyperlink: { type: "URL", value: "https://example.com" },
+          },
+          { start: 3, end: 6, font: "Inter/Italic", fontSize: 12 },
+        ],
+      }],
+    },
+  };
+
+  const dry = await runBuild(ctx, { ...spec, dryRun: true });
+  assert.equal(dry.status, "dry_run");
+  assert.deepEqual(dry.fonts, ["Inter/Bold", "Inter/Italic", "Inter/Regular"]);
+
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.verification.ok, true);
+  const label = ctx.currentPage.children[0].children[0];
+  assert.equal(label.characters, "Hello!");
+  assert.equal(label.fontName.style, "Regular");
+  assert.equal(label.fontSize, 16);
+  assert.deepEqual(label.rangeOps[0], {
+    field: "font", start: 0, end: 2, value: { family: "Inter", style: "Bold" },
+  });
+  assert.ok(label.rangeOps.some((op) => op.field === "fontSize" && op.start === 0 && op.end === 2 && op.value === 24));
+  assert.ok(label.rangeOps.some((op) => op.field === "fills" && op.value[0].color.r === 1));
+  assert.ok(label.rangeOps.some((op) => op.field === "textCase" && op.value === "UPPER"));
+  assert.ok(label.rangeOps.some((op) => op.field === "textDecoration" && op.value === "UNDERLINE"));
+  assert.ok(label.rangeOps.some((op) => op.field === "lineHeight" && op.value.value === 28));
+  assert.ok(label.rangeOps.some((op) => op.field === "letterSpacing" && op.value.value === 1));
+  assert.ok(label.rangeOps.some((op) => op.field === "hyperlink" && op.value.value === "https://example.com"));
+  assert.ok(label.rangeOps.some((op) => op.field === "font" && op.start === 3 && op.end === 6 && op.value.style === "Italic"));
 });
 
 test("build carries rotation, per-corner radii, stroke shape and text formatting", async () => {

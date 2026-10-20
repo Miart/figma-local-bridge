@@ -192,7 +192,8 @@ function annotateDiffs(diffs: Difference[]): string[] {
   for (const d of diffs) {
     if (d.path.includes(".state.size")) notes.add("size: an auto-layout (HUG) frame owns its own size — the rebuild does not resize it, so a size difference there is the layout, not the rebuild");
     if (d.path.includes(".state.pos")) notes.add("position: inside an auto-layout parent the layout places children; a recorded position is not restored there");
-    if (d.path.includes(".state.text.runs")) notes.add("runs: checkpoint-v1 writes one font per text node and does not rebuild per-run styling");
+    if (d.path.includes(".state.text.runs")) notes.add("runs: the number of text runs differs; checkpoint-v1 restores per-run font, size, fills, case, decoration, line height, letter spacing and hyperlink");
+    if (d.path.includes(".state.text.textRuns")) notes.add("runs: a per-run text property differs after the rebuild — missing fonts and failures are named in the restore report");
     if (d.path.endsWith(".children.length")) notes.add("children: the subtree has a different number of children — read `skipped` and `created` in the restore report");
   }
   return [...notes];
@@ -209,8 +210,9 @@ export interface DumpSummary {
   images: number;
   instances: number;
   unsupported: Array<{ path: string; type: string; why: string }>;
-  /** Text nodes whose fonts are mixed: the rebuild writes one font instead. */
+  /** Text nodes with more than one run: the rebuild restores every recorded run. */
   multiRunTexts: number;
+  /** Text nodes whose base font is mixed; the run fonts are counted in `fonts`. */
   mixedFonts: number;
   /** Nodes whose style ids, variable bindings or explicit modes live in meta. */
   metaOnly: number;
@@ -246,6 +248,11 @@ export function summarize(dump: DumpNode): DumpSummary {
       if (t.runs > 1) s.multiRunTexts++;
       if (t.font === "mixed") s.mixedFonts++;
       else if (t.font && t.font.family) fonts.add(`${t.font.family} ${t.font.style ?? ""}`.trim());
+      if (Array.isArray(t.textRuns)) {
+        for (const run of t.textRuns) {
+          if (run && run.font && run.font.family) fonts.add(`${run.font.family} ${run.font.style ?? ""}`.trim());
+        }
+      }
     }
     if (n.type === "INSTANCE") s.instances++;
     (n.children ?? []).forEach((c, i) => walk(c, depth + 1, `${path}.children[${i}]`));

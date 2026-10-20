@@ -74,8 +74,9 @@ half a design applied.
   spec no longer contains; protected nodes are skipped and reported. The tree
   also carries rotation (degrees), per-corner radii, stroke cap/join/miter,
   masks, layout grids, layout inclusion flags, text case/decoration/paragraph
-  spacing, text hyperlinks (URL, or NODE by node id), and an exact `LINE`
-  length.
+  spacing, text hyperlinks (URL, or NODE by node id), text runs (ordered
+  character ranges with their own font, size, fills, case, decoration, line
+  height, letter spacing and hyperlink), and an exact `LINE` length.
 - `figma_patch` takes a sparse tree under `rootNodeId`, `buildId` or
   `rootKey`. Children match by key. A missing key is refused unless
   `allowCreate:true`; a key under the wrong parent is refused rather than
@@ -88,6 +89,13 @@ half a design applied.
   and variant property is resolved first; a failed op rolls the whole batch
   back unless `stopOnError:false`, which reports the exact failure and what
   did apply.
+
+On a TEXT node, `runs` are absolute UTF-16 character offsets (`start`
+inclusive, `end` exclusive), sorted and non-overlapping. Each run needs at
+least one field; fields it omits inherit the node's base text properties.
+Send `text` with `runs`, because the engine validates every range against the
+characters it is about to write. `figma_batch_edit`'s `set_text` still sets one
+font per op; use `figma_build` / `figma_patch` for per-range styling.
 
 The safe sequence for all three:
 
@@ -109,10 +117,13 @@ returns a spec that `figma_build` accepts. It keeps keys that already exist,
 derives the same key the build engine would for nodes without one, and turns
 style/variable links into `fillStyle`/`strokeStyle`/`textStyle`/`effectStyle`
 or `variable`. URL text links travel in the spec; a NODE link is exported with
-a file-local warning, and mixed links are named. Read `unsupported` and
-`warnings` before building it: an SVG source, a detached instance, an instance
-interior, a mixed font or per-range text styling has no exact representation.
-`truncated: true` means the spec is incomplete and must not be built as-is.
+a file-local warning. Mixed text becomes a base style plus ordered `runs`, so
+mixed fonts, sizes, fills, case, decoration, spacing and links survive a
+rebuild. Remaining exactness losses include per-run style links and per-range
+bindings. Read `unsupported` and `warnings` before building it: an SVG source,
+a detached instance, an instance interior or a paint the spec cannot express
+has no exact representation. `truncated: true` means the spec is incomplete and
+must not be built as-is.
 
 ## Finding things, and checking the result
 
@@ -308,9 +319,9 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
 
 - `action: "save"` records a subtree as data (`nodeId`; a page is refused) into
   one JSON file per file key. The reply carries a `summary` and the
-  `limitations` a rebuild cannot carry — instance interiors, per-run text
-  styling and mixed hyperlinks, component identity. Read them before telling
-  anyone the subtree will come back exactly.
+  `limitations` a rebuild cannot carry — instance interiors, per-run variable
+  bindings, per-run style links and component identity. Read them before
+  telling anyone the subtree will come back exactly.
 - `action: "show"` diffs the live subtree against the file field by field and
   reports the semantic fingerprint next to it. That is how "has this drifted
   already?" gets answered before a rebuild is chosen.
@@ -325,16 +336,18 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   leaves a correct-looking but unlinked node instead of a missing colour or size.
 - Paint-level variable bindings travel with the paint. They survive when their
   variable exists; when it does not, the paint returns by value and
-  `bindingsDropped` names it. Per-range text bindings are not rebuilt (the text
-  runs are not either); `bindingsMissing` names them instead of flattening them.
-- A whole-text hyperlink is saved and restored by value. A NODE link stays
-  file-local; mixed per-run links are named as a loss, not flattened to one.
+  `bindingsDropped` names it. Per-range text bindings are not rebuilt, although
+  the text runs themselves are; `bindingsMissing` names the aliases instead of
+  flattening them.
+- A whole-text hyperlink is saved and restored by value. Mixed per-run links
+  travel inside the runs, so `null` on a run clears it for that range. A NODE
+  link stays file-local.
 - Afterwards the server dumps the subtree **again** and diffs it against the
   checkpoint: `verification.verified: true` means no field differs. When it is
   false, `verification.diff` names every field with both values and
   `verification.notes` says which differences checkpoint-v1 knows it causes
-  (HUG sizing, per-run text, mixed hyperlinks). Say so — never call a rebuild
-  "restored" when it is not.
+  (HUG sizing, text-run values). Say so — never call a rebuild "restored" when
+  it is not.
 - Refused with a reason: a truncated dump (restoring it would delete whatever
   the dump never reached), a `GROUP` / `INSTANCE` / page target, and node types
   checkpoint-v1 cannot rebuild — unless `allowPartial: true`, which rebuilds the

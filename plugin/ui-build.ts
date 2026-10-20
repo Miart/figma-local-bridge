@@ -51,6 +51,7 @@ const STROKE_CAPS = new Set(["NONE", "ROUND", "SQUARE", "ARROW_LINES", "ARROW_EQ
 const STROKE_JOINS = new Set(["MITER", "BEVEL", "ROUND"]);
 const TEXT_CASES = new Set(["ORIGINAL", "UPPER", "LOWER", "TITLE", "SMALL_CAPS", "SMALL_CAPS_FORCED"]);
 const TEXT_DECORATIONS = new Set(["NONE", "UNDERLINE", "STRIKETHROUGH"]);
+const MAX_TEXT_RUNS = 200;
 const GRID_PATTERNS = new Set(["COLUMNS", "ROWS", "GRID"]);
 const GRID_ALIGNMENTS = new Set(["MIN", "MAX", "CENTER", "STRETCH"]);
 
@@ -136,10 +137,14 @@ export function fontSpec(input: any): { family: string; style: string } | null {
   if (!input) return null;
   if (typeof input === "string") {
     const [family, ...rest] = input.split(/[/:]/);
-    return { family: family.trim(), style: (rest.join(":").trim() || "Regular") };
+    const trimmed = family.trim();
+    if (!trimmed) return null;
+    return { family: trimmed, style: (rest.join(":").trim() || "Regular") };
   }
   if (isObj(input) && input.family) {
-    return { family: String(input.family), style: String(input.style || "Regular") };
+    const family = String(input.family).trim();
+    if (!family) return null;
+    return { family, style: String(input.style || "Regular").trim() || "Regular" };
   }
   return null;
 }
@@ -197,6 +202,94 @@ export function hyperlinkFromSpec(v: any, path: string): { type: "URL" | "NODE";
   const value = typeof v.value === "string" ? v.value.trim() : "";
   if (!value) throw new Error(`${path}.value must be a non-empty string`);
   return { type, value };
+}
+
+function lineHeightFromSpec(v: any, path: string): Json {
+  if (typeof v === "number") return { unit: "PIXELS", value: validateNumber(v, path, { min: 0 }) };
+  if (!isObj(v)) throw new Error(`${path} must be a number or {unit,value}`);
+  if (typeof v.unit !== "string" || !v.unit) throw new Error(`${path}.unit must be a non-empty string`);
+  if (v.value !== undefined) validateNumber(v.value, `${path}.value`);
+  return { ...v };
+}
+
+function letterSpacingFromSpec(v: any, path: string): Json {
+  if (typeof v === "number") return { unit: "PIXELS", value: validateNumber(v, path) };
+  if (!isObj(v)) throw new Error(`${path} must be a number or {unit,value}`);
+  if (typeof v.unit !== "string" || !v.unit) throw new Error(`${path}.unit must be a non-empty string`);
+  if (v.value !== undefined) validateNumber(v.value, `${path}.value`);
+  return { ...v };
+}
+
+/**
+ * Text runs are absolute character ranges, not a list of overrides that can
+ * overlap. Keeping them ordered and disjoint makes apply deterministic: a font
+ * set by run 1 cannot be silently undone by run 2. A field the run omits
+ * inherits the node's base text style.
+ */
+export function textRunsFromSpec(value: any, path: string, text: string): Json[] {
+  if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
+  if (value.length > MAX_TEXT_RUNS) throw new Error(`${path} has ${value.length} runs; the limit is ${MAX_TEXT_RUNS}`);
+  const out: Json[] = [];
+  let previousEnd = 0;
+  value.forEach((run: any, i: number) => {
+    const at = `${path}[${i}]`;
+    if (!isObj(run)) throw new Error(`${at} must be an object`);
+    const start = validateNumber(run.start, `${at}.start`, { min: 0 });
+    const end = validateNumber(run.end, `${at}.end`, { positive: true });
+    if (!Number.isInteger(start) || !Number.isInteger(end)) throw new Error(`${at}: start and end must be integers`);
+    if (end <= start) throw new Error(`${at}: end must be greater than start`);
+    if (end > text.length) throw new Error(`${at}: end ${end} is past the text length ${text.length}`);
+    if (i > 0 && start < previousEnd) {
+      throw new Error(`${at}: runs must be ordered and non-overlapping (starts at ${start}, previous ends at ${previousEnd})`);
+    }
+    previousEnd = end;
+    const normalized: Json = { start, end };
+    let fields = 0;
+    if (run.font !== undefined) {
+      const font = fontSpec(run.font);
+      if (!font) throw new Error(`${at}.font must be "Family/Style" or {family,style}`);
+      normalized.font = font;
+      fields++;
+    }
+    if (run.fontSize !== undefined) {
+      normalized.fontSize = validateNumber(run.fontSize, `${at}.fontSize`, { positive: true });
+      fields++;
+    }
+    if (run.fills !== undefined) {
+      if (!(typeof run.fills === "string" || isObj(run.fills) || Array.isArray(run.fills))) {
+        throw new Error(`${at}.fills must be a colour string, a paint object or an array of paints`);
+      }
+      normalized.fills = run.fills;
+      fields++;
+    }
+    if (run.textCase !== undefined) {
+      if (!TEXT_CASES.has(String(run.textCase))) throw new Error(`${at}.textCase must be ${[...TEXT_CASES].join(", ")}`);
+      normalized.textCase = run.textCase;
+      fields++;
+    }
+    if (run.textDecoration !== undefined) {
+      if (!TEXT_DECORATIONS.has(String(run.textDecoration))) {
+        throw new Error(`${at}.textDecoration must be ${[...TEXT_DECORATIONS].join(", ")}`);
+      }
+      normalized.textDecoration = run.textDecoration;
+      fields++;
+    }
+    if (run.lineHeight !== undefined) {
+      normalized.lineHeight = lineHeightFromSpec(run.lineHeight, `${at}.lineHeight`);
+      fields++;
+    }
+    if (run.letterSpacing !== undefined) {
+      normalized.letterSpacing = letterSpacingFromSpec(run.letterSpacing, `${at}.letterSpacing`);
+      fields++;
+    }
+    if (run.hyperlink !== undefined) {
+      normalized.hyperlink = hyperlinkFromSpec(run.hyperlink, `${at}.hyperlink`);
+      fields++;
+    }
+    if (!fields) throw new Error(`${at}: a run needs at least one of font, fontSize, fills, textCase, textDecoration, lineHeight, letterSpacing or hyperlink`);
+    out.push(normalized);
+  });
+  return out;
 }
 
 function validateSize(v: any, path: string): { width: number; height: number } {
@@ -323,10 +416,15 @@ function validateNode(
     if (type !== "TEXT") throw new Error(`${path}.hyperlink is only valid on TEXT`);
     out.spec.hyperlink = hyperlinkFromSpec(raw.hyperlink, `${path}.hyperlink`);
   }
+  if (raw.runs !== undefined) {
+    if (type !== "TEXT") throw new Error(`${path}.runs is only valid on TEXT`);
+    if (raw.text === undefined) throw new Error(`${path}.runs needs text, so character offsets can be validated`);
+  }
 
   if (type === "TEXT") {
     if (raw.text !== undefined && typeof raw.text !== "string") throw new Error(`${path}.text must be a string`);
     if (raw.text === undefined) out.spec.text = "";
+    if (raw.runs !== undefined) out.spec.runs = textRunsFromSpec(raw.runs, `${path}.runs`, String(out.spec.text));
     if (raw.children !== undefined) throw new Error(`${path}: TEXT cannot have children`);
   }
   if (LEAF_TYPES.has(type) && type !== "TEXT" && raw.children !== undefined) {
@@ -536,6 +634,12 @@ async function collectResources(ctx: any, root: NormalizedNode): Promise<Resourc
       } else {
         addFont(res, DEFAULT_FONT, n.key);
         res.warnings.push(`${n.key}: no font or textStyle; defaulting to Inter/Regular`);
+      }
+      if (Array.isArray(s.runs)) {
+        s.runs.forEach((run: Json, i: number) => {
+          if (run.font !== undefined) addFont(res, run.font, `${n.key}.runs[${i}]`);
+          collectPaints(res, run.fills, `${n.key}.runs[${i}].fills`);
+        });
       }
     }
     if (s.fillStyle !== undefined) {
@@ -1454,7 +1558,34 @@ async function ensureTextFont(ctx: any, node: any, spec: Json, res: Resources): 
   if (spec.font !== undefined) node.fontName = font;
 }
 
-async function applyTextProps(ctx: any, node: any, spec: Json, res: Resources): Promise<void> {
+async function applyTextRuns(ctx: any, node: any, spec: Json, res: Resources, where: string): Promise<void> {
+  const runs = Array.isArray(spec.runs) ? spec.runs : [];
+  if (!runs.length) return;
+  if (typeof node.setRangeFontName !== "function") {
+    throw new Error(`${where}: this host does not expose per-range text styling`);
+  }
+  const length = typeof node.characters === "string" ? node.characters.length : 0;
+  let previousEnd = 0;
+  runs.forEach((run: Json, i: number) => {
+    const start = Number(run.start);
+    const end = Number(run.end);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > length) {
+      throw new Error(`${where}.runs[${i}]: range ${run.start}..${run.end} is outside the text (${length} characters)`);
+    }
+    if (i > 0 && start < previousEnd) throw new Error(`${where}.runs[${i}]: runs overlap`);
+    previousEnd = end;
+    if (run.font !== undefined) node.setRangeFontName(start, end, run.font);
+    if (run.fontSize !== undefined) node.setRangeFontSize(start, end, Number(run.fontSize));
+    if (run.fills !== undefined) node.setRangeFills(start, end, paintsFromSpec(ctx, run.fills, res));
+    if (run.textCase !== undefined) node.setRangeTextCase(start, end, run.textCase);
+    if (run.textDecoration !== undefined) node.setRangeTextDecoration(start, end, run.textDecoration);
+    if (run.lineHeight !== undefined) node.setRangeLineHeight(start, end, run.lineHeight);
+    if (run.letterSpacing !== undefined) node.setRangeLetterSpacing(start, end, run.letterSpacing);
+    if (run.hyperlink !== undefined) node.setRangeHyperlink(start, end, run.hyperlink);
+  });
+}
+
+async function applyTextProps(ctx: any, node: any, spec: Json, res: Resources, where: string): Promise<void> {
   await ensureTextFont(ctx, node, spec, res);
   if (spec.text !== undefined) node.characters = String(spec.text);
   if (spec.hyperlink !== undefined) node.hyperlink = spec.hyperlink;
@@ -1476,6 +1607,7 @@ async function applyTextProps(ctx: any, node: any, spec: Json, res: Resources): 
   if (spec.textDecoration !== undefined) node.textDecoration = spec.textDecoration;
   if (spec.paragraphSpacing !== undefined) node.paragraphSpacing = Number(spec.paragraphSpacing);
   if (spec.paragraphIndent !== undefined) node.paragraphIndent = Number(spec.paragraphIndent);
+  await applyTextRuns(ctx, node, spec, res, where);
   if (spec.size !== undefined) {
     node.textAutoResize = "NONE";
     node.resize(Number(spec.size.width), Number(spec.size.height));
@@ -1573,7 +1705,7 @@ async function applyNode(
   }
 
   applyCommonProps(node, spec, res, ctx);
-  if (n.type === "TEXT") await applyTextProps(ctx, node, spec, res);
+  if (n.type === "TEXT") await applyTextProps(ctx, node, spec, res, n.key);
   else if (n.type === "LINE" && spec.length !== undefined && "resize" in node) node.resize(Number(spec.length), 0);
   else if (spec.size !== undefined && "resize" in node) node.resize(Number(spec.size.width), Number(spec.size.height));
 

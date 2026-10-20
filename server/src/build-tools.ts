@@ -96,6 +96,21 @@ const layoutGridSchema = z
   })
   .passthrough();
 
+const textRunSchema = z
+  .object({
+    start: z.number().int().min(0).describe("Start character offset (inclusive, UTF-16)"),
+    end: z.number().int().positive().describe("End character offset (exclusive)"),
+    font: fontSchema.optional(),
+    fontSize: z.number().positive().optional(),
+    fills: z.union([paintSchema, z.array(paintSchema)]).optional(),
+    textCase: z.enum(["ORIGINAL", "UPPER", "LOWER", "TITLE", "SMALL_CAPS", "SMALL_CAPS_FORCED"]).optional(),
+    textDecoration: z.enum(["NONE", "UNDERLINE", "STRIKETHROUGH"]).optional(),
+    lineHeight: z.union([z.number(), z.object({ unit: z.string(), value: z.number() })]).optional(),
+    letterSpacing: z.union([z.number(), z.object({ unit: z.string(), value: z.number() })]).optional(),
+    hyperlink: z.object({ type: z.enum(["URL", "NODE"]), value: z.string().min(1) }).nullable().optional(),
+  })
+  .passthrough();
+
 /**
  * The IR node. Kept deliberately structural: every field here has a direct
  * Plugin API counterpart. Anything that would require an agent to fall back to
@@ -128,6 +143,13 @@ const buildNodeSchema: z.ZodType<any> = z.lazy(() =>
         .nullable()
         .optional()
         .describe("TEXT only. A URL link, or a NODE link to a node id in the same file; null clears it on patch"),
+      runs: z
+        .array(textRunSchema)
+        .max(200)
+        .optional()
+        .describe(
+          "TEXT only. Ordered, non-overlapping character ranges with per-run font, size, fills, case, decoration, line height, letter spacing or hyperlink. Omitted fields inherit the node's base text properties.",
+        ),
 
       fills: z.union([paintSchema, z.array(paintSchema)]).optional(),
       strokes: z.union([paintSchema, z.array(paintSchema)]).optional(),
