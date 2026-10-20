@@ -5,11 +5,12 @@
  *
  * A design that was made by hand can be handed to figma_build/figma_patch on
  * another page or in another file. This is a lossy translation by nature — the
- * Plugin API cannot recover an SVG's source, a BOOLEAN_OPERATION's inputs, or
- * the inside of an instance — so the report names every field it could not
- * carry instead of returning a spec that looks complete. A node with no build
- * equivalent can instead travel as the SVG render of its current appearance;
- * the spec then says it is flattened and the report names what that loses.
+ * Plugin API cannot recover an SVG's source or the inside of an instance, and
+ * the build language cannot create a BOOLEAN_OPERATION — so the report names
+ * every field it could not carry instead of returning a spec that looks
+ * complete. A node with no build equivalent can instead travel as the SVG
+ * render of its current appearance; the spec then says it is flattened and the
+ * report names what that loses.
  *
  * The spec is ordinary data and the source is never modified.
  */

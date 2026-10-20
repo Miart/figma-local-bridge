@@ -42,7 +42,7 @@ export const LIMITATIONS: readonly string[] = [
   "text runs are rebuilt (font, size, fills, text/fill style links, variable bindings, case, decoration, line height, letter spacing and hyperlink)",
   "style ids are re-linked when the style still exists; node-level and run-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
-  "a BOOLEAN_OPERATION is not rebuilt (its inputs are not recoverable from the API)",
+  "a COMPONENT_SET is not rebuilt (variants and their combined identity are not restorable); checkpoint its variants instead",
 ];
 
 export type Dict = Record<string, any>;
@@ -196,6 +196,7 @@ export function readState(node: any): Dict {
   if ("arcData" in node) s.arcData = copy(node.arcData);
   if ("pointCount" in node) s.pointCount = node.pointCount;
   if ("innerRadius" in node) s.innerRadius = node.innerRadius;
+  if ("booleanOperation" in node) s.booleanOperation = node.booleanOperation;
 
   if ("layoutMode" in node && node.layoutMode !== "NONE") {
     const L: Dict = {
@@ -577,11 +578,11 @@ const REBUILDABLE = new Set([
   "VECTOR",
   "STAR",
   "POLYGON",
+  "BOOLEAN_OPERATION",
 ]);
 
 /** A node whose type we cannot build still records its identity, so the report can name it. */
 function unsupportedWhy(type: string): string {
-  if (type === "BOOLEAN_OPERATION") return "a BOOLEAN_OPERATION cannot be rebuilt: the Plugin API does not expose its inputs or its operation";
   if (type === "COMPONENT_SET") return "a COMPONENT_SET cannot be rebuilt (variants and their combined identity are not restorable); checkpoint its variants instead";
   return `${type} is not rebuilt by checkpoint-v1`;
 }
@@ -766,6 +767,7 @@ async function buildNode(d: DumpNode, parent: any, ctx: RestoreContext, report: 
     return null;
   }
   if (d.type === "GROUP") return buildGroup(d, parent, ctx, report, path, opts);
+  if (d.type === "BOOLEAN_OPERATION") return buildBoolean(d, parent, ctx, report, path, opts);
 
   let node: any = null;
   try {
@@ -831,6 +833,54 @@ async function buildGroup(d: DumpNode, parent: any, ctx: RestoreContext, report:
   } catch (e) {
     if (!opts.allowPartial) throw new Error(`${path} (GROUP "${d.name}"): ${msg(e)}`);
     report.skipped.push({ path, type: "GROUP", why: msg(e) });
+    return null;
+  }
+}
+
+/**
+ * A boolean operation is built from its children, exactly like a group: the
+ * children are created first so the API can derive the operation's bounds, then
+ * the matching figma.union/subtract/intersect/exclude makes the node. A boolean
+ * needs at least two inputs; fewer is named rather than faked as a plain shape.
+ */
+async function buildBoolean(d: DumpNode, parent: any, ctx: RestoreContext, report: RestoreReport, path: string, opts: RestoreOptions): Promise<any> {
+  const kids = d.children ?? [];
+  if (kids.length < 2) {
+    report.skipped.push({ path, type: "BOOLEAN_OPERATION", why: "a boolean operation needs at least two children, so it cannot be rebuilt" });
+    return null;
+  }
+  const made: any[] = [];
+  try {
+    for (let i = 0; i < kids.length; i++) {
+      const child = await buildNode(kids[i], parent, ctx, report, `${path}.children[${i}]`, opts);
+      if (child) made.push(child);
+    }
+    if (made.length < 2) {
+      report.skipped.push({ path, type: "BOOLEAN_OPERATION", why: "fewer than two of its children could be rebuilt" });
+      return null;
+    }
+    const op = d.state.booleanOperation;
+    const makers: Dict = {
+      UNION: ctx.figma.union,
+      SUBTRACT: ctx.figma.subtract,
+      INTERSECT: ctx.figma.intersect,
+      EXCLUDE: ctx.figma.exclude,
+    };
+    const maker = makers[op] ?? ctx.figma.union;
+    if (typeof maker !== "function") throw new Error(`the Plugin API does not expose ${op || "UNION"}`);
+    const node = maker(made, parent);
+    node.name = d.name;
+    if (op && "booleanOperation" in node) node.booleanOperation = op;
+    await applyVariableModes(node, d.meta?.variableModes, ctx, report, path);
+    applyLayout(node, d.state, report, path);
+    await applyFinal(node, d.state, ctx, report, path, false);
+    await applyStyleLinks(node, d.meta?.styleIds, ctx, report, path, d.state);
+    await applyVariableBindings(node, d.meta?.variableBindings, d.state, ctx, report, path);
+    report.created++;
+    return node;
+  } catch (e) {
+    if (!opts.allowPartial) throw new Error(`${path} (BOOLEAN_OPERATION "${d.name}"): ${msg(e)}`);
+    report.skipped.push({ path, type: "BOOLEAN_OPERATION", why: msg(e) });
     return null;
   }
 }
@@ -922,7 +972,7 @@ function ownsSize(node: any, state: Dict): boolean {
   // Derived from something else: the geometry (vector), the children (group), the
   // text metrics, or the auto-layout engine. Resizing would fight the owner and
   // the comparison afterwards would report OUR change as a difference.
-  if (node.type === "VECTOR" || node.type === "GROUP") return false;
+  if (node.type === "VECTOR" || node.type === "GROUP" || node.type === "BOOLEAN_OPERATION") return false;
   if (node.type === "TEXT") return state?.text?.autoResize === "NONE";
   const L = state?.layout;
   if (L && (L.primary === "AUTO" || L.counter === "AUTO")) return false;
@@ -945,6 +995,7 @@ async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: R
   // star/polygon off the recorded size.
   if (typeof state.pointCount === "number" && "pointCount" in node) soft("point count", () => { node.pointCount = state.pointCount; });
   if (typeof state.innerRadius === "number" && "innerRadius" in node) soft("inner radius", () => { node.innerRadius = state.innerRadius; });
+  if (state.booleanOperation && "booleanOperation" in node) soft("boolean operation", () => { node.booleanOperation = state.booleanOperation; });
   if (Array.isArray(state.sizing) && "layoutSizingHorizontal" in node) {
     soft("layout sizing", () => { node.layoutSizingHorizontal = state.sizing[0]; node.layoutSizingVertical = state.sizing[1]; });
   }

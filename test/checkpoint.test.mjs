@@ -91,6 +91,7 @@ const BY_TYPE = (t) => {
       minWidth: null, minHeight: null, maxWidth: null, maxHeight: null,
     };
   }
+  if (t === "BOOLEAN_OPERATION") return { children: [], booleanOperation: "UNION" };
   if (t === "STAR") return { pointCount: 5, innerRadius: 0.5 };
   if (t === "POLYGON") return { pointCount: 6 };
   if (t === "INSTANCE") {
@@ -187,6 +188,12 @@ const withChildren = (parent, kids) => kids.forEach((k) => parent.appendChild(k)
 function fakeFigma(registry = [], options = {}) {
   const made = [];
   const track = (n) => { made.push(n); registry.push(n); return n; };
+  const makeBoolean = (op, nodes, parent) => {
+    const b = track(node("BOOLEAN_OPERATION", { booleanOperation: op }));
+    nodes.forEach((n) => b.appendChild(n));
+    parent.appendChild(b);
+    return b;
+  };
   return {
     made,
     variables: {
@@ -210,6 +217,10 @@ function fakeFigma(registry = [], options = {}) {
       parent.appendChild(g);
       return g;
     },
+    union(nodes, parent) { return makeBoolean("UNION", nodes, parent); },
+    subtract(nodes, parent) { return makeBoolean("SUBTRACT", nodes, parent); },
+    intersect(nodes, parent) { return makeBoolean("INTERSECT", nodes, parent); },
+    exclude(nodes, parent) { return makeBoolean("EXCLUDE", nodes, parent); },
     async getNodeByIdAsync(id) { return registry.find((n) => n.id === id) ?? null; },
     async importComponentByKeyAsync(key) { return registry.find((n) => n.type === "COMPONENT" && n.key === key) ?? null; },
   };
@@ -465,12 +476,12 @@ const errors = async (fn) => {
   const frame = node("FRAME");
   withChildren(frame, [
     node("RECTANGLE", { name: "keep" }),
-    node("BOOLEAN_OPERATION", { name: "Union", children: [node("ELLIPSE", { name: "dot" })] }),
+    node("COMPONENT_SET", { name: "Variants" }),
   ]);
   const { root, unsupported } = await dumpSubtree(frame);
   check("dump: an unsupported node is named, not skipped silently",
-    unsupported.length === 1 && unsupported[0].type === "BOOLEAN_OPERATION" && unsupported[0].path === "$.children[1]");
-  check("dump: its reason names the operation", /does not expose its inputs/.test(unsupported[0].why));
+    unsupported.length === 1 && unsupported[0].type === "COMPONENT_SET" && unsupported[0].path === "$.children[1]");
+  check("dump: its reason names the variants", /variants/.test(unsupported[0].why));
   check("dump: its interior is not walked", root.children[1].children === undefined);
   check("dump: collectUnsupported can exclude the root",
     collectUnsupported(root, true).length === 1 && collectUnsupported(root, false).length === 1);
@@ -514,7 +525,7 @@ const errors = async (fn) => {
   const target = node("FRAME");
   withChildren(target, [node("RECTANGLE", { name: "old" })]);
   const frame = node("FRAME", { name: "Card" });
-  withChildren(frame, [node("BOOLEAN_OPERATION", { name: "Union" }), node("RECTANGLE", { name: "kept" })]);
+  withChildren(frame, [node("COMPONENT_SET", { name: "Variants" }), node("RECTANGLE", { name: "kept" })]);
   const { root } = await dumpSubtree(frame);
 
   const refused = await errors(() => restoreSubtree(root, { figma, target }, {}));
@@ -676,19 +687,67 @@ const errors = async (fn) => {
     report.overridesUnsupported.length === 0 && report.overridesRestored.length === 1);
 }
 
+{
+  const figma = fakeFigma();
+  const target = node("FRAME");
+  const src = node("FRAME", { children: [node("BOOLEAN_OPERATION", {
+    name: "Cutout", booleanOperation: "SUBTRACT",
+    x: 10, y: 20, width: 80, height: 80,
+    fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: 1 }],
+    children: [
+      node("ELLIPSE", { name: "base", x: 10, y: 20, width: 80, height: 80 }),
+      node("RECTANGLE", { name: "cut", x: 30, y: 40, width: 40, height: 40 }),
+    ],
+  })] });
+  const { root, unsupported } = await dumpSubtree(src);
+  check("dump: a boolean operation carries its operation and children",
+    unsupported.length === 0 && root.children[0].state.booleanOperation === "SUBTRACT" && root.children[0].children.length === 2);
+
+  const report = await restoreSubtree(root, ctxFor(figma, target), {});
+  const bool = target.children[0];
+  check("restore: a boolean operation is rebuilt from its children with the same operation",
+    bool.type === "BOOLEAN_OPERATION" && bool.booleanOperation === "SUBTRACT" &&
+    bool.children.map((c) => c.name).join(",") === "base,cut" && bool.resizes === 0);
+  check("restore: the boolean's paint and position come back",
+    bool.fills[0].color.r === 1 && bool.x === 10 && bool.y === 20 &&
+    report.created === 3 && report.skipped.length === 0);
+}
+
+{
+  const figma = fakeFigma();
+  const target = node("FRAME");
+  const inner = node("BOOLEAN_OPERATION", {
+    name: "Inner", booleanOperation: "INTERSECT",
+    children: [node("ELLIPSE", { name: "disc" }), node("RECTANGLE", { name: "bar" })],
+  });
+  const src = node("FRAME", { children: [node("BOOLEAN_OPERATION", {
+    name: "Outer", booleanOperation: "UNION",
+    children: [inner, node("RECTANGLE", { name: "extra" })],
+  })] });
+  const { root } = await dumpSubtree(src);
+  const report = await restoreSubtree(root, ctxFor(figma, target), {});
+  const outer = target.children[0];
+  const rebuiltInner = outer.children[0];
+  check("restore: nested boolean operations are rebuilt inside out",
+    outer.booleanOperation === "UNION" && outer.children.map((c) => c.name).join(",") === "Inner,extra" &&
+    rebuiltInner.type === "BOOLEAN_OPERATION" && rebuiltInner.booleanOperation === "INTERSECT" &&
+    rebuiltInner.children.map((c) => c.name).join(",") === "disc,bar" &&
+    report.created === 5 && report.skipped.length === 0);
+}
+
 // ---------------------------------------------------------------- restore: the losses, named
 
 {
   const figma = fakeFigma();
   const target = node("FRAME");
   const src = node("FRAME");
-  withChildren(src, [node("BOOLEAN_OPERATION", { name: "Union" }), node("RECTANGLE", { name: "kept" })]);
+  withChildren(src, [node("COMPONENT_SET", { name: "Variants" }), node("RECTANGLE", { name: "kept" })]);
   const { root } = await dumpSubtree(src);
 
   const report = await restoreSubtree(root, ctxFor(figma, target), { allowPartial: true });
   check("allowPartial: the rest is rebuilt and the loss is listed",
     target.children.map((c) => c.name).join(",") === "kept" &&
-    report.skipped.length === 1 && report.skipped[0].type === "BOOLEAN_OPERATION" && report.created === 1);
+    report.skipped.length === 1 && report.skipped[0].type === "COMPONENT_SET" && report.created === 1);
 }
 
 {

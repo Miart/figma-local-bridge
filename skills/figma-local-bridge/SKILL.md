@@ -386,8 +386,10 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   still the main component's current structure.
 - STAR and POLYGON are rebuilt natively: `pointCount` (and STAR's `innerRadius`)
   are applied before the final size, and a direct override of those fields is
-  replayed too. `BOOLEAN_OPERATION` and `COMPONENT_SET` are still refused by
-  name.
+  replayed too. A `BOOLEAN_OPERATION` tree is rebuilt from its children with the
+  recorded operation (`union` / `subtract` / `intersect` / `exclude`), including
+  nested operations; fewer than two rebuildable children is named and skipped.
+  `COMPONENT_SET` is still refused by name.
 - Style ids, node-level variable bindings and explicit variable modes travel in
   `meta`; per-run text bindings and style ids travel inside the runs. Restore
   re-links a style, variable, collection or mode when it still exists and
