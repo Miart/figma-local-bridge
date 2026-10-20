@@ -23,7 +23,7 @@ function node(type, opts = {}) {
     y: opts.y === undefined ? 0 : opts.y,
     width: opts.width === undefined ? 100 : opts.width,
     height: opts.height === undefined ? 100 : opts.height,
-    rotation: 0,
+    rotation: opts.rotation || 0,
     parent: opts.parent || null,
     children: opts.children || [],
     removed: false,
@@ -36,8 +36,18 @@ function node(type, opts = {}) {
     textStyleId: opts.textStyleId || "",
     strokeWeight: opts.strokeWeight === undefined ? 1 : opts.strokeWeight,
     strokeAlign: opts.strokeAlign || "INSIDE",
+    strokeCap: opts.strokeCap || "NONE",
+    strokeJoin: opts.strokeJoin || "MITER",
+    strokeMiterLimit: opts.strokeMiterLimit === undefined ? 4 : opts.strokeMiterLimit,
     dashPattern: opts.dashPattern || [],
     cornerRadius: opts.cornerRadius === undefined ? 0 : opts.cornerRadius,
+    topLeftRadius: opts.topLeftRadius === undefined ? 0 : opts.topLeftRadius,
+    topRightRadius: opts.topRightRadius === undefined ? 0 : opts.topRightRadius,
+    bottomRightRadius: opts.bottomRightRadius === undefined ? 0 : opts.bottomRightRadius,
+    bottomLeftRadius: opts.bottomLeftRadius === undefined ? 0 : opts.bottomLeftRadius,
+    isMask: opts.isMask === true,
+    itemReverseZIndex: opts.itemReverseZIndex === true,
+    strokesIncludedInLayout: opts.strokesIncludedInLayout === true,
     cornerSmoothing: opts.cornerSmoothing || 0,
     constraints: opts.constraints || { horizontal: "MIN", vertical: "MIN" },
     layoutMode: opts.layoutMode || "NONE",
@@ -76,6 +86,8 @@ function node(type, opts = {}) {
     p.letterSpacing = opts.letterSpacing || { unit: "PERCENT", value: 0 };
     p.textCase = opts.textCase || "ORIGINAL";
     p.textDecoration = opts.textDecoration || "NONE";
+    p.paragraphSpacing = opts.paragraphSpacing || 0;
+    p.paragraphIndent = opts.paragraphIndent || 0;
   }
   if (type === "INSTANCE") {
     p.main = opts.main || null;
@@ -122,13 +134,17 @@ test("exports a keyed card with styles, text and auto layout", async () => {
     name: "Title", characters: "Hello", key: "title",
     fontName: { family: "Inter", style: "Bold" }, fontSize: 24,
     textStyleId: "S:text", fillStyleId: "S:text",
+    textCase: "UPPER", textDecoration: "UNDERLINE", paragraphSpacing: 3, paragraphIndent: 2,
   });
   const bg = node("RECTANGLE", {
     name: "Bg", key: "bg", width: 320, height: 120,
-    fillStyleId: "S:paint", cornerRadius: 12,
+    fillStyleId: "S:paint", cornerRadius: 0,
+    topLeftRadius: 12, topRightRadius: 0, bottomRightRadius: 8, bottomLeftRadius: 2,
+    strokeCap: "ROUND", strokeJoin: "ROUND", strokeMiterLimit: 6,
+    isMask: true, itemReverseZIndex: true, strokesIncludedInLayout: true,
   });
   const card = node("FRAME", {
-    name: "Card", key: "card", width: 320, height: 120,
+    name: "Card", key: "card", width: 320, height: 120, rotation: 15,
     layoutMode: "VERTICAL", itemSpacing: 8,
     paddingTop: 16, paddingRight: 16, paddingBottom: 16, paddingLeft: 16,
     fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 }, opacity: 0.5 }],
@@ -150,16 +166,30 @@ test("exports a keyed card with styles, text and auto layout", async () => {
   assert.equal(report.spec.layout.gap, 8);
   assert.deepEqual(report.spec.layout.padding, [16, 16, 16, 16]);
   assert.equal(report.spec.fills[0].opacity, 0.5);
+  assert.equal(report.spec.rotation, 15);
 
   const [madeBg, madeTitle] = report.spec.children;
   assert.equal(madeBg.key, "bg");
   assert.equal(madeBg.fillStyle, "brand/surface");
-  assert.equal(madeBg.cornerRadius, 12);
+  assert.equal(madeBg.topLeftRadius, 12);
+  assert.equal(madeBg.topRightRadius, 0);
+  assert.equal(madeBg.bottomRightRadius, 8);
+  assert.equal(madeBg.bottomLeftRadius, 2);
+  assert.equal(madeBg.strokeCap, "ROUND");
+  assert.equal(madeBg.strokeJoin, "ROUND");
+  assert.equal(madeBg.strokeMiterLimit, 6);
+  assert.equal(madeBg.isMask, true);
+  assert.equal(madeBg.itemReverseZIndex, true);
+  assert.equal(madeBg.strokesIncludedInLayout, true);
   assert.equal(madeTitle.key, "title");
   assert.equal(madeTitle.text, "Hello");
   assert.equal(madeTitle.textStyle, "text/heading");
   assert.equal(madeTitle.fontSize, 24);
   assert.equal(madeTitle.fillStyle, "text/heading");
+  assert.equal(madeTitle.textCase, "UPPER");
+  assert.equal(madeTitle.textDecoration, "UNDERLINE");
+  assert.equal(madeTitle.paragraphSpacing, 3);
+  assert.equal(madeTitle.paragraphIndent, 2);
   assert.equal(madeTitle.font, undefined, "the style's own font is not re-declared");
   assert.equal(report.truncated, false);
 

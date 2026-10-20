@@ -28,7 +28,7 @@ const errMsg = (e: any) => String(e && e.message ? e.message : e);
 
 const OPS = new Set([
   "set_text", "set_name", "rename", "set_fill", "set_stroke", "resize", "move",
-  "set_visible", "set_opacity", "set_layout", "set_variant", "set_constraints",
+  "set_visible", "set_opacity", "set_rotation", "set_layout", "set_variant", "set_constraints",
   "duplicate", "reparent",
 ]);
 
@@ -264,6 +264,10 @@ async function planOp(ctx: any, op: Json, index: number): Promise<Json> {
         throw new Error(`op[${index}].opacity must be between 0 and 1`);
       }
       break;
+    case "set_rotation":
+      if (!Number.isFinite(Number(op.rotation))) throw new Error(`op[${index}].rotation must be a finite number`);
+      if (!("rotation" in target)) throw new Error(`op[${index}] set_rotation: ${target.id} has no rotation`);
+      break;
     case "set_layout":
       layoutPreflight(target, op, index);
       break;
@@ -370,6 +374,9 @@ async function applyOp(ctx: any, op: Json, target: any, plan: Json): Promise<Jso
       return { ...plan, status: "updated", nodeId: target.id };
     case "set_opacity":
       target.opacity = Number(op.opacity);
+      return { ...plan, status: "updated", nodeId: target.id };
+    case "set_rotation":
+      target.rotation = Number(op.rotation);
       return { ...plan, status: "updated", nodeId: target.id };
     case "set_layout":
       applyContainerLayout(target, op.layout, "before");

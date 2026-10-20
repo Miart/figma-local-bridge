@@ -71,7 +71,9 @@ half a design applied.
   `pluginData`; every node gets a stable key (`parent/slug#index` unless you
   supply one). Re-send the same buildId and it updates in place — never
   duplicates. `prune:true` makes the tree exact by deleting keyed children the
-  spec no longer contains; protected nodes are skipped and reported.
+  spec no longer contains; protected nodes are skipped and reported. The tree
+  also carries rotation (degrees), per-corner radii, stroke cap/join/miter,
+  masks, layout inclusion flags, and text case/decoration/paragraph spacing.
 - `figma_patch` takes a sparse tree under `rootNodeId`, `buildId` or
   `rootKey`. Children match by key. A missing key is refused unless
   `allowCreate:true`; a key under the wrong parent is refused rather than
@@ -79,7 +81,7 @@ half a design applied.
 - `figma_batch_edit` takes up to 200 small ops on many targets in one
   transaction. Targets are `nodeId` or stable `key`. Ops: `set_text`,
   `set_name`/`rename`, `set_fill`, `set_stroke`, `resize`, `move`,
-  `set_visible`, `set_opacity`, `set_layout`, `set_variant`,
+  `set_visible`, `set_opacity`, `set_rotation`, `set_layout`, `set_variant`,
   `set_constraints`, `duplicate`, `reparent`. Every target, font, paint style
   and variant property is resolved first; a failed op rolls the whole batch
   back unless `stopOnError:false`, which reports the exact failure and what

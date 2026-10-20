@@ -348,35 +348,45 @@ async function exportNode(
   if (node.blendMode && node.blendMode !== "NORMAL" && node.blendMode !== "PASS_THROUGH") spec.blendMode = node.blendMode;
   if (node.locked === true) spec.locked = true;
   if (protectedOf(node)) spec.protected = true;
-  if (typeof node.cornerRadius === "number" && node.cornerRadius > 0) spec.cornerRadius = round(node.cornerRadius);
-  else if (Array.isArray(node.cornerRadius)) {
-    const radii = node.cornerRadius.map(Number);
-    if (radii.every((r: number) => r === radii[0]) && radii[0] > 0) spec.cornerRadius = round(radii[0]);
-    else state.warnings.push(`${path}: per-corner radii are not representable; only a uniform cornerRadius is supported`);
+  const radii = ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"]
+    .map((k) => (Number.isFinite(Number(node[k])) ? Number(node[k]) : NaN));
+  const hasIndividual = radii.every(Number.isFinite);
+  const individualSet = hasIndividual && radii.some((r) => r > 0);
+  if (individualSet && radii.some((r) => r !== radii[0])) {
+    spec.topLeftRadius = round(radii[0]);
+    spec.topRightRadius = round(radii[1]);
+    spec.bottomRightRadius = round(radii[2]);
+    spec.bottomLeftRadius = round(radii[3]);
+  } else if (typeof node.cornerRadius === "number" && node.cornerRadius > 0) {
+    spec.cornerRadius = round(node.cornerRadius);
+  } else if (individualSet) {
+    spec.cornerRadius = round(radii[0]);
+  } else if (Array.isArray(node.cornerRadius)) {
+    const uniform = node.cornerRadius.map(Number);
+    if (uniform.every((r: number) => r === uniform[0]) && uniform[0] > 0) spec.cornerRadius = round(uniform[0]);
+    else state.warnings.push(`${path}: per-corner radii could not be read as four numbers`);
   }
   if (typeof node.cornerSmoothing === "number" && node.cornerSmoothing > 0) spec.cornerSmoothing = round(node.cornerSmoothing);
   if (typeof node.strokeWeight === "number") spec.strokeWeight = round(node.strokeWeight);
   if (node.strokeAlign && node.strokeAlign !== "INSIDE") spec.strokeAlign = node.strokeAlign;
+  if (node.strokeCap && node.strokeCap !== "NONE") spec.strokeCap = node.strokeCap;
+  if (node.strokeJoin && node.strokeJoin !== "MITER") spec.strokeJoin = node.strokeJoin;
+  if (Number(node.strokeMiterLimit) > 0 && Number(node.strokeMiterLimit) !== 4) {
+    spec.strokeMiterLimit = round(Number(node.strokeMiterLimit));
+  }
   if (Array.isArray(node.dashPattern) && node.dashPattern.length) spec.dashPattern = node.dashPattern.map(Number);
   if (node.constraints && !parentAuto) spec.constraints = { horizontal: node.constraints.horizontal, vertical: node.constraints.vertical };
 
-  if (Math.abs(Number(node.rotation) || 0) > 0.01) {
-    state.warnings.push(`${path}: rotation ${round(Number(node.rotation))}° is not part of a build spec and was omitted`);
-  }
+  if (Math.abs(Number(node.rotation) || 0) > 0.01) spec.rotation = round(Number(node.rotation));
   if (node.type === "LINE") {
-    state.warnings.push(`${path}: LINE length/angle is not representable; the build creates a default line`);
+    state.warnings.push(`${path}: LINE length is not representable; the build creates a default-length line (rotation is kept)`);
   }
-  if (node.isMask === true) state.warnings.push(`${path}: isMask is not representable and was omitted`);
+  if (node.isMask === true) spec.isMask = true;
   if (Array.isArray(node.layoutGrids) && node.layoutGrids.length) {
     state.warnings.push(`${path}: layoutGrids are not representable and were omitted`);
   }
-  if (node.itemReverseZIndex === true) state.warnings.push(`${path}: itemReverseZIndex is not representable and was omitted`);
-  if (node.strokesIncludedInLayout === true) state.warnings.push(`${path}: strokesIncludedInLayout is not representable and was omitted`);
-  if (node.strokeCap && node.strokeCap !== "NONE") state.warnings.push(`${path}: strokeCap ${node.strokeCap} is not representable and was omitted`);
-  if (node.strokeJoin && node.strokeJoin !== "MITER") state.warnings.push(`${path}: strokeJoin ${node.strokeJoin} is not representable and was omitted`);
-  if (Number(node.strokeMiterLimit) > 0 && Number(node.strokeMiterLimit) !== 4) {
-    state.warnings.push(`${path}: strokeMiterLimit ${node.strokeMiterLimit} is not representable and was omitted`);
-  }
+  if (node.itemReverseZIndex === true) spec.itemReverseZIndex = true;
+  if (node.strokesIncludedInLayout === true) spec.strokesIncludedInLayout = true;
 
   const fills = await paintsFor(ctx, node, "fills", state.styles, state.vars, state.warnings, path);
   if (fills?.style) spec.fillStyle = fills.style;
@@ -419,11 +429,10 @@ async function exportNode(
     }
     if (!isMixed(node.lineHeight) && node.lineHeight) spec.lineHeight = node.lineHeight;
     if (!isMixed(node.letterSpacing) && node.letterSpacing) spec.letterSpacing = node.letterSpacing;
-    for (const [k, def] of [["textCase", "ORIGINAL"], ["textDecoration", "NONE"]] as Array<[string, string]>) {
-      if (node[k] && node[k] !== def) state.warnings.push(`${path}: ${k} ${node[k]} is not representable and was omitted`);
-    }
-    if (Number(node.paragraphSpacing) > 0) state.warnings.push(`${path}: paragraphSpacing is not representable and was omitted`);
-    if (Number(node.paragraphIndent) > 0) state.warnings.push(`${path}: paragraphIndent is not representable and was omitted`);
+    if (node.textCase && node.textCase !== "ORIGINAL") spec.textCase = node.textCase;
+    if (node.textDecoration && node.textDecoration !== "NONE") spec.textDecoration = node.textDecoration;
+    if (Number(node.paragraphSpacing) > 0) spec.paragraphSpacing = round(Number(node.paragraphSpacing));
+    if (Number(node.paragraphIndent) > 0) spec.paragraphIndent = round(Number(node.paragraphIndent));
     if (node.hyperlink) state.warnings.push(`${path}: the text hyperlink is not representable and was omitted`);
   }
 

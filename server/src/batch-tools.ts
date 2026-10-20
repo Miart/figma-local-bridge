@@ -144,6 +144,11 @@ const opSchema = z.discriminatedUnion("op", [
     opacity: z.number().min(0).max(1),
   }),
   z.object({
+    op: z.literal("set_rotation"),
+    ...targetFields,
+    rotation: z.number().describe("Degrees, clockwise; Figma's rotation property"),
+  }),
+  z.object({
     op: z.literal("set_layout"),
     ...targetFields,
     layout: layoutSchema,
@@ -181,7 +186,7 @@ export function registerBatchTools(server: McpServer, client: FigmaClient, caps:
     "figma_batch_edit",
     "Apply many small edits to many targets in ONE undo transaction, after resolving every target, font, style and component property in a dry run. " +
       "Targets are nodeId or stable key; a key is the better identity because it survives node re-creation. " +
-      "Ops: set_text, set_name/rename, set_fill, set_stroke, resize, move, set_visible, set_opacity, set_layout, set_variant, set_constraints, duplicate, reparent. " +
+      "Ops: set_text, set_name/rename, set_fill, set_stroke, resize, move, set_visible, set_opacity, set_rotation, set_layout, set_variant, set_constraints, duplicate, reparent. " +
       "dryRun defaults to TRUE and returns per-op plans plus a fingerprint per target; apply with dryRun:false and the same expectedFingerprints. " +
       "A failed op rolls the whole batch back unless stopOnError:false, which reports partial success and exactly which op failed.",
     {

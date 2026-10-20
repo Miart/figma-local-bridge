@@ -47,6 +47,10 @@ const ALLOWED_TYPES = new Set([
 ]);
 const CONTAINER_TYPES = new Set(["FRAME", "COMPONENT"]);
 const LEAF_TYPES = new Set(["RECTANGLE", "ELLIPSE", "LINE", "TEXT", "SVG"]);
+const STROKE_CAPS = new Set(["NONE", "ROUND", "SQUARE", "ARROW_LINES", "ARROW_EQUILATERAL"]);
+const STROKE_JOINS = new Set(["MITER", "BEVEL", "ROUND"]);
+const TEXT_CASES = new Set(["ORIGINAL", "UPPER", "LOWER", "TITLE", "SMALL_CAPS", "SMALL_CAPS_FORCED"]);
+const TEXT_DECORATIONS = new Set(["NONE", "UNDERLINE", "STRIKETHROUGH"]);
 
 type Json = any;
 
@@ -270,9 +274,32 @@ function validateNode(
   if (raw.size !== undefined) out.spec.size = validateSize(raw.size, `${path}.size`);
   if (raw.position !== undefined) out.spec.position = validatePoint(raw.position, `${path}.position`);
   if (raw.layout !== undefined) out.spec.layout = validateLayout(raw.layout, `${path}.layout`);
+  if (raw.rotation !== undefined) validateNumber(raw.rotation, `${path}.rotation`);
   if (raw.cornerRadius !== undefined) validateNumber(raw.cornerRadius, `${path}.cornerRadius`, { min: 0 });
+  for (const corner of ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"]) {
+    if (raw[corner] !== undefined) validateNumber(raw[corner], `${path}.${corner}`, { min: 0 });
+  }
   if (raw.strokeWeight !== undefined) validateNumber(raw.strokeWeight, `${path}.strokeWeight`, { min: 0 });
+  if (raw.strokeCap !== undefined && !STROKE_CAPS.has(String(raw.strokeCap))) {
+    throw new Error(`${path}.strokeCap must be ${[...STROKE_CAPS].join(", ")}`);
+  }
+  if (raw.strokeJoin !== undefined && !STROKE_JOINS.has(String(raw.strokeJoin))) {
+    throw new Error(`${path}.strokeJoin must be ${[...STROKE_JOINS].join(", ")}`);
+  }
+  if (raw.strokeMiterLimit !== undefined) validateNumber(raw.strokeMiterLimit, `${path}.strokeMiterLimit`, { min: 0 });
+  for (const flag of ["isMask", "itemReverseZIndex", "strokesIncludedInLayout"]) {
+    if (raw[flag] !== undefined && typeof raw[flag] !== "boolean") throw new Error(`${path}.${flag} must be boolean`);
+  }
   if (raw.fontSize !== undefined) validateNumber(raw.fontSize, `${path}.fontSize`, { positive: true });
+  if (raw.textCase !== undefined && !TEXT_CASES.has(String(raw.textCase))) {
+    throw new Error(`${path}.textCase must be ${[...TEXT_CASES].join(", ")}`);
+  }
+  if (raw.textDecoration !== undefined && !TEXT_DECORATIONS.has(String(raw.textDecoration))) {
+    throw new Error(`${path}.textDecoration must be ${[...TEXT_DECORATIONS].join(", ")}`);
+  }
+  for (const k of ["paragraphSpacing", "paragraphIndent"]) {
+    if (raw[k] !== undefined) validateNumber(raw[k], `${path}.${k}`, { min: 0 });
+  }
   if (raw.font !== undefined && !fontSpec(raw.font)) throw new Error(`${path}.font must be "Family/Style" or {family,style}`);
 
   if (type === "TEXT") {
@@ -1306,7 +1333,11 @@ function applyCommonProps(node: any, spec: Json, res: Resources, ctx: any) {
   if (spec.opacity !== undefined) node.opacity = Number(spec.opacity);
   if (spec.blendMode !== undefined) node.blendMode = spec.blendMode;
   if (spec.locked !== undefined) node.locked = !!spec.locked;
+  if (spec.rotation !== undefined && "rotation" in node) node.rotation = Number(spec.rotation);
   if (spec.cornerRadius !== undefined && "cornerRadius" in node) node.cornerRadius = Number(spec.cornerRadius);
+  for (const corner of ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"]) {
+    if (spec[corner] !== undefined && corner in node) node[corner] = Number(spec[corner]);
+  }
   if (spec.cornerSmoothing !== undefined && "cornerSmoothing" in node) node.cornerSmoothing = Number(spec.cornerSmoothing);
   if (spec.constraints !== undefined && "constraints" in node) node.constraints = spec.constraints;
 
@@ -1324,6 +1355,9 @@ function applyCommonProps(node: any, spec: Json, res: Resources, ctx: any) {
   }
   if (spec.strokeWeight !== undefined && "strokeWeight" in node) node.strokeWeight = Number(spec.strokeWeight);
   if (spec.strokeAlign !== undefined && "strokeAlign" in node) node.strokeAlign = spec.strokeAlign;
+  if (spec.strokeCap !== undefined && "strokeCap" in node) node.strokeCap = spec.strokeCap;
+  if (spec.strokeJoin !== undefined && "strokeJoin" in node) node.strokeJoin = spec.strokeJoin;
+  if (spec.strokeMiterLimit !== undefined && "strokeMiterLimit" in node) node.strokeMiterLimit = Number(spec.strokeMiterLimit);
   if (spec.effectStyle !== undefined) {
     const st = res.effectStyles.get(String(spec.effectStyle));
     if (st && "effectStyleId" in node) node.effectStyleId = st.id;
@@ -1331,6 +1365,11 @@ function applyCommonProps(node: any, spec: Json, res: Resources, ctx: any) {
     node.effects = effectsFromSpec(spec.effects);
   }
   if (spec.dashPattern !== undefined && "dashPattern" in node) node.dashPattern = spec.dashPattern;
+  if (spec.isMask !== undefined && "isMask" in node) node.isMask = !!spec.isMask;
+  if (spec.itemReverseZIndex !== undefined && "itemReverseZIndex" in node) node.itemReverseZIndex = !!spec.itemReverseZIndex;
+  if (spec.strokesIncludedInLayout !== undefined && "strokesIncludedInLayout" in node) {
+    node.strokesIncludedInLayout = !!spec.strokesIncludedInLayout;
+  }
 }
 
 async function ensureTextFont(ctx: any, node: any, spec: Json, res: Resources): Promise<void> {
@@ -1377,6 +1416,10 @@ async function applyTextProps(ctx: any, node: any, spec: Json, res: Resources): 
       ? { unit: "PIXELS", value: spec.letterSpacing }
       : spec.letterSpacing;
   }
+  if (spec.textCase !== undefined) node.textCase = spec.textCase;
+  if (spec.textDecoration !== undefined) node.textDecoration = spec.textDecoration;
+  if (spec.paragraphSpacing !== undefined) node.paragraphSpacing = Number(spec.paragraphSpacing);
+  if (spec.paragraphIndent !== undefined) node.paragraphIndent = Number(spec.paragraphIndent);
   if (spec.size !== undefined) {
     node.textAutoResize = "NONE";
     node.resize(Number(spec.size.width), Number(spec.size.height));

@@ -26,9 +26,12 @@ function makeCtx() {
 
   const defaults = (type) => ({
     id: nextId(), type, name: type, x: 0, y: 0, width: 100, height: 100,
-    opacity: 1, blendMode: "NORMAL", visible: true, locked: false,
+    opacity: 1, blendMode: "NORMAL", visible: true, locked: false, rotation: 0,
     fills: [], strokes: [], strokeWeight: 1, strokeAlign: "INSIDE", strokeDashes: [],
-    cornerRadius: 0, effects: [],
+    strokeCap: "NONE", strokeJoin: "MITER", strokeMiterLimit: 4,
+    cornerRadius: 0, topLeftRadius: 0, topRightRadius: 0, bottomRightRadius: 0, bottomLeftRadius: 0,
+    isMask: false, itemReverseZIndex: false, strokesIncludedInLayout: false, effects: [],
+    textCase: "ORIGINAL", textDecoration: "NONE", paragraphSpacing: 0, paragraphIndent: 0,
     constraints: { horizontal: "MIN", vertical: "MIN" },
     layoutMode: "NONE", itemSpacing: 0,
     paddingTop: 0, paddingRight: 0, paddingBottom: 0, paddingLeft: 0,
@@ -237,6 +240,49 @@ test("dry run plans without writing, then apply creates one keyed tree", async (
   assert.ok(ctx.metrics.fonts.some((f) => f.family === "Inter" && f.style === "Bold"));
 });
 
+test("build carries rotation, per-corner radii, stroke shape and text formatting", async () => {
+  const ctx = makeCtx();
+  const spec = {
+    buildId: "styled",
+    root: {
+      type: "FRAME", name: "Styled",
+      rotation: 15,
+      topLeftRadius: 12, topRightRadius: 0, bottomRightRadius: 8, bottomLeftRadius: 2,
+      strokeCap: "ROUND", strokeJoin: "ROUND", strokeMiterLimit: 6,
+      isMask: true, itemReverseZIndex: true, strokesIncludedInLayout: true,
+      children: [{
+        type: "TEXT", name: "Label", text: "Hello",
+        textCase: "UPPER", textDecoration: "UNDERLINE",
+        paragraphSpacing: 6, paragraphIndent: 4,
+      }],
+    },
+  };
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.verification.ok, true);
+  const root = ctx.currentPage.children[0];
+  const label = root.children[0];
+  assert.equal(root.rotation, 15);
+  assert.equal(root.topLeftRadius, 12);
+  assert.equal(root.topRightRadius, 0);
+  assert.equal(root.bottomRightRadius, 8);
+  assert.equal(root.bottomLeftRadius, 2);
+  assert.equal(root.strokeCap, "ROUND");
+  assert.equal(root.strokeJoin, "ROUND");
+  assert.equal(root.strokeMiterLimit, 6);
+  assert.equal(root.isMask, true);
+  assert.equal(root.itemReverseZIndex, true);
+  assert.equal(root.strokesIncludedInLayout, true);
+  assert.equal(label.textCase, "UPPER");
+  assert.equal(label.textDecoration, "UNDERLINE");
+  assert.equal(label.paragraphSpacing, 6);
+  assert.equal(label.paragraphIndent, 4);
+
+  assert.throws(
+    () => normalizeTree({ type: "FRAME", strokeCap: "POINTY" }),
+    /strokeCap/,
+  );
+});
+
 test("re-sending the same build updates in place and never duplicates", async () => {
   const ctx = makeCtx();
   const first = {
@@ -397,10 +443,11 @@ test("batch dry run resolves every target and writes nothing", async () => {
       { op: "set_fill", key: bar.getPluginData(KEY_DATA), fills: "#00ff00" },
       { op: "resize", key: bar.getPluginData(KEY_DATA), width: 120, height: 12 },
       { op: "rename", key: bar.getPluginData(KEY_DATA), name: "Progress" },
+      { op: "set_rotation", key: bar.getPluginData(KEY_DATA), rotation: 30 },
     ],
   });
   assert.equal(dry.status, "dry_run");
-  assert.equal(dry.ops.length, 4);
+  assert.equal(dry.ops.length, 5);
   assert.ok(dry.fingerprints[score.id] && dry.fingerprints[bar.id]);
   assert.equal(score.characters, "1");
   assert.equal(bar.width, 100);
@@ -416,6 +463,7 @@ test("batch applies all ops in one transaction and guards each target fingerprin
       { op: "set_fill", key: bar.getPluginData(KEY_DATA), fills: "#00ff00" },
       { op: "resize", key: bar.getPluginData(KEY_DATA), width: 120, height: 12 },
       { op: "rename", key: bar.getPluginData(KEY_DATA), name: "Progress" },
+      { op: "set_rotation", key: bar.getPluginData(KEY_DATA), rotation: 30 },
       { op: "reparent", key: score.getPluginData(KEY_DATA), parentId: box.id },
     ],
   });
@@ -427,6 +475,7 @@ test("batch applies all ops in one transaction and guards each target fingerprin
       { op: "set_fill", key: bar.getPluginData(KEY_DATA), fills: "#00ff00" },
       { op: "resize", key: bar.getPluginData(KEY_DATA), width: 120, height: 12 },
       { op: "rename", key: bar.getPluginData(KEY_DATA), name: "Progress" },
+      { op: "set_rotation", key: bar.getPluginData(KEY_DATA), rotation: 30 },
       { op: "reparent", key: score.getPluginData(KEY_DATA), parentId: box.id },
     ],
   });
@@ -437,6 +486,7 @@ test("batch applies all ops in one transaction and guards each target fingerprin
   assert.equal(bar.fills[0].color.g, 1);
   assert.equal(bar.width, 120);
   assert.equal(bar.name, "Progress");
+  assert.equal(bar.rotation, 30);
   assert.equal(score.parent, box);
   assert.ok(ctx.metrics.undos > 0);
   assert.equal(ctx.metrics.triggers, 0);
