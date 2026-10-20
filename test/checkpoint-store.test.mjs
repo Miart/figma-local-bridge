@@ -121,7 +121,11 @@ const env = (dump = node()) => ({ schema: SCHEMA, capturedAt: "2026-10-19T12:00:
       child({ name: "pic", state: { pos: [0, 0], size: [4, 4], fills: [{ type: "IMAGE", imageHash: "abc" }] } }),
       node({ type: "TEXT", name: "label", state: { text: { characters: "PLAY", font: { family: "Inter", style: "Bold" }, runs: 2 } } }),
       node({ type: "TEXT", name: "mixed", state: { text: { characters: "AB", font: "mixed" } } }),
-      node({ type: "INSTANCE", name: "btn", state: {}, meta: { bindings: ["fills"] } }),
+      node({ type: "INSTANCE", name: "btn", state: {}, meta: {
+        bindings: ["fills"],
+        variableBindings: { opacity: { type: "VARIABLE_ALIAS", id: "VariableID:1:2" } },
+        variableModes: { "VariableCollectionId:1:1": "1:0" },
+      } }),
       node({ type: "BOOLEAN_OPERATION", name: "Union", state: {}, unsupported: "cannot" }),
     ],
   });
@@ -131,7 +135,9 @@ const env = (dump = node()) => ({ schema: SCHEMA, capturedAt: "2026-10-19T12:00:
   check("summary: counts image fills and instances", s.images === 1 && s.instances === 1);
   check("summary: counts characters and fonts", s.characters === 6 && s.fonts.join(",") === "Inter Bold");
   check("summary: names the losses the caller must expect",
-    s.multiRunTexts === 1 && s.mixedFonts === 1 && s.metaOnly === 1 && s.unsupported.length === 1 && s.unsupported[0].path === "$.children[4]");
+    s.multiRunTexts === 1 && s.mixedFonts === 1 && s.metaOnly === 1 &&
+    s.variableBindings === 1 && s.variableModes === 1 &&
+    s.unsupported.length === 1 && s.unsupported[0].path === "$.children[4]");
 }
 
 // ---------------------------------------------------------------- the store

@@ -50,7 +50,7 @@ export function registerCheckpointTools(server: McpServer, client: FigmaClient, 
     "figma_checkpoint",
     "Save a subtree as data, compare it against the live document, and rebuild it — the alternative to an undo stack the Plugin API does not offer. " +
       'action "save" writes an inspectable JSON file; "show" diffs the live subtree against it; "restore" replaces the target\'s children from it in ONE transaction, dry run first, and verifies itself by dumping the subtree again. ' +
-      "Refuses what it cannot promise: node types it cannot rebuild, truncated dumps, a group or instance target, and any restore not asked for out loud. A save also says what a checkpoint-v1 rebuild does not carry (instance interiors, per-run text styling, bindings).",
+      "Refuses what it cannot promise: node types it cannot rebuild, truncated dumps, a group or instance target, and any restore not asked for out loud. A save says what a checkpoint-v1 rebuild does not carry (instance interiors, per-run text styling, component identity); style ids and node-level variable bindings are re-linked when still present, and every missing link is reported.",
     {
       action: z.enum(["save", "show", "list", "drop", "restore"]).describe("save | show (compare live, read-only) | list | drop (a local file) | restore (dry run unless dryRun: false)"),
       nodeId: figmaNodeId("nodeId").optional().describe("The subtree root. save: defaults to the selection; show/restore: defaults to the checkpoint's own root"),
@@ -132,7 +132,7 @@ export function registerCheckpointTools(server: McpServer, client: FigmaClient, 
                   fold(s.unsupported.map((u) => `${u.path} (${u.type})`), 5).join(", ") +
                   `\nA restore refuses unless allowPartial: true, and then rebuilds everything else.`
                 : "") +
-              (s.metaOnly ? `\n${s.metaOnly} node(s) carry bindings or styles: those are recorded, not restored (checkpoint-v1).` : "");
+              (s.metaOnly ? `\n${s.metaOnly} node(s) carry style ids, variable bindings or explicit modes: a restore re-links each when it still exists and reports every one that does not.` : "");
             return content(
               caption +
                 "\n\n" +
@@ -314,6 +314,10 @@ export function registerCheckpointTools(server: McpServer, client: FigmaClient, 
               (report.skipped.length ? `\n${report.skipped.length} node(s) skipped.` : "") +
               (report.fontsUnavailable.length ? `\nFonts unavailable: ${report.fontsUnavailable.join(", ")} (the text came back in the fallback font).` : "") +
               (report.bindingsDropped.length ? `\n${report.bindingsDropped.length} paint(s) came back by value: their variable bindings are gone.` : "") +
+              ((report.bindingsRestored?.length ?? 0) ? `\n${report.bindingsRestored.length} node-level variable binding(s) restored.` : "") +
+              ((report.bindingsMissing?.length ?? 0) ? `\n${report.bindingsMissing.length} node-level variable binding(s) could not be restored; their recorded values are still in place.` : "") +
+              ((report.modesRestored?.length ?? 0) ? `\n${report.modesRestored.length} explicit variable mode(s) restored.` : "") +
+              ((report.modesMissing?.length ?? 0) ? `\n${report.modesMissing.length} explicit variable mode(s) could not be restored.` : "") +
               ((report.stylesRestored?.length ?? 0) ? `\n${report.stylesRestored.length} style link(s) restored.` : "") +
               ((report.stylesMissing?.length ?? 0) ? `\n${report.stylesMissing.length} style link(s) could not be restored; their values came back unlinked.` : "");
 
@@ -336,6 +340,10 @@ export function registerCheckpointTools(server: McpServer, client: FigmaClient, 
                     skipped: fold(report.skipped ?? [], 20),
                     fontsUnavailable: report.fontsUnavailable ?? [],
                     bindingsDropped: fold(report.bindingsDropped ?? [], 20),
+                    bindingsRestored: fold(report.bindingsRestored ?? [], 20),
+                    bindingsMissing: fold(report.bindingsMissing ?? [], 20),
+                    modesRestored: fold(report.modesRestored ?? [], 20),
+                    modesMissing: fold(report.modesMissing ?? [], 20),
                     stylesRestored: fold(report.stylesRestored ?? [], 20),
                     stylesMissing: fold(report.stylesMissing ?? [], 20),
                     propertiesFailed: fold(report.propertiesFailed ?? [], 20),

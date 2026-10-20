@@ -27,6 +27,7 @@ const COMMON = () => ({
   fills: [], strokes: [], strokeWeight: 1, strokeAlign: "INSIDE",
   strokeCap: "NONE", strokeJoin: "MITER", dashPattern: [],
   cornerRadius: 0, effects: [],
+  boundVariables: undefined, explicitVariableModes: {},
   constraints: { horizontal: "MIN", vertical: "MIN" },
   absoluteBoundingBox: null, relativeTransform: [[1, 0, 0], [0, 1, 0]],
   removed: false,
@@ -42,6 +43,7 @@ const BY_TYPE = (t) => {
       primaryAxisSizingMode: "FIXED", counterAxisSizingMode: "FIXED",
       layoutWrap: "NO_WRAP", counterAxisSpacing: null,
       strokesIncludedInLayout: false, itemReverseZIndex: false,
+      layoutGrids: [],
       layoutSizingHorizontal: "FIXED", layoutSizingVertical: "FIXED", layoutAlign: "INHERIT",
       layoutGrow: 0, layoutPositioning: "AUTO",
       minWidth: null, minHeight: null, maxWidth: null, maxHeight: null,
@@ -111,6 +113,18 @@ function node(type, props = {}) {
     parent: null,
     resizes: 0,
     resize(w, h) { this.resizes++; this.width = w; this.height = h; },
+    setBoundVariable(field, variable) {
+      if (this.bindingRejects === field) throw new Error(`field ${field} cannot be bound on this node`);
+      if (!variable || typeof variable.id !== "string") throw new Error("setBoundVariable needs a Variable object");
+      this.boundVariables = { ...(this.boundVariables ?? {}), [field]: { type: "VARIABLE_ALIAS", id: variable.id } };
+    },
+    setExplicitVariableModeForCollection(collection, modeId) {
+      if (!collection || typeof collection !== "object" || !Array.isArray(collection.modes)) {
+        throw new Error("setExplicitVariableModeForCollection needs a VariableCollection object");
+      }
+      if (!collection.modes.some((m) => m.modeId === modeId)) throw new Error(`collection has no mode ${modeId}`);
+      this.explicitVariableModes = { ...(this.explicitVariableModes ?? {}), [collection.id]: modeId };
+    },
     appendChild(child) {
       if (child.parent) child.parent.children = child.parent.children.filter((c) => c !== child);
       child.parent = this;
@@ -137,11 +151,15 @@ function node(type, props = {}) {
 /** A target's children are the fixture's children: same shape as the API. */
 const withChildren = (parent, kids) => kids.forEach((k) => parent.appendChild(k));
 
-function fakeFigma(registry = []) {
+function fakeFigma(registry = [], options = {}) {
   const made = [];
   const track = (n) => { made.push(n); registry.push(n); return n; };
   return {
     made,
+    variables: {
+      async getVariableByIdAsync(id) { return (options.variables ?? []).find((v) => v.id === id) ?? null; },
+      async getVariableCollectionByIdAsync(id) { return (options.collections ?? []).find((c) => c.id === id) ?? null; },
+    },
     createFrame: () => track(node("FRAME")),
     createComponent: () => track(node("COMPONENT")),
     createSection: () => track(node("SECTION")),
@@ -243,6 +261,24 @@ const errors = async (fn) => {
     L.mode === "VERTICAL" && L.primary === "AUTO" && L.counter === "FIXED" && L.gap === 6 &&
     L.padding.join(",") === "8,4,8,4" && L.primaryAlign === "CENTER" && L.counterAlign === "MAX");
   check("dump: clipping is state", root.state.clipsContent === true);
+  check("dump: an empty layout grid list is omitted, so old checkpoints still compare", root.state.layoutGrids === undefined);
+}
+
+{
+  const frame = node("FRAME", {
+    boundVariables: {
+      width: { type: "VARIABLE_ALIAS", id: "VariableID:1:2" },
+      fills: [{ type: "VARIABLE_ALIAS", id: "VariableID:1:3" }],
+    },
+    explicitVariableModes: { "VariableCollectionId:1:1": "1:0" },
+  });
+  const { root } = await dumpSubtree(frame);
+  check("dump: node-level variable aliases travel in meta",
+    root.meta.bindings.join(",") === "width,fills" &&
+    root.meta.variableBindings.width.id === "VariableID:1:2" &&
+    root.meta.variableBindings.fills[0].id === "VariableID:1:3");
+  check("dump: explicit variable modes travel in meta",
+    root.meta.variableModes["VariableCollectionId:1:1"] === "1:0");
 }
 
 {
@@ -353,6 +389,7 @@ const errors = async (fn) => {
     paddingTop: 4, paddingRight: 4, paddingBottom: 4, paddingLeft: 4,
     clipsContent: true,
     fills: [{ type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3 } }],
+    layoutGrids: [{ pattern: "COLUMNS", visible: true, color: { r: 1, g: 0, b: 0, a: 0.1 }, alignment: "MIN", gutterSize: 8, offset: 0, count: 3, sectionSize: 96 }],
   });
   withChildren(src, [
     node("RECTANGLE", { name: "bg", x: 1, y: 2, width: 30, height: 20, cornerRadius: 4, fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }] }),
@@ -370,6 +407,7 @@ const errors = async (fn) => {
   check("restore: the root keeps its position", target.x === 0 && target.y === 0);
   check("restore: leaves are positioned", target.children[0].x === 1 && target.children[0].y === 2);
   check("restore: fills come back", target.children[0].fills[0].color.r === 1 && target.fills[0].color.b === 0.3);
+  check("restore: layout grids come back", target.layoutGrids[0].count === 3 && target.layoutGrids[0].sectionSize === 96);
   check("restore: a group is rebuilt as a group, moved to where it was",
     target.children[2].type === "GROUP" && target.children[2].x === 50 && target.children[2].y === 60 &&
     target.children[2].children[0].type === "ELLIPSE");
@@ -480,6 +518,100 @@ const errors = async (fn) => {
   const report = await restoreSubtree(root, ctxFor(guard, target), {});
   check("bindings: the paint comes back by value and the dropped binding is reported",
     target.children[0].fills[0].color.r === 1 && report.bindingsDropped.join(",") === "$.children[0].state.fills");
+}
+
+{
+  const figma = fakeFigma([], { variables: [{ id: "VariableID:1:2", name: "color/bg", resolvedType: "COLOR" }] });
+  const target = node("FRAME");
+  const src = node("FRAME", { children: [node("RECTANGLE", { name: "bg" })] });
+  const { root } = await dumpSubtree(src);
+  root.children[0].state.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 }, boundVariables: { color: { type: "VARIABLE_ALIAS", id: "VariableID:1:2" } } }];
+
+  const guard = {
+    ...figma,
+    createRectangle() {
+      const n = node("RECTANGLE");
+      let fills = [];
+      Object.defineProperty(n, "fills", {
+        get: () => fills,
+        set: (v) => {
+          const missing = Array.isArray(v) && v.some((p) => p?.boundVariables && p.boundVariables.color?.id !== "VariableID:1:2");
+          if (missing) throw new Error("variable not found in this file");
+          fills = v;
+        },
+      });
+      figma.made.push(n);
+      return n;
+    },
+  };
+
+  const report = await restoreSubtree(root, ctxFor(guard, target), {});
+  check("bindings: a paint binding whose variable exists comes back linked",
+    target.children[0].fills[0].boundVariables.color.id === "VariableID:1:2" && report.bindingsDropped.length === 0);
+}
+
+{
+  // Node-level bindings are not paint values: they live in meta, are re-linked
+  // by id, and a missing variable leaves the recorded value in place.
+  const widthVar = { id: "VariableID:1:2", name: "size/card", resolvedType: "FLOAT" };
+  const collection = { id: "VariableCollectionId:1:1", name: "Theme", modes: [{ modeId: "1:0", name: "Light" }] };
+  const figma = fakeFigma([], { variables: [widthVar], collections: [collection] });
+  const target = node("FRAME");
+  const src = node("FRAME", {
+    explicitVariableModes: { [collection.id]: "1:0" },
+    children: [node("RECTANGLE", {
+      name: "card", width: 120, height: 40,
+      boundVariables: {
+        width: { type: "VARIABLE_ALIAS", id: widthVar.id },
+        opacity: { type: "VARIABLE_ALIAS", id: "VariableID:9:9" },
+      },
+    })],
+  });
+  const { root } = await dumpSubtree(src);
+  const report = await restoreSubtree(root, ctxFor(figma, target), {});
+
+  check("restore: an explicit mode is re-applied by collection",
+    target.explicitVariableModes[collection.id] === "1:0" &&
+    report.modesRestored.length === 1 && report.modesRestored[0].modeName === "Light");
+  check("restore: a node-level binding is re-applied by id",
+    target.children[0].boundVariables.width.id === widthVar.id &&
+    report.bindingsRestored.some((b) => b.field === "width" && b.name === "size/card"));
+  check("restore: a missing variable is named, and its value stays",
+    target.children[0].width === 120 &&
+    report.bindingsMissing.some((b) => b.field === "opacity" && /no longer exists/.test(b.why)));
+}
+
+{
+  const a = { id: "VariableID:1:2", name: "font/a", resolvedType: "FLOAT" };
+  const b = { id: "VariableID:1:3", name: "font/b", resolvedType: "FLOAT" };
+  const figma = fakeFigma([], { variables: [a, b] });
+  const target = node("FRAME");
+  const src = node("FRAME", {
+    children: [node("TEXT", {
+      characters: "AB",
+      fills: Symbol("mixed"),
+      boundVariables: {
+        fontSize: [{ type: "VARIABLE_ALIAS", id: a.id }, { type: "VARIABLE_ALIAS", id: b.id }],
+        textRangeFills: [{ type: "VARIABLE_ALIAS", id: a.id }],
+      },
+    })],
+  });
+  const { root } = await dumpSubtree(src);
+  const report = await restoreSubtree(root, ctxFor(figma, target), {});
+  check("restore: per-range text bindings are named, not flattened",
+    report.bindingsMissing.some((x) => x.field === "fontSize" && /per-range/.test(x.why)) &&
+    report.bindingsMissing.some((x) => x.field === "textRangeFills" && /per-range/.test(x.why)) &&
+    target.children[0].boundVariables === undefined);
+}
+
+{
+  const target = node("FRAME");
+  const src = node("FRAME", { explicitVariableModes: { "VariableCollectionId:9:9": "1:0" } });
+  const { root } = await dumpSubtree(src);
+  const report = await restoreSubtree(root, ctxFor(fakeFigma(), target), {});
+  check("restore: a mode whose collection is gone is reported",
+    report.modesMissing.length === 1 && /collection no longer exists/.test(report.modesMissing[0].why) &&
+    Object.keys(target.explicitVariableModes).length === 0);
 }
 
 {

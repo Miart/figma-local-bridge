@@ -124,10 +124,10 @@ const eq = (a: unknown, b: unknown) => (num(a) && num(b) ? Math.abs((a as number
 /**
  * Field-level comparison of two dumps of the same scope.
  *
- * `meta` is deliberately not compared: it records the things checkpoint-v1 does
- * not restore (bindings, style ids), so comparing it would report the known
- * losses on every single restore and drown the unknown ones. The limitations
- * list says so instead.
+ * `meta` is deliberately not compared: it carries style ids and variable
+ * aliases whose re-linking is reported by the restore itself, and may be
+ * unavailable in the current file. Comparing it here would drown the unknown
+ * field differences in a known, already-named condition.
  */
 export function diffDumps(a: DumpNode, b: DumpNode, opts: { limit?: number } = {}): DiffReport {
   const all: Difference[] = [];
@@ -212,15 +212,19 @@ export interface DumpSummary {
   /** Text nodes whose fonts are mixed: the rebuild writes one font instead. */
   multiRunTexts: number;
   mixedFonts: number;
-  /** Nodes whose bindings and styles are recorded in meta and NOT restored. */
+  /** Nodes whose style ids, variable bindings or explicit modes live in meta. */
   metaOnly: number;
+  /** Nodes carrying node-level variable bindings (paint aliases travel in state). */
+  variableBindings: number;
+  /** Nodes carrying explicit variable modes. */
+  variableModes: number;
   fonts: string[];
 }
 
 export function summarize(dump: DumpNode): DumpSummary {
   const s: DumpSummary = {
     nodes: 0, maxDepth: 0, byType: {}, texts: 0, characters: 0, images: 0, instances: 0,
-    unsupported: [], multiRunTexts: 0, mixedFonts: 0, metaOnly: 0, fonts: [],
+    unsupported: [], multiRunTexts: 0, mixedFonts: 0, metaOnly: 0, variableBindings: 0, variableModes: 0, fonts: [],
   };
   const fonts = new Set<string>();
   const walk = (n: DumpNode, depth: number, path: string) => {
@@ -228,7 +232,11 @@ export function summarize(dump: DumpNode): DumpSummary {
     s.maxDepth = Math.max(s.maxDepth, depth);
     s.byType[n.type] = (s.byType[n.type] ?? 0) + 1;
     if (n.unsupported) s.unsupported.push({ path, type: n.type, why: n.unsupported });
-    if (n.meta) s.metaOnly++;
+    if (n.meta) {
+      s.metaOnly++;
+      if (n.meta.variableBindings) s.variableBindings++;
+      if (n.meta.variableModes) s.variableModes++;
+    }
     const st = (n.state ?? {}) as Record<string, any>;
     if (Array.isArray(st.fills)) for (const p of st.fills) if (p && p.type === "IMAGE") s.images++;
     if (n.type === "TEXT") {

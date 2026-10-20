@@ -13,8 +13,9 @@
  *     captured, so it shows the main component's current content;
  *   - per-run text styling is not rebuilt; a run COUNT is recorded, so a
  *     mixed-font node reports as different instead of passing as equivalent;
- *   - variable bindings, style ids and explicit modes are recorded as notes
- *     only (in `meta`), never restored;
+ *   - style ids, node-level variable bindings and explicit modes travel in
+ *     `meta` and are re-linked by id when they still exist; every one that does
+ *     not is reported instead of passing as restored;
  *   - node types this version cannot rebuild are refused by name, or skipped
  *     with allowPartial: true and listed in the result.
  *
@@ -37,7 +38,8 @@ export const MAX_DEPTH = 40;
 export const LIMITATIONS: readonly string[] = [
   "instance interiors are not captured: a restored INSTANCE shows its main component's current content (component properties are re-applied)",
   "per-run text styling is not rebuilt; the run count is recorded so a mixed-font node reports as different",
-  "variable bindings and explicit modes are recorded in meta and not restored; style ids are re-linked when the style still exists, and the paint/font value is restored even when it does not",
+  "style ids are re-linked when the style still exists; node-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
+  "per-range text bindings are not rebuilt (text runs are not either); a single binding across the whole text is restored",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
   "a BOOLEAN_OPERATION is not rebuilt (its inputs are not recoverable from the API)",
 ];
@@ -97,6 +99,14 @@ export interface RestoreReport {
   fontsUnavailable: string[];
   /** Paints restored by value because their variable bindings would not apply. */
   bindingsDropped: string[];
+  /** Node-level variable bindings re-applied because the variable still exists. */
+  bindingsRestored: Array<{ path: string; field: string; id: string; name?: string }>;
+  /** Node-level variable bindings the file could not resolve; the value is still restored. */
+  bindingsMissing: Array<{ path: string; field: string; id: string; why: string }>;
+  /** Explicit variable modes re-applied because their collection and mode still exist. */
+  modesRestored: Array<{ path: string; collectionId: string; collectionName?: string; modeId: string; modeName?: string }>;
+  /** Explicit variable modes the file could not resolve. */
+  modesMissing: Array<{ path: string; collectionId: string; modeId: string; why: string }>;
   /** Style links re-applied because the style still exists in the file. */
   stylesRestored: Array<{ path: string; field: string; id: string; name?: string }>;
   /** Style links the file no longer has; the paint/font value is still restored. */
@@ -170,6 +180,11 @@ export function readState(node: any): Dict {
       : node.cornerRadius;
   }
   if ("effects" in node) s.effects = list(node.effects) ?? [];
+  // Omitted when empty so an old checkpoint (which never carried grids) still
+  // compares equal against a fresh dump of a node that has none.
+  if ("layoutGrids" in node && Array.isArray(node.layoutGrids) && node.layoutGrids.length) {
+    s.layoutGrids = list(node.layoutGrids);
+  }
   if ("arcData" in node) s.arcData = copy(node.arcData);
 
   if ("layoutMode" in node && node.layoutMode !== "NONE") {
@@ -260,10 +275,21 @@ function readMeta(node: any): Dict | undefined {
     const bv = node.boundVariables;
     if (bv) {
       const fields = Object.keys(bv);
-      if (fields.length) meta.bindings = fields;
+      if (fields.length) {
+        meta.bindings = fields;
+        // The field NAMES are for humans; the aliases are what a restore needs.
+        // Nested paint/font aliases are copied as-is.
+        meta.variableBindings = copy(bv);
+      }
     }
   } catch {
     /* ignore */
+  }
+  try {
+    const modes = node.explicitVariableModes;
+    if (modes && Object.keys(modes).length) meta.variableModes = copy(modes);
+  } catch {
+    /* not every node type exposes explicit modes */
   }
   const styles: string[] = [];
   const styleIds: Dict = {};
@@ -402,6 +428,10 @@ export async function restoreSubtree(dump: DumpNode, ctx: RestoreContext, opts: 
     skipped: [],
     fontsUnavailable: [],
     bindingsDropped: [],
+    bindingsRestored: [],
+    bindingsMissing: [],
+    modesRestored: [],
+    modesMissing: [],
     stylesRestored: [],
     stylesMissing: [],
     propertiesFailed: [],
@@ -452,6 +482,7 @@ export async function restoreSubtree(dump: DumpNode, ctx: RestoreContext, opts: 
         `not the target's own layout and appearance`,
     );
   } else {
+    await applyVariableModes(target, dump.meta?.variableModes, ctx, report, "$");
     applyLayout(target, dump.state, report, "$");
   }
 
@@ -473,6 +504,7 @@ export async function restoreSubtree(dump: DumpNode, ctx: RestoreContext, opts: 
   if (dump.type === target.type) {
     await applyFinal(target, dump.state, ctx, report, "$", true);
     await applyStyleLinks(target, dump.meta?.styleIds, ctx, report, "$");
+    await applyVariableBindings(target, dump.meta?.variableBindings, dump.state, ctx, report, "$");
   }
   return report;
 }
@@ -488,6 +520,7 @@ async function buildNode(d: DumpNode, parent: any, ctx: RestoreContext, report: 
   try {
     node = await createNode(d, ctx, report, path);
     parent.appendChild(node);
+    await applyVariableModes(node, d.meta?.variableModes, ctx, report, path);
     applyLayout(node, d.state, report, path);
     const kids = d.children ?? [];
     for (let i = 0; i < kids.length; i++) {
@@ -495,6 +528,7 @@ async function buildNode(d: DumpNode, parent: any, ctx: RestoreContext, report: 
     }
     await applyFinal(node, d.state, ctx, report, path, false);
     await applyStyleLinks(node, d.meta?.styleIds, ctx, report, path);
+    await applyVariableBindings(node, d.meta?.variableBindings, d.state, ctx, report, path);
     report.created++;
     return node;
   } catch (e) {
@@ -533,9 +567,11 @@ async function buildGroup(d: DumpNode, parent: any, ctx: RestoreContext, report:
     }
     const group = ctx.figma.group(made, parent);
     group.name = d.name;
+    await applyVariableModes(group, d.meta?.variableModes, ctx, report, path);
     applyLayout(group, d.state, report, path);
     await applyFinal(group, d.state, ctx, report, path, false);
     await applyStyleLinks(group, d.meta?.styleIds, ctx, report, path);
+    await applyVariableBindings(group, d.meta?.variableBindings, d.state, ctx, report, path);
     report.created++;
     return group;
   } catch (e) {
@@ -667,6 +703,7 @@ async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: R
   applyPaints(node, "fills", state.fills, report, path);
   if (state.effects !== undefined && "effects" in node) applyPaints(node, "effects", state.effects, report, path);
   applyPaints(node, "strokes", state.strokes, report, path);
+  if (state.layoutGrids !== undefined && "layoutGrids" in node) applyPaints(node, "layoutGrids", state.layoutGrids, report, path);
   if (typeof state.strokeWeight === "number" && "strokeWeight" in node) soft("stroke weight", () => { node.strokeWeight = state.strokeWeight; });
   else if (Array.isArray(state.strokeWeight) && "strokeTopWeight" in node) {
     soft("stroke weights", () => {
@@ -736,6 +773,158 @@ function applyPaints(node: any, field: string, value: any, report: RestoreReport
       report.bindingsDropped.push(`${path}.state.${field}`);
     } catch (e) {
       report.notes.push(`${path}: ${field} not restored: ${msg(e)}`);
+    }
+  }
+}
+
+const isAlias = (value: any): value is { type: "VARIABLE_ALIAS"; id: string } =>
+  !!value && typeof value === "object" && value.type === "VARIABLE_ALIAS" && typeof value.id === "string";
+
+/** Alias lists that are already carried by the paint/effect/grid values in `state`. */
+const PAINT_LEVEL_BINDINGS = new Set(["fills", "strokes", "effects", "layoutGrids"]);
+
+async function resolveVariable(alias: any, ctx: RestoreContext): Promise<{ variable?: any; why?: string }> {
+  if (!isAlias(alias)) return { why: "the recorded binding is not a variable alias" };
+  const api = ctx.figma?.variables;
+  if (!api || typeof api.getVariableByIdAsync !== "function") {
+    return { why: "the Variables API is not available in this session" };
+  }
+  try {
+    const variable = await api.getVariableByIdAsync(alias.id);
+    if (variable) return { variable };
+  } catch (e) {
+    return { why: msg(e) };
+  }
+  return { why: "the variable no longer exists in this file" };
+}
+
+/**
+ * Explicit modes decide WHICH value a bound variable resolves to, so they are
+ * applied before children are built and before any paint is written.
+ */
+async function applyVariableModes(node: any, modes: Dict | undefined, ctx: RestoreContext, report: RestoreReport, path: string): Promise<void> {
+  if (!modes || typeof modes !== "object") return;
+  for (const [collectionId, modeId] of Object.entries(modes)) {
+    if (typeof modeId !== "string") continue;
+    const missing = (why: string) => report.modesMissing.push({ path, collectionId, modeId, why });
+    if (typeof node.setExplicitVariableModeForCollection !== "function") {
+      missing(`a ${node.type} cannot carry an explicit variable mode`);
+      continue;
+    }
+    const api = ctx.figma?.variables;
+    if (!api || typeof api.getVariableCollectionByIdAsync !== "function") {
+      missing("the Variables API is not available in this session");
+      continue;
+    }
+    let collection: any = null;
+    try {
+      collection = await api.getVariableCollectionByIdAsync(collectionId);
+    } catch (e) {
+      missing(msg(e));
+      continue;
+    }
+    if (!collection) {
+      missing("the variable collection no longer exists in this file");
+      continue;
+    }
+    const mode = Array.isArray(collection.modes) ? collection.modes.find((m: any) => m && m.modeId === modeId) : null;
+    if (!mode) {
+      missing(`the collection no longer has mode ${modeId}`);
+      continue;
+    }
+    try {
+      node.setExplicitVariableModeForCollection(collection, modeId);
+      report.modesRestored.push({
+        path,
+        collectionId,
+        collectionName: collection.name,
+        modeId,
+        modeName: mode.name,
+      });
+    } catch (e) {
+      missing(msg(e));
+    }
+  }
+}
+
+/**
+ * Re-bind node-level variables (width, padding, opacity, text metrics, …) by
+ * id. A variable the file no longer has leaves the explicitly restored value in
+ * place and is named; it is never replaced by a guessed value.
+ */
+async function applyVariableBindings(node: any, bindings: Dict | undefined, state: Dict | undefined, ctx: RestoreContext, report: RestoreReport, path: string): Promise<void> {
+  if (!bindings || typeof bindings !== "object") return;
+  for (const [field, value] of Object.entries(bindings)) {
+    if (PAINT_LEVEL_BINDINGS.has(field)) continue;
+
+    if (field === "textRangeFills") {
+      // The paints already carry a whole-text binding when there is one. A
+      // mixed fill cannot be represented by one paint, and the runs are not
+      // rebuilt either — name it instead of pretending the binding came back.
+      if (state?.fills === "mixed") {
+        for (const alias of (Array.isArray(value) ? value : [value]).filter(isAlias)) {
+          report.bindingsMissing.push({
+            path, field, id: alias.id,
+            why: "per-range text fill bindings are not rebuilt (text runs are not either)",
+          });
+        }
+      }
+      continue;
+    }
+
+    if (field === "componentProperties" && value && typeof value === "object") {
+      for (const [name, alias] of Object.entries(value as Dict)) {
+        if (!isAlias(alias)) continue;
+        const resolved = await resolveVariable(alias, ctx);
+        if (!resolved.variable) {
+          report.bindingsMissing.push({ path, field: `componentProperties.${name}`, id: alias.id, why: resolved.why ?? "unresolved" });
+          continue;
+        }
+        if (typeof node.setProperties !== "function") {
+          report.bindingsMissing.push({ path, field: `componentProperties.${name}`, id: alias.id, why: "this node does not expose component properties" });
+          continue;
+        }
+        try {
+          const aliasValue = ctx.figma?.variables?.createVariableAlias
+            ? ctx.figma.variables.createVariableAlias(resolved.variable)
+            : { type: "VARIABLE_ALIAS", id: resolved.variable.id };
+          node.setProperties({ [name]: aliasValue });
+          report.bindingsRestored.push({ path, field: `componentProperties.${name}`, id: resolved.variable.id, name: resolved.variable.name });
+        } catch (e) {
+          report.bindingsMissing.push({ path, field: `componentProperties.${name}`, id: alias.id, why: msg(e) });
+        }
+      }
+      continue;
+    }
+
+    const aliases = (Array.isArray(value) ? value : [value]).filter(isAlias);
+    if (!aliases.length) continue;
+    // Text fields are per-range arrays. One alias (or the same alias on every
+    // range) can be applied to the whole text; several different ones cannot,
+    // because the runs themselves are not rebuilt.
+    const ids = [...new Set(aliases.map((a) => a.id))];
+    if (ids.length > 1) {
+      report.bindingsMissing.push({
+        path, field, id: ids.join(","),
+        why: `${aliases.length} different per-range bindings; checkpoint restores one value and does not rebuild text runs`,
+      });
+      continue;
+    }
+    const alias = aliases[0];
+    const resolved = await resolveVariable(alias, ctx);
+    if (!resolved.variable) {
+      report.bindingsMissing.push({ path, field, id: alias.id, why: resolved.why ?? "unresolved" });
+      continue;
+    }
+    if (typeof node.setBoundVariable !== "function") {
+      report.bindingsMissing.push({ path, field, id: alias.id, why: `a ${node.type} has no bindable ${field} field` });
+      continue;
+    }
+    try {
+      node.setBoundVariable(field, resolved.variable);
+      report.bindingsRestored.push({ path, field, id: resolved.variable.id, name: resolved.variable.name });
+    } catch (e) {
+      report.bindingsMissing.push({ path, field, id: alias.id, why: msg(e) });
     }
   }
 }

@@ -307,8 +307,8 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
 - `action: "save"` records a subtree as data (`nodeId`; a page is refused) into
   one JSON file per file key. The reply carries a `summary` and the
   `limitations` a rebuild cannot carry — instance interiors, per-run text
-  styling, variable bindings, component identity. Read them before telling
-  anyone the subtree will come back exactly.
+  styling, component identity. Read them before telling anyone the subtree will
+  come back exactly.
 - `action: "show"` diffs the live subtree against the file field by field and
   reports the semantic fingerprint next to it. That is how "has this drifted
   already?" gets answered before a rebuild is chosen.
@@ -316,10 +316,15 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   transaction. It is a **dry run by default** and names what would be deleted
   and created; a real rebuild needs `dryRun: false`, `allowDestructive: true`
   and a bridge started with `FIGMA_BRIDGE_DESTRUCTIVE=1`.
-- Style ids travel in `meta`; restore re-links them when the style still exists
-  and reports every one that does not. Paints and fonts are restored by value
-  either way, so a lost style leaves a correct-looking but unlinked node — and
-  `stylesMissing` names it.
+- Style ids, node-level variable bindings and explicit variable modes travel in
+  `meta`. Restore re-links a style, variable, collection or mode when it still
+  exists and reports every one that does not: `stylesMissing`, `bindingsMissing`
+  and `modesMissing`. The recorded value is written either way, so a missing link
+  leaves a correct-looking but unlinked node instead of a missing colour or size.
+- Paint-level variable bindings travel with the paint. They survive when their
+  variable exists; when it does not, the paint returns by value and
+  `bindingsDropped` names it. Per-range text bindings are not rebuilt (the text
+  runs are not either); `bindingsMissing` names them instead of flattening them.
 - Afterwards the server dumps the subtree **again** and diffs it against the
   checkpoint: `verification.verified: true` means no field differs. When it is
   false, `verification.diff` names every field with both values and
