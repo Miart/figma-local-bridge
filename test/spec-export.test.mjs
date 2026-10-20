@@ -113,6 +113,7 @@ function node(type, opts = {}) {
     p.overrides = opts.overrides || [];
     p.getMainComponentAsync = async () => p.main;
   }
+  if (type === "BOOLEAN_OPERATION") p.booleanOperation = opts.booleanOperation || "UNION";
   if (opts.exportAsync) p.exportAsync = opts.exportAsync;
   for (const child of p.children) child.parent = p;
   ALL.set(p.id, p);
@@ -471,6 +472,40 @@ test("variables, derived keys and unsupported nodes are named", async () => {
   assert.equal(report.unsupported.length, 1);
   assert.equal(report.unsupported[0].type, "GROUP");
   assert.match(report.unsupported[0].why, /no build-spec equivalent/);
+});
+
+test("a boolean operation exports its operation and live operands", async () => {
+  const base = node("RECTANGLE", { name: "Base", width: 40, height: 40, fills: "#00ff00" });
+  const dot = node("ELLIPSE", { name: "Dot", width: 8, height: 8, x: 4, y: 4 });
+  const ring = node("ELLIPSE", { name: "Ring", width: 16, height: 16, x: 12, y: 12 });
+  const nested = node("BOOLEAN_OPERATION", {
+    name: "Nested", booleanOperation: "EXCLUDE", width: 20, height: 20,
+    children: [dot, ring],
+  });
+  const cutout = node("BOOLEAN_OPERATION", {
+    name: "Cutout", booleanOperation: "SUBTRACT", width: 40, height: 40,
+    children: [base, nested],
+  });
+
+  const report = await runExportSpec(makeCtx(), { nodeId: cutout.id });
+  assert.equal(report.spec.type, "BOOLEAN_OPERATION");
+  assert.equal(report.spec.booleanOperation, "SUBTRACT");
+  assert.equal(report.spec.size, undefined);
+  assert.equal(report.spec.children.length, 2);
+  assert.equal(report.spec.children[0].type, "RECTANGLE");
+  assert.equal(report.spec.children[1].type, "BOOLEAN_OPERATION");
+  assert.equal(report.spec.children[1].booleanOperation, "EXCLUDE");
+  assert.equal(report.spec.children[1].size, undefined);
+  assert.equal(report.spec.children[1].children.length, 2);
+  assert.deepEqual(report.spec.children[1].children[0].position, { x: 4, y: 4 });
+  assert.equal(report.unsupported.length, 0);
+
+  // The exported shape is the build language's shape, not just similar JSON.
+  const normalized = normalizeTree(report.spec);
+  assert.equal(normalized.root.type, "BOOLEAN_OPERATION");
+  assert.equal(normalized.root.spec.booleanOperation, "SUBTRACT");
+  assert.equal(normalized.root.children.length, 2);
+  assert.equal(normalized.root.children[1].children.length, 2);
 });
 
 test("hidden nodes and depth limits are explicit, and maxNodes marks the spec incomplete", async () => {

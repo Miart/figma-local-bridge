@@ -6,11 +6,11 @@
  * A design that was made by hand can be handed to figma_build/figma_patch on
  * another page or in another file. This is a lossy translation by nature — the
  * Plugin API cannot recover an SVG's source or the inside of an instance, and
- * the build language cannot create a BOOLEAN_OPERATION — so the report names
- * every field it could not carry instead of returning a spec that looks
- * complete. A node with no build equivalent can instead travel as the SVG
- * render of its current appearance; the spec then says it is flattened and the
- * report names what that loses.
+ * some node types have no live build equivalent — so the report names every
+ * field it could not carry instead of returning a spec that looks complete. A
+ * node with no build equivalent can instead travel as the SVG render of its
+ * current appearance; the spec then says it is flattened and the report names
+ * what that loses.
  *
  * The spec is ordinary data and the source is never modified.
  */
@@ -21,7 +21,10 @@ export const SPEC_EXPORT_SCHEMA = "build-spec-export/v1";
 
 type Json = any;
 
-const EXPORTABLE = new Set(["FRAME", "RECTANGLE", "ELLIPSE", "LINE", "TEXT", "INSTANCE", "COMPONENT"]);
+const EXPORTABLE = new Set([
+  "FRAME", "RECTANGLE", "ELLIPSE", "LINE", "TEXT", "INSTANCE", "COMPONENT", "BOOLEAN_OPERATION",
+]);
+const BOOLEAN_OPERATIONS = new Set(["UNION", "SUBTRACT", "INTERSECT", "EXCLUDE"]);
 /*
  * A node type the build cannot express can still be carried as its rendered
  * appearance: Figma exports any layer as SVG, and the build engine already
@@ -917,6 +920,16 @@ async function exportNode(
   } else if (node.type === "FRAME" && kindOf(node) === "SVG") {
     direct = false;
     fallbackWhy = "the node was created from SVG; the Plugin API does not expose the source string";
+  } else if (node.type === "BOOLEAN_OPERATION" && !BOOLEAN_OPERATIONS.has(String(node.booleanOperation))) {
+    direct = false;
+    fallbackWhy = `boolean operation "${node.booleanOperation}" is not a build-spec operation`;
+  } else if (node.type === "BOOLEAN_OPERATION") {
+    const visibleOperands = (Array.isArray(node.children) ? node.children : [])
+      .filter((child: any) => state.includeHidden || child.visible !== false).length;
+    if (visibleOperands < 2) {
+      direct = false;
+      fallbackWhy = `the boolean operation has only ${visibleOperands} exportable operands; a build spec needs at least two`;
+    }
   }
 
   let main: any = null;
@@ -968,6 +981,7 @@ async function exportNode(
 
   state.keys.add(key);
   const spec: Json = { type: node.type, name: node.name, key };
+  if (node.type === "BOOLEAN_OPERATION") spec.booleanOperation = String(node.booleanOperation);
   const textSegments = node.type === "TEXT" ? await textSegmentsFor(node, state, path) : null;
   if (node.type === "INSTANCE") {
     if (main.key) spec.componentKey = main.key;
@@ -989,13 +1003,16 @@ async function exportNode(
 
   const size = [Number(node.width), Number(node.height)];
   const textAutoResize = node.type === "TEXT" ? node.textAutoResize : undefined;
+  // A boolean's size is derived from its operands; exporting it would make the
+  // rebuild resize the result after the operands have already set the bounds.
+  const derivedSize = node.type === "BOOLEAN_OPERATION";
   if (
-    node.type !== "LINE" &&
+    !derivedSize && node.type !== "LINE" &&
     Number.isFinite(size[0]) && Number.isFinite(size[1]) && size[0] > 0 && size[1] > 0 &&
     (node.type !== "TEXT" || textAutoResize === "NONE")
   ) {
     spec.size = { width: round(size[0]), height: round(size[1]) };
-  } else if (node.type !== "TEXT" && node.type !== "LINE" && (!Number.isFinite(size[0]) || !Number.isFinite(size[1]) || size[0] <= 0 || size[1] <= 0)) {
+  } else if (!derivedSize && node.type !== "TEXT" && node.type !== "LINE" && (!Number.isFinite(size[0]) || !Number.isFinite(size[1]) || size[0] <= 0 || size[1] <= 0)) {
     state.warnings.push(`${path}: size ${size[0]}x${size[1]} cannot be represented; the build will use the node default`);
   }
   const parentAuto = node.parent && node.parent.layoutMode && node.parent.layoutMode !== "NONE";
@@ -1184,13 +1201,19 @@ async function exportNode(
   }
 
   state.nodes++;
-  if ((node.type === "FRAME" || node.type === "COMPONENT") && Array.isArray(node.children)) {
+  if ((node.type === "FRAME" || node.type === "COMPONENT" || node.type === "BOOLEAN_OPERATION") && Array.isArray(node.children)) {
     const children: any[] = [];
     for (const child of node.children) {
       const made = await exportNode(ctx, child, key, children.length, depth + 1, state);
       if (made) children.push(made);
     }
     if (children.length) spec.children = children;
+    if (node.type === "BOOLEAN_OPERATION" && children.length < 2) {
+      const why = `the boolean operation exported only ${children.length} operand(s); a build spec needs at least two`;
+      state.unsupported.push({ path, type: node.type, why });
+      state.warnings.push(`${path}: ${why}`);
+      return null;
+    }
   }
   return spec;
 }

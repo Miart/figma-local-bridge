@@ -77,11 +77,21 @@ half a design applied.
   spacing, text hyperlinks (URL, or NODE by node id), text runs (ordered
   character ranges with their own font, size, text style, fills, fill style,
   variable bindings, case, decoration, line height, letter spacing and
-  hyperlink), whole-text `textVariable` bindings, and an exact `LINE` length.
+  hyperlink), whole-text `textVariable` bindings, an exact `LINE` length, and
+  boolean operations. A `BOOLEAN_OPERATION` carries `booleanOperation`
+  (`UNION`, `SUBTRACT`, `INTERSECT` or `EXCLUDE`) and at least two children in
+  spec order. Its operands are built first and combined into one boolean; the
+  operation can change in place on a repeat build, and its size is derived from
+  the operands (a supplied size is warned about and ignored). Nested booleans
+  build inside-out.
 - `figma_patch` takes a sparse tree under `rootNodeId`, `buildId` or
   `rootKey`. Children match by key. A missing key is refused unless
   `allowCreate:true`; a key under the wrong parent is refused rather than
   duplicated. `prune:true` deletes omitted keyed children at patched levels.
+  A boolean patch may list only the operands it changes when `prune` is false;
+  pruning a boolean requires at least two operands in the patch. A sparse
+  boolean patch keeps the existing operand order and appends a new operand;
+  send the complete ordered list with `prune:true` to enforce order.
 - `figma_batch_edit` takes up to 200 small ops on many targets in one
   transaction. Targets are `nodeId` or stable `key`. Ops: `set_text`,
   `set_name`/`rename`, `set_fill`, `set_stroke`, `resize`, `move`,
@@ -149,9 +159,11 @@ video hash is file-local, like an image hash); every supported paint carries
 with structural paths built from
 the main component's layer names, so a renamed layer still resolves; the
 instance interior itself is recreated from the main component, not carried in
-the spec. A node the build cannot express — an unsupported type, a frame created
-from SVG, a detached instance — is exported as its inline SVG render when
-`svgFallback` is on (the default). The rebuild is a flattened frame: appearance
+the spec. A `BOOLEAN_OPERATION` is exported as a live boolean with its operation
+and children, not as a flattened SVG. A node the build cannot express — an
+unsupported type, a frame created from SVG, a detached instance — is exported
+as its inline SVG render when `svgFallback` is on (the default). The rebuild is
+a flattened frame: appearance
 survives, but the original child layers, component identity, overrides and
 style/variable links do not and text becomes outlines; every fallback is named
 in `warnings` and counted in `counts.svgFallbacks`. Slices are never flattened; `svgFallback: false` lists

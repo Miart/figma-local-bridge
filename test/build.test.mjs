@@ -171,6 +171,18 @@ function makeCtx({ textStyles = [], paintStyles = [], localVariables = [] } = {}
     createLine() { const n = defaults("LINE"); byId.set(n.id, n); return n; },
     createText() { const n = defaults("TEXT"); byId.set(n.id, n); return n; },
     createComponent() { const n = defaults("COMPONENT"); byId.set(n.id, n); return n; },
+    booleanOperation(nodes, parent, operation) {
+      const n = defaults("BOOLEAN_OPERATION");
+      n.booleanOperation = operation;
+      for (const child of nodes) n.appendChild(child);
+      parent.appendChild(n);
+      byId.set(n.id, n);
+      return n;
+    },
+    union(nodes, parent) { return this.booleanOperation(nodes, parent, "UNION"); },
+    subtract(nodes, parent) { return this.booleanOperation(nodes, parent, "SUBTRACT"); },
+    intersect(nodes, parent) { return this.booleanOperation(nodes, parent, "INTERSECT"); },
+    exclude(nodes, parent) { return this.booleanOperation(nodes, parent, "EXCLUDE"); },
     createNodeFromSvg(svg) {
       const n = defaults("FRAME");
       const raw = String(svg);
@@ -230,6 +242,33 @@ test("unsupported containers are a refusal, not a silent frame", () => {
   assert.throws(() => normalizeTree({ type: "GROUP", children: [] }), /not supported/);
   assert.throws(() => normalizeTree({ type: "TEXT", text: "x", children: [] }), /cannot have children/);
   assert.throws(() => normalizeTree({ type: "INSTANCE", name: "i" }), /needs component/);
+});
+
+test("a boolean operation needs a valid operation and two operands", () => {
+  const operands = [
+    { type: "RECTANGLE", name: "Base" },
+    { type: "ELLIPSE", name: "Hole" },
+  ];
+  assert.throws(
+    () => normalizeTree({ type: "BOOLEAN_OPERATION", children: operands }),
+    /booleanOperation is required/,
+  );
+  assert.throws(
+    () => normalizeTree({ type: "BOOLEAN_OPERATION", booleanOperation: "MERGE", children: operands }),
+    /booleanOperation must be/,
+  );
+  assert.throws(
+    () => normalizeTree({ type: "RECTANGLE", booleanOperation: "UNION" }),
+    /only valid on BOOLEAN_OPERATION/,
+  );
+  assert.throws(
+    () => normalizeTree({ type: "BOOLEAN_OPERATION", booleanOperation: "UNION", children: [operands[0]] }),
+    /at least two operands/,
+  );
+  const made = normalizeTree({ type: "BOOLEAN", booleanOperation: "subtract", children: operands });
+  assert.equal(made.root.type, "BOOLEAN_OPERATION");
+  assert.equal(made.root.spec.booleanOperation, "SUBTRACT");
+  assert.equal(made.root.children.length, 2);
 });
 
 test("a hyperlink is text-only and normalized", () => {
@@ -386,6 +425,198 @@ test("an SVG spec creates a frame, and a repeat build or patch updates it in pla
   assert.equal(patched.verification.ok, true);
   assert.equal(ctx.currentPage.children[0].id, root.id);
   assert.equal(root.children[0].name, "Third vector");
+});
+
+test("a boolean operation can be the build root", async () => {
+  const ctx = makeCtx();
+  const spec = {
+    buildId: "boolean-root",
+    root: {
+      type: "BOOLEAN_OPERATION", name: "Badge", booleanOperation: "UNION",
+      children: [
+        { type: "RECTANGLE", name: "Left", key: "root/left", size: { width: 20, height: 20 }, position: { x: 0, y: 0 } },
+        { type: "RECTANGLE", name: "Right", key: "root/right", size: { width: 20, height: 20 }, position: { x: 10, y: 10 } },
+      ],
+    },
+  };
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.verification.ok, true);
+  assert.equal(ctx.currentPage.children.length, 1);
+  const root = ctx.currentPage.children[0];
+  assert.equal(root.type, "BOOLEAN_OPERATION");
+  assert.equal(root.booleanOperation, "UNION");
+  assert.equal(root.getPluginData(BUILD_DATA), "boolean-root");
+  assert.equal(root.children.length, 2);
+  assert.deepEqual(root.children.map((c) => c.getPluginData(KEY_DATA)), ["root/left", "root/right"]);
+
+  const again = await runBuild(ctx, {
+    ...spec,
+    root: { ...spec.root, booleanOperation: "EXCLUDE" },
+    dryRun: false,
+  });
+  assert.equal(again.status, "applied");
+  assert.equal(again.verification.ok, true);
+  assert.deepEqual(again.created, []);
+  assert.equal(ctx.currentPage.children.length, 1);
+  assert.equal(root.booleanOperation, "EXCLUDE");
+  assert.equal(root.children.length, 2);
+});
+
+test("a boolean operation builds nested operands and updates in place", async () => {
+  const ctx = makeCtx();
+  const spec = {
+    buildId: "boolean",
+    root: {
+      type: "FRAME", name: "Badge", size: { width: 80, height: 80 },
+      children: [{
+        type: "BOOLEAN_OPERATION", name: "Cutout", key: "boolean/cutout",
+        booleanOperation: "SUBTRACT", position: { x: 4, y: 6 }, fills: "#ff0000",
+        children: [
+          { type: "RECTANGLE", name: "Base", key: "boolean/base", size: { width: 40, height: 40 }, fills: "#00ff00" },
+          {
+            type: "BOOLEAN_OPERATION", name: "Nested", key: "boolean/nested", booleanOperation: "UNION",
+            children: [
+              { type: "ELLIPSE", name: "Dot", key: "boolean/dot", size: { width: 12, height: 12 }, position: { x: 2, y: 2 } },
+              { type: "ELLIPSE", name: "Ring", key: "boolean/ring", size: { width: 8, height: 8 }, position: { x: 18, y: 18 } },
+            ],
+          },
+        ],
+      }],
+    },
+  };
+
+  const dry = await runBuild(ctx, { ...spec, dryRun: true });
+  assert.equal(dry.status, "dry_run");
+  assert.equal(dry.counts.create, 6);
+  assert.equal(ctx.currentPage.children.length, 0);
+
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.verification.ok, true);
+  const frame = ctx.currentPage.children[0];
+  assert.equal(frame.children.length, 1);
+  const cutout = frame.children[0];
+  assert.equal(cutout.type, "BOOLEAN_OPERATION");
+  assert.equal(cutout.booleanOperation, "SUBTRACT");
+  assert.equal(cutout.getPluginData(KEY_DATA), "boolean/cutout");
+  assert.equal(cutout.x, 4);
+  assert.equal(cutout.y, 6);
+  assert.equal(cutout.children.length, 2);
+  assert.equal(cutout.children[0].getPluginData(KEY_DATA), "boolean/base");
+  assert.equal(cutout.children[0].width, 40);
+  const nested = cutout.children[1];
+  assert.equal(nested.type, "BOOLEAN_OPERATION");
+  assert.equal(nested.booleanOperation, "UNION");
+  assert.equal(nested.children.length, 2);
+  assert.equal(nested.children[0].getPluginData(KEY_DATA), "boolean/dot");
+  assert.equal(nested.children[0].x, 2);
+  assert.equal(nested.children[1].x, 18);
+
+  const changed = {
+    ...spec,
+    root: {
+      ...spec.root,
+      children: [{
+        ...spec.root.children[0],
+        booleanOperation: "INTERSECT",
+        children: [
+          { ...spec.root.children[0].children[0], fills: "#0000ff" },
+          { ...spec.root.children[0].children[1], booleanOperation: "EXCLUDE" },
+        ],
+      }],
+    },
+  };
+  const again = await runBuild(ctx, { ...changed, dryRun: false });
+  assert.equal(again.status, "applied");
+  assert.equal(again.verification.ok, true);
+  assert.deepEqual(again.created, []);
+  assert.equal(ctx.currentPage.children[0].children.length, 1);
+  assert.equal(frame.children[0], cutout);
+  assert.equal(cutout.booleanOperation, "INTERSECT");
+  assert.equal(cutout.children.length, 2);
+  assert.equal(cutout.children[0].fills[0].color.b, 1);
+  assert.equal(nested.booleanOperation, "EXCLUDE");
+  assert.equal(nested.children.length, 2);
+
+  // A sparse patch can update one operand without restating the operation or
+  // the other operands. Pruning a boolean with fewer than two operands is refused.
+  const patched = await runPatch(ctx, {
+    buildId: "boolean",
+    dryRun: false,
+    patch: {
+      type: "FRAME",
+      children: [{
+        type: "BOOLEAN_OPERATION", key: "boolean/cutout",
+        children: [{
+          type: "RECTANGLE", key: "boolean/base", fills: "#123456",
+        }],
+      }],
+    },
+  });
+  assert.equal(patched.status, "applied");
+  assert.equal(patched.verification.ok, true);
+  assert.equal(cutout.booleanOperation, "INTERSECT");
+  assert.equal(cutout.children.length, 2);
+  assert.equal(cutout.children[0].fills[0].color.r, 0x12 / 255);
+  assert.equal(nested.parent, cutout);
+
+  const reordered = await runBuild(ctx, {
+    ...changed,
+    root: {
+      ...changed.root,
+      children: [{
+        ...changed.root.children[0],
+        children: [changed.root.children[0].children[1], changed.root.children[0].children[0]],
+      }],
+    },
+    dryRun: false,
+  });
+  assert.equal(reordered.status, "applied");
+  assert.equal(reordered.verification.ok, true);
+  assert.deepEqual(
+    cutout.children.map((child) => child.getPluginData(KEY_DATA)),
+    ["boolean/nested", "boolean/base"],
+  );
+
+  const added = await runPatch(ctx, {
+    buildId: "boolean",
+    allowCreate: true,
+    dryRun: false,
+    patch: {
+      type: "FRAME",
+      children: [{
+        type: "BOOLEAN_OPERATION", key: "boolean/extra", booleanOperation: "UNION",
+        children: [
+          { type: "ELLIPSE", key: "boolean/extra-a", size: { width: 10, height: 10 } },
+          { type: "ELLIPSE", key: "boolean/extra-b", size: { width: 10, height: 10 }, position: { x: 5, y: 5 } },
+        ],
+      }],
+    },
+  });
+  assert.equal(added.status, "applied");
+  assert.equal(added.verification.ok, true);
+  assert.equal(frame.children.length, 2);
+  const extra = frame.children[1];
+  assert.equal(extra.type, "BOOLEAN_OPERATION");
+  assert.equal(extra.getPluginData(KEY_DATA), "boolean/extra");
+  assert.equal(extra.children.length, 2);
+
+  const blocked = await runPatch(ctx, {
+    buildId: "boolean",
+    dryRun: true,
+    prune: true,
+    patch: {
+      type: "FRAME",
+      children: [{
+        type: "BOOLEAN_OPERATION", key: "boolean/cutout",
+        children: [{ type: "RECTANGLE", key: "boolean/base" }],
+      }],
+    },
+  });
+  assert.equal(blocked.status, "blocked");
+  assert.ok(blocked.blocking.some((b) => /pruning a BOOLEAN_OPERATION/.test(b)));
+  assert.equal(cutout.children.length, 2);
 });
 
 test("build applies text runs without flattening the base style", async () => {

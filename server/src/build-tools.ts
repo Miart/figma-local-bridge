@@ -159,7 +159,14 @@ const buildNodeSchema: z.ZodType<any> = z.lazy(() =>
       key: z.string().min(1).max(160).optional().describe("Stable engine identity. Omit to derive deterministically from the path."),
       type: z
         .string()
-        .describe("FRAME | RECTANGLE | ELLIPSE | LINE | TEXT | INSTANCE | COMPONENT | SVG (RECT is an alias for RECTANGLE)"),
+        .describe("FRAME | RECTANGLE | ELLIPSE | LINE | TEXT | INSTANCE | COMPONENT | SVG | BOOLEAN_OPERATION (RECT aliases RECTANGLE; BOOLEAN aliases BOOLEAN_OPERATION)"),
+      booleanOperation: z
+        .enum(["UNION", "SUBTRACT", "INTERSECT", "EXCLUDE"])
+        .optional()
+        .describe(
+          "BOOLEAN_OPERATION only. Required when creating a boolean; omitted on a patch keeps the current operation. " +
+            "The operation can be changed in place on an existing boolean.",
+        ),
       name: z.string().optional(),
       text: z.string().optional(),
       font: fontSchema.optional(),
@@ -219,7 +226,10 @@ const buildNodeSchema: z.ZodType<any> = z.lazy(() =>
         .object({ horizontal: z.string(), vertical: z.string() })
         .optional(),
 
-      size: z.object({ width: z.number().positive(), height: z.number().positive() }).optional(),
+      size: z
+        .object({ width: z.number().positive(), height: z.number().positive() })
+        .optional()
+        .describe("A BOOLEAN_OPERATION derives its size from its operands; size on a boolean is ignored with a warning."),
       length: z.number().positive().optional().describe("LINE only: width in pixels; the build creates a horizontal line and rotation angles it"),
       position: z.object({ x: z.number(), y: z.number() }).optional(),
       layout: layoutSchema.optional(),
@@ -274,6 +284,7 @@ export function registerBuildTools(server: McpServer, client: FigmaClient, caps:
     "Create or update a declarative, keyed UI tree in ONE transaction. The spec is validated and resolved (fonts, styles, local variables, components) before anything is written; every node gets a stable key in pluginData, so re-sending the same buildId updates instead of duplicating. " +
       "dryRun defaults to TRUE and returns a real plan plus a scope fingerprint. Pass dryRun:false with that fingerprint to apply. An existing root with the same buildId is patched in place; prune:true makes the tree exact by deleting keyed children the spec no longer contains. " +
       "An SVG leaf is created as a frame; re-sending it updates that frame in place, and a changed svg source replaces its interior while keeping the id and key. " +
+      "A BOOLEAN_OPERATION is created from at least two operands in spec order (first operand is the subtract/intersect base) and can change its operation in place; its size is derived from the operands and is ignored. " +
       "Refuses type changes, ambiguous component names, unknown keys, position inside auto-layout, component swaps, and unsupported node types.",
     {
       buildId: z
@@ -284,7 +295,9 @@ export function registerBuildTools(server: McpServer, client: FigmaClient, caps:
         .describe("Stable build scope. Defaults to root.key. Re-send the same id to update the same root."),
       mode: z.enum(["upsert", "create"]).default("upsert").describe("upsert: create or update by buildId; create: refuse if it exists"),
       parentId: figmaNodeId("parentId").optional().describe("Container for a new root; defaults to the current page"),
-      root: buildNodeSchema.describe("The tree. FRAME and COMPONENT may have children; INSTANCE uses properties/overrides."),
+      root: buildNodeSchema.describe(
+        "The tree. FRAME, COMPONENT and BOOLEAN_OPERATION may have children; an INSTANCE uses properties/overrides.",
+      ),
       prune: z
         .boolean()
         .default(false)
@@ -319,7 +332,7 @@ export function registerBuildTools(server: McpServer, client: FigmaClient, caps:
   server.tool(
     "figma_patch",
     "Update an existing keyed tree by stable key, in ONE transaction. A dry run is a real diff: it reports create/update/delete counts and a scope fingerprint without writing. " +
-      "Missing keys are refused unless allowCreate:true; a key that lives under a different parent is refused rather than duplicated; prune:true deletes keyed children omitted from the patch at each patched level. An SVG leaf keeps its frame id and key while a changed svg source replaces its interior. Text updates load their fonts before writing, and any failure rolls the whole patch back. " +
+      "Missing keys are refused unless allowCreate:true; a key that lives under a different parent is refused rather than duplicated; prune:true deletes keyed children omitted from the patch at each patched level. An SVG leaf keeps its frame id and key while a changed svg source replaces its interior. A BOOLEAN_OPERATION patch may list only the operands it changes when prune is false; pruning a boolean requires at least two operands in the patch. A sparse boolean patch keeps the existing operand order and appends a new operand; send the complete ordered list with prune:true to enforce order. Text updates load their fonts before writing, and any failure rolls the whole patch back. " +
       "Target with rootNodeId, buildId or rootKey.",
     {
       rootNodeId: figmaNodeId("rootNodeId").optional().describe("The built root, by id"),

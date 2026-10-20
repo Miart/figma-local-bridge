@@ -47,9 +47,11 @@ const DEFAULT_FONT = { family: "Inter", style: "Regular" };
 
 const ALLOWED_TYPES = new Set([
   "FRAME", "RECTANGLE", "ELLIPSE", "LINE", "TEXT", "INSTANCE", "COMPONENT", "SVG",
+  "BOOLEAN_OPERATION",
 ]);
-const CONTAINER_TYPES = new Set(["FRAME", "COMPONENT"]);
+const CONTAINER_TYPES = new Set(["FRAME", "COMPONENT", "BOOLEAN_OPERATION"]);
 const LEAF_TYPES = new Set(["RECTANGLE", "ELLIPSE", "LINE", "TEXT", "SVG"]);
+const BOOLEAN_OPERATIONS = new Set(["UNION", "SUBTRACT", "INTERSECT", "EXCLUDE"]);
 const STROKE_CAPS = new Set(["NONE", "ROUND", "SQUARE", "ARROW_LINES", "ARROW_EQUILATERAL"]);
 const STROKE_JOINS = new Set(["MITER", "BEVEL", "ROUND"]);
 const TEXT_CASES = new Set(["ORIGINAL", "UPPER", "LOWER", "TITLE", "SMALL_CAPS", "SMALL_CAPS_FORCED"]);
@@ -399,7 +401,7 @@ function validateNode(
   raw: any,
   path: string,
   depth: number,
-  state: { nodes: number; maxDepth: number; keys: Set<string>; warnings: string[] },
+  state: { nodes: number; maxDepth: number; keys: Set<string>; warnings: string[]; sparseBooleans?: boolean },
   parentKey: string,
   index: number,
 ): NormalizedNode {
@@ -411,6 +413,10 @@ function validateNode(
 
   let type = String(raw.type || "").toUpperCase();
   if (type === "RECT") type = "RECTANGLE";
+  if (type === "BOOLEAN") type = "BOOLEAN_OPERATION";
+  if (type !== "BOOLEAN_OPERATION" && raw.booleanOperation !== undefined) {
+    throw new Error(`${path}.booleanOperation is only valid on BOOLEAN_OPERATION`);
+  }
   if (!ALLOWED_TYPES.has(type)) {
     throw new Error(
       `${path}.type "${raw.type}" is not supported. Supported: ${[...ALLOWED_TYPES].join(", ")}. ` +
@@ -429,9 +435,32 @@ function validateNode(
 
   const out: NormalizedNode = { key, type, name, spec: { ...raw }, children: [] };
 
+  if (type === "BOOLEAN_OPERATION") {
+    const operation = raw.booleanOperation === undefined ? "" : String(raw.booleanOperation).toUpperCase();
+    if (operation && !BOOLEAN_OPERATIONS.has(operation)) {
+      throw new Error(`${path}.booleanOperation must be ${[...BOOLEAN_OPERATIONS].join(", ")}`);
+    }
+    if (!operation && !state.sparseBooleans) {
+      throw new Error(`${path}.booleanOperation is required on a BOOLEAN_OPERATION`);
+    }
+    if (operation) out.spec.booleanOperation = operation;
+    if (raw.children !== undefined && !Array.isArray(raw.children)) {
+      throw new Error(`${path}.children must be an array of at least two operands`);
+    }
+    const operands = Array.isArray(raw.children) ? raw.children.length : 0;
+    if (!state.sparseBooleans && operands < 2) {
+      throw new Error(`${path}: BOOLEAN_OPERATION needs at least two operands (got ${operands})`);
+    }
+  }
+
   if (raw.visible !== undefined && typeof raw.visible !== "boolean") throw new Error(`${path}.visible must be boolean`);
   if (raw.opacity !== undefined) validateNumber(raw.opacity, `${path}.opacity`, { min: 0, max: 1 });
-  if (raw.size !== undefined) out.spec.size = validateSize(raw.size, `${path}.size`);
+  if (raw.size !== undefined) {
+    out.spec.size = validateSize(raw.size, `${path}.size`);
+    if (type === "BOOLEAN_OPERATION") {
+      state.warnings.push(`${path}: BOOLEAN_OPERATION size is derived from its operands and is ignored`);
+    }
+  }
   if (raw.length !== undefined) {
     if (type !== "LINE") throw new Error(`${path}.length is only valid on LINE; use size for other nodes`);
     if (raw.size !== undefined) throw new Error(`${path}: LINE takes length or size, not both`);
@@ -510,7 +539,7 @@ function validateNode(
   if (raw.children !== undefined) {
     if (!Array.isArray(raw.children)) throw new Error(`${path}.children must be an array`);
     if (!CONTAINER_TYPES.has(type)) {
-      throw new Error(`${path}: ${type} cannot have children (only FRAME and COMPONENT can)`);
+      throw new Error(`${path}: ${type} cannot have children (only ${[...CONTAINER_TYPES].join(", ")} can)`);
     }
     raw.children.forEach((child: any, i: number) => {
       out.children.push(validateNode(child, `${path}.children[${i}]`, depth + 1, state, key, i));
@@ -525,10 +554,16 @@ function validateNode(
  * the path when the caller does not supply one, so re-sending the same spec
  * produces the same keys and therefore updates instead of duplicating.
  */
-export function normalizeTree(raw: any, opts: { buildId?: string; rootKey?: string } = {}): NormalizeResult {
+export function normalizeTree(
+  raw: any,
+  opts: { buildId?: string; rootKey?: string; sparseBooleans?: boolean } = {},
+): NormalizeResult {
   if (!isObj(raw)) throw new Error("root must be an object");
   const buildId = opts.buildId ? String(opts.buildId) : "";
-  const state = { nodes: 0, maxDepth: 0, keys: new Set<string>(), warnings: [] as string[] };
+  const state = {
+    nodes: 0, maxDepth: 0, keys: new Set<string>(), warnings: [] as string[],
+    sparseBooleans: opts.sparseBooleans === true,
+  };
   // The root key is the build scope. If the caller gave a buildId but no root
   // key, using the buildId is what makes a second build hit the same root
   // instead of deriving a key from the (possibly changed) display name.
@@ -1314,7 +1349,7 @@ async function planPatch(ctx: any, p: Json): Promise<Plan> {
   if (!p.patch || typeof p.patch !== "object") throw new Error("patch must be an object");
   const normalized = normalizeTree(
     { ...p.patch, type: p.patch.type || actualKind(root), key: p.patch.key || plan.root.key || "root" },
-    { buildId, rootKey: plan.root.key },
+    { buildId, rootKey: plan.root.key, sparseBooleans: true },
   );
   if (normalized.root.type !== actualKind(root)) {
     throw new Error(`patch root type is ${normalized.root.type}, but ${root.id} is ${actualKind(root)}; type changes are refused`);
@@ -1324,6 +1359,12 @@ async function planPatch(ctx: any, p: Json): Promise<Plan> {
   }
   plan.root.key = normalized.root.key || plan.root.key;
   plan.counts.nodes = normalized.nodes;
+  if (plan.prune && normalized.root.type === "BOOLEAN_OPERATION" && normalized.root.children.length < 2) {
+    plan.blocking.push(
+      `${plan.root.key}: pruning a BOOLEAN_OPERATION requires at least two operands in the patch; ` +
+        `omit prune to update only some operands`,
+    );
+  }
   plan.warnings.push(...normalized.warnings);
   plan.planned.update.push(plan.root.key);
   plan.keys[plan.root.key] = root.id;
@@ -1347,6 +1388,14 @@ async function planPatch(ctx: any, p: Json): Promise<Plan> {
           plan.blocking.push(`${c.key}: no node with this key under ${nodeLabel(parentNode)} (pass allowCreate: true to add it)`);
           continue;
         }
+        if (c.type === "BOOLEAN_OPERATION") {
+          if (!c.spec.booleanOperation) {
+            plan.blocking.push(`${c.key}: a new BOOLEAN_OPERATION needs booleanOperation ${[...BOOLEAN_OPERATIONS].join(", ")}`);
+          }
+          if (c.children.length < 2) {
+            plan.blocking.push(`${c.key}: a new BOOLEAN_OPERATION needs at least two operands`);
+          }
+        }
         plan.planned.create.push(c.key);
       } else {
         if (actualKind(hit) !== c.type) {
@@ -1362,6 +1411,12 @@ async function planPatch(ctx: any, p: Json): Promise<Plan> {
         plan.keys[c.key] = hit.id;
       }
       walk(c, hit || parentNode, c.key);
+      if (plan.prune && hit && c.type === "BOOLEAN_OPERATION" && c.children.length < 2) {
+        plan.blocking.push(
+          `${c.key}: pruning a BOOLEAN_OPERATION requires at least two operands in the patch; ` +
+            `omit prune to update only some operands`,
+        );
+      }
       if (plan.prune && hit) {
         const expected = new Set(c.children.map((x) => x.key));
         for (const gc of (hit.children || [])) {
@@ -2014,6 +2069,8 @@ async function createNodeFor(ctx: any, n: NormalizedNode, component: any): Promi
       if (!component) throw new Error(`${n.key}: instance has no resolved component`);
       return component.createInstance();
     }
+    case "BOOLEAN_OPERATION":
+      throw new Error(`${n.key}: a BOOLEAN_OPERATION is created from at least two operands, not directly`);
     default:
       throw new Error(`${n.key}: cannot create ${n.type}`);
   }
@@ -2084,10 +2141,21 @@ async function applyNode(
     }
   }
 
+  if (n.type === "BOOLEAN_OPERATION" && spec.booleanOperation !== undefined) {
+    // The operation is writable in the Plugin API, so changing UNION to
+    // SUBTRACT is an in-place edit of the same boolean node, not a rebuild.
+    if (!("booleanOperation" in node)) throw new Error(`${n.key}: this host does not expose booleanOperation`);
+    node.booleanOperation = String(spec.booleanOperation).toUpperCase();
+  }
+
   applyCommonProps(node, spec, res, ctx);
   if (n.type === "TEXT") await applyTextProps(ctx, node, spec, res, n.key);
   else if (n.type === "LINE" && spec.length !== undefined && "resize" in node) node.resize(Number(spec.length), 0);
-  else if (spec.size !== undefined && "resize" in node) node.resize(Number(spec.size.width), Number(spec.size.height));
+  else if (n.type !== "BOOLEAN_OPERATION" && spec.size !== undefined && "resize" in node) {
+    // A boolean's bounds are the union/intersection of its operands. Resizing
+    // it would scale the operands; the operands are the authoritative geometry.
+    node.resize(Number(spec.size.width), Number(spec.size.height));
+  }
 
   if (n.type === "INSTANCE") {
     if (opts.create) {
@@ -2185,6 +2253,94 @@ function pruneChildren(
   return deleted;
 }
 
+function orderBooleanChildren(node: any, ordered: any[], mark: () => void): void {
+  if (!ordered.length) return;
+  let target = 0;
+  for (const child of ordered) {
+    const at = (node.children || []).indexOf(child);
+    if (at < 0) continue;
+    if (at !== target) {
+      if (typeof node.insertChild !== "function") {
+        throw new Error(`boolean ${node.id} cannot reorder its operands: insertChild is unavailable`);
+      }
+      mark();
+      node.insertChild(target, child);
+    }
+    target++;
+  }
+}
+
+function combineBoolean(ctx: any, operation: string, children: any[], parent: any): any {
+  const method = operation === "UNION" ? "union" : operation.toLowerCase();
+  if (typeof ctx[method] !== "function") throw new Error(`this host does not expose figma.${method}`);
+  const node = ctx[method](children, parent);
+  if (!node) throw new Error(`figma.${method} returned no boolean node`);
+  return node;
+}
+
+/**
+ * Build a new BooleanOperationNode from its operands. The operands are first
+ * built under a scratch frame: a parent with auto-layout would otherwise place
+ * them itself before they are combined, discarding the coordinates the spec
+ * carries. The scratch frame is removed once the boolean has moved into the
+ * real parent. Its children keep their keys through the reparenting.
+ */
+async function applyBooleanSubtree(
+  ctx: any,
+  parent: any,
+  n: NormalizedNode,
+  res: Resources,
+  opts: {
+    buildId: string;
+    patch: boolean;
+    warnings: string[];
+    prune: boolean;
+    rootRef: any;
+    protectedIds: Set<string>;
+    completeChildren?: boolean;
+    mark: () => void;
+  },
+): Promise<{ result: ApplyResult; node: any }> {
+  const operation = String(n.spec.booleanOperation || "").toUpperCase();
+  if (!BOOLEAN_OPERATIONS.has(operation)) {
+    throw new Error(`${n.key}: BOOLEAN_OPERATION needs booleanOperation ${[...BOOLEAN_OPERATIONS].join(", ")}`);
+  }
+  if (n.children.length < 2) {
+    throw new Error(`${n.key}: BOOLEAN_OPERATION needs at least two operands (got ${n.children.length})`);
+  }
+  const result: ApplyResult = { created: [], updated: [], deleted: [], keys: {} };
+  opts.mark();
+  const staging = ctx.createFrame();
+  if (!staging) throw new Error(`${n.key}: the host could not create the boolean scratch frame`);
+  parent.appendChild(staging);
+  let node: any = null;
+  const operands: any[] = [];
+  try {
+    for (const child of n.children) {
+      mergeResult(result, await applySubtree(ctx, staging, child, res, opts));
+      const hits = directByKey(staging, child.key);
+      if (hits.length !== 1) {
+        throw new Error(`${n.key}: operand ${child.key} was not created under the boolean scratch frame`);
+      }
+      operands.push(hits[0]);
+    }
+    opts.mark();
+    node = combineBoolean(ctx, operation, operands, staging);
+    parent.appendChild(node);
+  } finally {
+    try { staging.remove(); } catch { /* already gone */ }
+  }
+  await applyNode(ctx, node, n, res, { buildId: opts.buildId, create: true, patch: opts.patch, warnings: opts.warnings });
+  orderBooleanChildren(node, operands, opts.mark);
+  if (n.spec.layout !== undefined) applyContainerLayout(node, n.spec.layout, "after");
+  result.created.unshift(n.key);
+  result.keys = { [n.key]: node.id, ...result.keys };
+  let stored = "";
+  try { stored = node.getPluginData(KEY_DATA) || ""; } catch { stored = ""; }
+  if (stored !== n.key) throw new Error(`${n.key}: node ${node.id} stored key "${stored}" instead of "${n.key}"`);
+  return { result, node };
+}
+
 async function applySubtree(
   ctx: any,
   parent: any,
@@ -2197,6 +2353,7 @@ async function applySubtree(
     prune: boolean;
     rootRef: any;
     protectedIds: Set<string>;
+    completeChildren?: boolean;
     mark: () => void;
   },
 ): Promise<ApplyResult> {
@@ -2214,6 +2371,10 @@ async function applySubtree(
         `${n.key}: key already exists under ${nodeLabel(elsewhere[0].parent)}, not under ${nodeLabel(parent)}. ` +
           `Refusing to create a duplicate; move the node deliberately or use a new key.`,
       );
+    }
+    if (n.type === "BOOLEAN_OPERATION") {
+      const built = await applyBooleanSubtree(ctx, parent, n, res, opts);
+      return built.result;
     }
     const comp = n.type === "INSTANCE" ? res.components.get(n.key) : null;
     opts.mark();
@@ -2238,6 +2399,14 @@ async function applySubtree(
     const expected = new Set(n.children.map((c) => c.key));
     const deleted = pruneChildren(node, expected, opts.protectedIds, opts.warnings, opts.mark);
     for (const k of deleted) result.deleted.push(k);
+  }
+  if (n.type === "BOOLEAN_OPERATION" && opts.completeChildren) {
+    const ordered: any[] = [];
+    for (const child of n.children) {
+      const hits = directByKey(node, child.key);
+      if (hits.length === 1) ordered.push(hits[0]);
+    }
+    orderBooleanChildren(node, ordered, opts.mark);
   }
 
   // Re-read the key after creation/update: this is the authoritative map the
@@ -2286,37 +2455,64 @@ async function applyPlan(ctx: any, plan: Plan, p: Json): Promise<Json> {
     const parent = existingRoot ? existingRoot.parent : requestedParent;
     if (!parent) throw new Error("root has no parent");
     let rootNode = existingRoot;
-    if (!rootNode) {
-      const comp = tree.type === "INSTANCE" ? res.components.get(tree.key) : null;
-      rootNode = await createNodeFor(ctx, tree, comp);
-      parent.appendChild(rootNode);
+    let booleanBuilt: { result: ApplyResult; node: any } | null = null;
+    if (!rootNode && tree.type === "BOOLEAN_OPERATION") {
+      booleanBuilt = await applyBooleanSubtree(ctx, parent, tree, res, {
+        buildId: plan.buildId,
+        patch,
+        warnings,
+        prune: plan.prune,
+        rootRef: parent,
+        protectedIds: new Set<string>(),
+        completeChildren: true,
+        mark,
+      });
+      rootNode = booleanBuilt.node;
+      if (plan.buildId) rootNode.setPluginData(BUILD_DATA, plan.buildId);
+    } else {
+      if (!rootNode) {
+        const comp = tree.type === "INSTANCE" ? res.components.get(tree.key) : null;
+        rootNode = await createNodeFor(ctx, tree, comp);
+        parent.appendChild(rootNode);
+      }
+      mark();
+      await applyNode(ctx, rootNode, tree, res, { buildId: plan.buildId, create: !existingRoot, patch, warnings });
+      if (plan.buildId) rootNode.setPluginData(BUILD_DATA, plan.buildId);
     }
-    mark();
-    await applyNode(ctx, rootNode, tree, res, { buildId: plan.buildId, create: !existingRoot, patch, warnings });
-    if (plan.buildId) rootNode.setPluginData(BUILD_DATA, plan.buildId);
 
-    const result: ApplyResult = {
+    const result: ApplyResult = booleanBuilt ? booleanBuilt.result : {
       created: existingRoot ? [] : [tree.key],
       updated: existingRoot ? [tree.key] : [],
       deleted: [],
       keys: { [tree.key]: rootNode.id },
     };
-    for (const child of tree.children) {
-      mergeResult(result, await applySubtree(ctx, rootNode, child, res, {
-        buildId: plan.buildId,
-        patch,
-        warnings,
-        prune: plan.prune,
-        rootRef: rootNode,
-        protectedIds: collectProtected(rootNode),
-        mark,
-      }));
-    }
-    if (tree.spec.layout !== undefined) applyContainerLayout(rootNode, tree.spec.layout, "after");
-    if (plan.prune) {
-      const expected = new Set(tree.children.map((c) => c.key));
-      const deleted = pruneChildren(rootNode, expected, collectProtected(rootNode), warnings, mark);
-      for (const k of deleted) result.deleted.push(k);
+    if (!booleanBuilt) {
+      for (const child of tree.children) {
+        mergeResult(result, await applySubtree(ctx, rootNode, child, res, {
+          buildId: plan.buildId,
+          patch,
+          warnings,
+          prune: plan.prune,
+          rootRef: rootNode,
+          protectedIds: collectProtected(rootNode),
+          completeChildren: !patch || plan.prune,
+          mark,
+        }));
+      }
+      if (tree.spec.layout !== undefined) applyContainerLayout(rootNode, tree.spec.layout, "after");
+      if (plan.prune) {
+        const expected = new Set(tree.children.map((c) => c.key));
+        const deleted = pruneChildren(rootNode, expected, collectProtected(rootNode), warnings, mark);
+        for (const k of deleted) result.deleted.push(k);
+      }
+      if (tree.type === "BOOLEAN_OPERATION" && (!patch || plan.prune)) {
+        const ordered: any[] = [];
+        for (const child of tree.children) {
+          const hits = directByKey(rootNode, child.key);
+          if (hits.length === 1) ordered.push(hits[0]);
+        }
+        orderBooleanChildren(rootNode, ordered, mark);
+      }
     }
     ctx.commitUndo();
 
