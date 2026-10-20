@@ -38,7 +38,7 @@ export const MAX_DEPTH = 40;
  */
 export const LIMITATIONS: readonly string[] = [
   "an INSTANCE's interior STRUCTURE is its main component's current structure; direct per-layer overrides are captured and re-applied, but a layer added to or removed from the main component is not described by the checkpoint",
-  "a direct instance override that changed per-run text styling is captured with the layer snapshot and replayed range by range; a per-run style link or variable binding that the override REMOVED is not cleared from the main component's current run",
+  "a direct instance override that changed per-run text styling is captured with the layer snapshot and replayed range by range, including clearing a per-run style link or variable binding the override removed",
   "text runs are rebuilt (font, size, fills, text/fill style links, variable bindings, case, decoration, line height, letter spacing and hyperlink)",
   "style ids are re-linked when the style still exists; node-level and run-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
@@ -337,7 +337,7 @@ const SUPPORTED_OVERRIDE_FIELDS = new Set([
   "characters", "fontName", "fontSize", "lineHeight", "letterSpacing",
   "textCase", "textDecoration", "paragraphSpacing", "paragraphIndent",
   "hyperlink", "textAlignHorizontal", "textAlignVertical", "textAutoResize",
-  "textStyleId", "componentProperties",
+  "textStyleId", "styledTextSegments", "componentProperties",
 ]);
 
 function instanceOverridePath(instance: any, target: any, main: any): any[] | null {
@@ -1659,7 +1659,7 @@ const TEXT_OVERRIDE_FIELDS = new Set([
   "characters", "fontName", "fontSize", "lineHeight", "letterSpacing",
   "textCase", "textDecoration", "paragraphSpacing", "paragraphIndent",
   "hyperlink", "textAlignHorizontal", "textAlignVertical", "textAutoResize",
-  "fills", "textStyleId", "fillStyleId", "textRangeFills",
+  "fills", "textStyleId", "fillStyleId", "textRangeFills", "styledTextSegments",
 ]);
 
 const LAYOUT_OVERRIDE_FIELDS = new Set([
@@ -1691,6 +1691,23 @@ async function applyTextOverride(
   const font = text.font && text.font !== "mixed" ? text.font : null;
   const runs = textRunsOf(text);
   const replayRuns = runs.length > 0 && anyField(fields, TEXT_OVERRIDE_FIELDS);
+  // A run snapshot is the final state, not a diff: when the override touched
+  // range styling, clear the inherited link or binding before replaying the
+  // snapshot, so an override that REMOVED one does not keep the main
+  // component's current link underneath.
+  const clearStyleLinks = new Set<string>();
+  const clearBindings = new Set<string>();
+  if (fields.has("styledTextSegments")) {
+    clearStyleLinks.add("textStyleId");
+    clearStyleLinks.add("fillStyleId");
+    for (const field of TEXT_RANGE_FIELDS) clearBindings.add(field);
+    if (!runs.length) {
+      report.notes.push(`${path}: a range-styling override has no run snapshot; its removed links and bindings were not cleared`);
+    }
+  } else {
+    for (const field of ["textStyleId", "fillStyleId"]) if (fields.has(field)) clearStyleLinks.add(field);
+    for (const field of TEXT_RANGE_FIELDS) if (fields.has(field)) clearBindings.add(field);
+  }
   if (font && ctx.loadFont) {
     try {
       await ctx.loadFont(font);
@@ -1733,7 +1750,12 @@ async function applyTextOverride(
   if (fields.has("textAlignHorizontal") && Array.isArray(text.align)) soft("horizontal align", () => { target.textAlignHorizontal = text.align[0]; });
   if (fields.has("textAlignVertical") && Array.isArray(text.align)) soft("vertical align", () => { target.textAlignVertical = text.align[1]; });
   if (fields.has("textAutoResize") && text.autoResize) soft("auto resize", () => { target.textAutoResize = text.autoResize; });
-  if (replayRuns) await applyTextRunValues(target, runs, runFontReady, ctx, report, path);
+  if (replayRuns) {
+    await applyTextRunValues(target, runs, runFontReady, ctx, report, path, {
+      styleLinks: clearStyleLinks,
+      bindings: clearBindings,
+    });
+  }
 }
 
 /**
@@ -1942,6 +1964,7 @@ async function applyRunStyleLinks(
   report: RestoreReport,
   path: string,
   i: number,
+  clear: Set<string> = new Set(),
 ): Promise<void> {
   const api = ctx.figma;
   for (const [field, method] of [
@@ -1949,8 +1972,23 @@ async function applyRunStyleLinks(
     ["fillStyleId", "setRangeFillStyleIdAsync"],
   ] as Array<[string, string]>) {
     const id = run[field];
-    if (typeof id !== "string" || !id) continue;
+    const hasId = typeof id === "string" && !!id;
     const at = `${path}.runs[${i}]`;
+    if (!hasId && !clear.has(field)) continue;
+    if (typeof node[method] !== "function") {
+      const why = `a ${node.type} cannot link this style to a character range`;
+      if (hasId) report.stylesMissing.push({ path: at, field, id, why });
+      else report.notes.push(`${at}: ${field} link not cleared: ${why}`);
+      continue;
+    }
+    if (!hasId) {
+      try {
+        await node[method](start, end, "");
+      } catch (e) {
+        report.notes.push(`${at}: ${field} link not cleared: ${msg(e)}`);
+      }
+      continue;
+    }
     const missing = (why: string) => report.stylesMissing.push({ path: at, field, id, why });
     if (typeof api.getStyleByIdAsync !== "function") {
       missing("the style API is not available in this session");
@@ -1976,10 +2014,6 @@ async function applyRunStyleLinks(
         continue;
       }
     }
-    if (typeof node[method] !== "function") {
-      missing(`a ${node.type} cannot link this style to a character range`);
-      continue;
-    }
     try {
       await node[method](start, end, style.id || id);
       report.stylesRestored.push({ path: at, field, id: style.id || id });
@@ -1998,11 +2032,24 @@ async function applyRunBindings(
   report: RestoreReport,
   path: string,
   i: number,
+  clear: Set<string> = new Set(),
 ): Promise<void> {
-  if (!isObj(run.variables)) return;
-  for (const [field, alias] of Object.entries(run.variables as Dict)) {
+  const at = `${path}.runs[${i}]`;
+  const variables: Dict = isObj(run.variables) ? run.variables as Dict : {};
+  for (const field of clear) {
+    if (variables[field] !== undefined) continue; // applied below
+    if (typeof node.setRangeBoundVariable !== "function") {
+      report.notes.push(`${at}: ${field} binding not cleared: a ${node.type} cannot bind a variable to a character range`);
+      continue;
+    }
+    try {
+      node.setRangeBoundVariable(start, end, field, null);
+    } catch (e) {
+      report.notes.push(`${at}: ${field} binding not cleared: ${msg(e)}`);
+    }
+  }
+  for (const [field, alias] of Object.entries(variables)) {
     if (!TEXT_RANGE_FIELDS.has(field)) continue;
-    const at = `${path}.runs[${i}]`;
     const missing = (id: string, why: string) => report.bindingsMissing.push({ path: at, field, id, why });
     if (!isAlias(alias)) {
       missing(String((alias as any)?.id ?? ""), "the recorded run binding is not a variable alias");
@@ -2069,6 +2116,7 @@ async function applyTextRunValues(
   ctx: RestoreContext,
   report: RestoreReport,
   path: string,
+  clear: { styleLinks?: Set<string>; bindings?: Set<string> } = {},
 ): Promise<void> {
   const length = typeof node.characters === "string" ? node.characters.length : 0;
   for (let i = 0; i < runs.length; i++) {
@@ -2086,7 +2134,7 @@ async function applyTextRunValues(
         report.notes.push(`${path}: run ${i} ${what} not restored: ${msg(e)}`);
       }
     };
-    await applyRunStyleLinks(node, run, start, end, ctx, report, path, i);
+    await applyRunStyleLinks(node, run, start, end, ctx, report, path, i, clear.styleLinks);
     if (run.font && runFontReady[i] && typeof node.setRangeFontName === "function") {
       runSoft("font", () => { node.setRangeFontName(start, end, run.font); });
     }
@@ -2123,7 +2171,7 @@ async function applyTextRunValues(
     if (run.hyperlink !== undefined && typeof node.setRangeHyperlink === "function") {
       runSoft("hyperlink", () => { node.setRangeHyperlink(start, end, run.hyperlink); });
     }
-    await applyRunBindings(node, run, start, end, ctx, report, path, i);
+    await applyRunBindings(node, run, start, end, ctx, report, path, i, clear.bindings);
   }
 }
 

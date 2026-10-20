@@ -405,9 +405,12 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   range by range: every run font is loaded before the character setter, then
   sizes, fills, text/fill style links, variable bindings, case, decoration,
   line height, letter spacing and hyperlinks go back through the range setters.
-  A per-run style link or variable binding the override removed is not cleared
-  from the main component's current run. The interior's structure itself is
-  still the main component's current structure.
+  When the override touched range styling, the snapshot is treated as the
+  final state: inherited per-run text/fill style links and range variable
+  bindings are cleared before the snapshot is replayed, so a link or binding
+  the override removed does not survive from the main component. A clear the
+  file refuses is named in `notes`. The interior's structure itself is still
+  the main component's current structure.
 - STAR and POLYGON are rebuilt natively: `pointCount` (and STAR's `innerRadius`)
   are applied before the final size, and a direct override of those fields is
   replayed too. A `BOOLEAN_OPERATION` tree is rebuilt from its children with the

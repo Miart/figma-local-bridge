@@ -1281,6 +1281,63 @@ const errors = async (fn) => {
 }
 
 {
+  // A range snapshot is the final state: an override that removed a link or a
+  // binding must clear the main component's current one before the snapshot is
+  // replayed. `styledTextSegments` is how Figma reports this class of override.
+  const segments = [
+    {
+      start: 0, end: 1,
+      fontName: { family: "Inter", style: "Bold" }, fontSize: 24,
+      fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 }, opacity: 1 }],
+      textStyleId: "S:first", fillStyleId: "S:fill-first",
+      boundVariables: { fontSize: { type: "VARIABLE_ALIAS", id: "V:size" } },
+    },
+    {
+      start: 1, end: 2,
+      fontName: { family: "Inter", style: "Regular" }, fontSize: 12,
+      fills: [{ type: "SOLID", color: { r: 0, g: 0, b: 1 }, opacity: 1 }],
+    },
+  ];
+  const label = node("TEXT", { name: "Label", characters: "AB" });
+  const main = node("COMPONENT", { name: "Chip", key: "K4", id: "9:10", children: [label] });
+  const srcInstance = main.createInstance();
+  const srcLabel = srcInstance.children[0];
+  srcLabel.characters = "AB";
+  srcLabel.fontName = Symbol("mixed");
+  srcLabel.fontSize = Symbol("mixed");
+  srcLabel.fills = Symbol("mixed");
+  srcLabel.lineHeight = Symbol("mixed");
+  srcLabel.letterSpacing = Symbol("mixed");
+  srcLabel.hyperlink = Symbol("mixed");
+  srcLabel.getStyledTextSegments = () => segments;
+  srcInstance.overrides = [{ id: srcLabel.id, overriddenFields: ["styledTextSegments"] }];
+  const src = node("FRAME", { name: "Card", children: [srcInstance] });
+  const { root } = await dumpSubtree(src);
+  const figma = fakeFigma([main], {
+    styles: [
+      { id: "S:first", name: "text/first", fontName: { family: "Inter", style: "Bold" } },
+      { id: "S:fill-first", name: "fill/first" },
+    ],
+    variables: [{ id: "V:size", name: "size/font" }],
+  });
+  const target = node("FRAME");
+  const report = await restoreSubtree(root, ctxFor(figma, target, { loadFont: async () => {} }), {});
+  const restored = target.children[0].children[0];
+  const ops = restored.rangeOps || [];
+  const bound = restored.boundOps || [];
+  check("instances: styledTextSegments is captured as a supported full run snapshot",
+    report.overridesUnsupported.length === 0 &&
+    root.children[0].state.instance.overrides[0].state.text.textRuns.length === 2 &&
+    root.children[0].state.instance.overrides[0].state.text.textRuns[1].textStyleId === undefined);
+  check("instances: removed per-run links and bindings are cleared",
+    ops.some((o) => o.field === "textStyleId" && o.start === 1 && o.end === 2 && o.value === "") &&
+    ops.some((o) => o.field === "fillStyleId" && o.start === 1 && o.end === 2 && o.value === "") &&
+    ops.some((o) => o.field === "textStyleId" && o.start === 0 && o.end === 1 && o.value === "S:first") &&
+    bound.some((o) => o.field === "fontSize" && o.start === 1 && o.end === 2 && o.variable === null) &&
+    bound.some((o) => o.field === "fontSize" && o.start === 0 && o.end === 1 && o.variable?.id === "V:size"));
+}
+
+{
   // The target is a different node type than the checkpoint describes: the
   // children still come back, and the report says the root's own state was not.
   const figma = fakeFigma();
