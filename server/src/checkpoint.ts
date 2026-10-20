@@ -135,7 +135,34 @@ export function diffDumps(a: DumpNode, b: DumpNode, opts: { limit?: number } = {
     all.push({ path, before: before === undefined ? null : before, after: after === undefined ? null : after, ...(absent ? { absent } : {}) });
   };
 
+  // The #suffix on a component property name is Figma's unique id, assigned
+  // fresh by addComponentProperty. It cannot be restored, so it must not make a
+  // correct rebuild look different. Definitions compare by display name and
+  // content (duplicates stay separate entries); references compare by name.
+  const propertyBase = (name: unknown) => String(name).split("#")[0];
+  const normalizeComponentState = (v: unknown, kind: "defs" | "refs"): unknown => {
+    if (!isPlain(v)) return v;
+    if (kind === "refs") {
+      const out: Record<string, unknown> = {};
+      for (const [field, name] of Object.entries(v as Record<string, unknown>)) out[field] = propertyBase(name);
+      return out;
+    }
+    const entries = Object.entries(v as Record<string, unknown>).map(([key, def]) => (
+      isPlain(def)
+        ? { ...(def as Record<string, unknown>), property: propertyBase(key) }
+        : { value: def, property: propertyBase(key) }
+    ));
+    return entries.sort((a, b) => canonical(a).localeCompare(canonical(b)));
+  };
+
   const value = (av: unknown, bv: unknown, path: string) => {
+    if (path.endsWith(".state.componentPropertyDefinitions")) {
+      av = normalizeComponentState(av, "defs");
+      bv = normalizeComponentState(bv, "defs");
+    } else if (path.endsWith(".state.componentPropertyReferences")) {
+      av = normalizeComponentState(av, "refs");
+      bv = normalizeComponentState(bv, "refs");
+    }
     if (av === undefined && bv === undefined) return;
     if (Array.isArray(av) || Array.isArray(bv)) {
       const aa = Array.isArray(av) ? av : [];
@@ -195,6 +222,8 @@ function annotateDiffs(diffs: Difference[]): string[] {
     if (d.path.includes(".state.text.runs")) notes.add("runs: the number of text runs differs; checkpoint-v1 restores per-run font, size, fills, style links, variable bindings, case, decoration, line height, letter spacing and hyperlink");
     if (d.path.includes(".state.text.textRuns")) notes.add("runs: a per-run text property differs after the rebuild — missing fonts and failures are named in the restore report");
     if (d.path.endsWith(".children.length")) notes.add("children: the subtree has a different number of children — read `skipped` and `created` in the restore report");
+    if (d.path.includes(".state.componentPropertyDefinitions") || d.path.includes(".state.componentPropertyReferences"))
+      notes.add("component properties: the #id suffix is assigned by Figma and is not restored; definitions and layer references are compared by display name");
   }
   return [...notes];
 }

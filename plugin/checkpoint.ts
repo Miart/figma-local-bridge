@@ -42,7 +42,8 @@ export const LIMITATIONS: readonly string[] = [
   "text runs are rebuilt (font, size, fills, text/fill style links, variable bindings, case, decoration, line height, letter spacing and hyperlink)",
   "style ids are re-linked when the style still exists; node-level and run-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",
-  "a COMPONENT_SET is not rebuilt (variants and their combined identity are not restorable); checkpoint its variants instead",
+  "a restored COMPONENT_SET is a new set: its variant components are rebuilt, its non-variant properties are added back by type and default value, and layer references are remapped to the new names, while variant options come from the component names, and component/property ids, component keys, existing instances, property descriptions/preferred values/slot settings and definition-level variable bindings do not come back",
+  "a restored root's own componentPropertyReferences point at its parent component, which is outside the checkpoint, so they are not replayed",
 ];
 
 export type Dict = Record<string, any>;
@@ -194,6 +195,16 @@ export function readState(node: any): Dict {
     s.layoutGrids = list(node.layoutGrids);
   }
   if ("exportSettings" in node) s.exportSettings = list(node.exportSettings) ?? [];
+  if ("componentPropertyDefinitions" in node) {
+    // Omitted when empty, like layout grids: an old checkpoint of a component
+    // with no properties still compares equal against a fresh dump.
+    const defs = copy(node.componentPropertyDefinitions);
+    if (defs && Object.keys(defs).length) s.componentPropertyDefinitions = defs;
+  }
+  if ("componentPropertyReferences" in node && node.componentPropertyReferences) {
+    const refs = copy(node.componentPropertyReferences);
+    if (refs && Object.keys(refs).length) s.componentPropertyReferences = refs;
+  }
   if ("arcData" in node) s.arcData = copy(node.arcData);
   if ("pointCount" in node) s.pointCount = node.pointCount;
   if ("innerRadius" in node) s.innerRadius = node.innerRadius;
@@ -581,11 +592,11 @@ const REBUILDABLE = new Set([
   "POLYGON",
   "BOOLEAN_OPERATION",
   "SLICE",
+  "COMPONENT_SET",
 ]);
 
 /** A node whose type we cannot build still records its identity, so the report can name it. */
 function unsupportedWhy(type: string): string {
-  if (type === "COMPONENT_SET") return "a COMPONENT_SET cannot be rebuilt (variants and their combined identity are not restorable); checkpoint its variants instead";
   return `${type} is not rebuilt by checkpoint-v1`;
 }
 
@@ -751,14 +762,36 @@ export async function restoreSubtree(dump: DumpNode, ctx: RestoreContext, opts: 
   }
 
   const children = dump.children ?? [];
+  const restored: Array<{ node: any; dump: DumpNode; path: string }> = [];
   for (let i = 0; i < children.length; i++) {
-    await buildNode(children[i], target, ctx, report, `$.children[${i}]`, opts);
+    let child = children[i];
+    if (dump.type === "COMPONENT_SET" && target.type === "COMPONENT_SET") {
+      // The target set already owns these definitions; a variant rebuilt into
+      // it must not add a duplicate copy before the set's own state is applied.
+      child = { ...child, state: { ...(child.state ?? {}) } };
+      delete child.state.componentPropertyDefinitions;
+    }
+    const built = await buildNode(child, target, ctx, report, `$.children[${i}]`, opts);
+    if (built) restored.push({ node: built, dump: child, path: `$.children[${i}]` });
   }
 
   if (dump.type === target.type) {
+    if (dump.state?.componentPropertyReferences) {
+      report.notes.push("$: the target's own componentPropertyReferences point at its parent component and are not replayed");
+    }
     await applyFinal(target, dump.state, ctx, report, "$", true);
     await applyStyleLinks(target, dump.meta?.styleIds, ctx, report, "$", dump.state);
     await applyVariableBindings(target, dump.meta?.variableBindings, dump.state, ctx, report, "$");
+    if (dump.type === "COMPONENT") {
+      const propertyMap = applyComponentProperties(target, dump.state, report, "$");
+      if (propertyMap.size) applyPropertyReferences(target, dump, propertyMap, report, "$");
+    } else if (dump.type === "COMPONENT_SET") {
+      const propertyMap = applyComponentProperties(target, dump.state, report, "$");
+      for (const b of restored) {
+        applyNodeReferences(b.node, b.dump, propertyMap, report, b.path);
+        applyPropertyReferences(b.node, b.dump, propertyMap, report, b.path);
+      }
+    }
   }
   return report;
 }
@@ -770,6 +803,7 @@ async function buildNode(d: DumpNode, parent: any, ctx: RestoreContext, report: 
   }
   if (d.type === "GROUP") return buildGroup(d, parent, ctx, report, path, opts);
   if (d.type === "BOOLEAN_OPERATION") return buildBoolean(d, parent, ctx, report, path, opts);
+  if (d.type === "COMPONENT_SET") return buildComponentSet(d, parent, ctx, report, path, opts);
 
   let node: any = null;
   try {
@@ -784,6 +818,10 @@ async function buildNode(d: DumpNode, parent: any, ctx: RestoreContext, report: 
     await applyFinal(node, d.state, ctx, report, path, false);
     await applyStyleLinks(node, d.meta?.styleIds, ctx, report, path, d.state);
     await applyVariableBindings(node, d.meta?.variableBindings, d.state, ctx, report, path);
+    if (d.type === "COMPONENT") {
+      const propertyMap = applyComponentProperties(node, d.state, report, path);
+      if (propertyMap.size) applyPropertyReferences(node, d, propertyMap, report, path);
+    }
     if (d.type === "INSTANCE") {
       await applyInstanceOverrides(node, d.state.instance?.overrides, ctx, report, path);
     }
@@ -887,6 +925,72 @@ async function buildBoolean(d: DumpNode, parent: any, ctx: RestoreContext, repor
   }
 }
 
+/**
+ * A component set is built from its variant COMPONENTs: each variant is created
+ * first (without its set-level property definitions, which belong to the set),
+ * then figma.combineAsVariants moves them under one set. The set's own state is
+ * applied last, including the non-variant component properties. Component and
+ * property ids cannot be preserved; the report carries that in LIMITATIONS.
+ */
+async function buildComponentSet(d: DumpNode, parent: any, ctx: RestoreContext, report: RestoreReport, path: string, opts: RestoreOptions): Promise<any> {
+  const kids = d.children ?? [];
+  if (!kids.length) {
+    report.skipped.push({ path, type: "COMPONENT_SET", why: "an empty COMPONENT_SET cannot exist, so it cannot be rebuilt" });
+    return null;
+  }
+  const made: any[] = [];
+  const built: Array<{ node: any; dump: DumpNode; path: string }> = [];
+  let set: any = null;
+  try {
+    for (let i = 0; i < kids.length; i++) {
+      const childPath = `${path}.children[${i}]`;
+      const childDump: DumpNode = { ...kids[i], state: { ...(kids[i].state ?? {}) } };
+      // The set carries these definitions. Adding them to every variant before
+      // combining would create duplicate properties under shifting ids.
+      delete childDump.state.componentPropertyDefinitions;
+      const child = await buildNode(childDump, parent, ctx, report, childPath, opts);
+      if (child) {
+        made.push(child);
+        built.push({ node: child, dump: childDump, path: childPath });
+      }
+    }
+    if (!made.length) {
+      report.skipped.push({ path, type: "COMPONENT_SET", why: "none of its variants could be rebuilt" });
+      return null;
+    }
+    if (made.some((n) => n.type !== "COMPONENT")) {
+      throw new Error("a COMPONENT_SET can only contain COMPONENT variants");
+    }
+    set = ctx.figma.combineAsVariants(made, parent);
+    set.name = d.name;
+    await applyVariableModes(set, d.meta?.variableModes, ctx, report, path);
+    applyLayout(set, d.state, report, path);
+    await applyFinal(set, d.state, ctx, report, path, false);
+    await applyStyleLinks(set, d.meta?.styleIds, ctx, report, path, d.state);
+    await applyVariableBindings(set, d.meta?.variableBindings, d.state, ctx, report, path);
+    const propertyMap = applyComponentProperties(set, d.state, report, path);
+    // Walk the variants we built, not set.children: Figma may reorder them by
+    // position when combining, and a reference must not land on the wrong one.
+    for (const b of built) {
+      applyNodeReferences(b.node, b.dump, propertyMap, report, b.path);
+      applyPropertyReferences(b.node, b.dump, propertyMap, report, b.path);
+    }
+    report.created++;
+    return set;
+  } catch (e) {
+    if (!opts.allowPartial) throw new Error(`${path} (COMPONENT_SET "${d.name}"): ${msg(e)}`);
+    report.skipped.push({ path, type: "COMPONENT_SET", why: msg(e) });
+    // A skipped set must not leave half-built variants behind.
+    try {
+      if (set && !set.removed) set.remove();
+      else for (const n of made) if (!n.removed) n.remove();
+    } catch {
+      /* cleanup is best effort */
+    }
+    return null;
+  }
+}
+
 async function createNode(d: DumpNode, ctx: RestoreContext, report: RestoreReport, path: string): Promise<any> {
   const f = ctx.figma;
   let node: any;
@@ -975,7 +1079,7 @@ function ownsSize(node: any, state: Dict): boolean {
   // Derived from something else: the geometry (vector), the children (group), the
   // text metrics, or the auto-layout engine. Resizing would fight the owner and
   // the comparison afterwards would report OUR change as a difference.
-  if (node.type === "VECTOR" || node.type === "GROUP" || node.type === "BOOLEAN_OPERATION") return false;
+  if (node.type === "VECTOR" || node.type === "GROUP" || node.type === "BOOLEAN_OPERATION" || node.type === "COMPONENT_SET") return false;
   if (node.type === "TEXT") return state?.text?.autoResize === "NONE";
   const L = state?.layout;
   if (L && (L.primary === "AUTO" || L.counter === "AUTO")) return false;
@@ -1067,6 +1171,117 @@ async function applyFinal(node: any, state: Dict, ctx: RestoreContext, report: R
     } catch (e) {
       report.notes.push(`${path}: vector network not restored: ${msg(e)}`);
     }
+  }
+}
+
+/**
+ * Component properties other than VARIANT are not implied by the variant names,
+ * so they are added from the checkpoint. A VARIANT property is inferred by
+ * figma.combineAsVariants from the component names; if it did not appear, the
+ * report says so instead of inventing one. The returned map is from the saved
+ * full property name to the rebuilt one, which is what a layer-level reference
+ * needs: addComponentProperty assigns a new suffix.
+ */
+function applyComponentProperties(node: any, state: Dict, report: RestoreReport, path: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const defs = state?.componentPropertyDefinitions;
+  if (!defs || !isObj(defs) || !("componentPropertyDefinitions" in node) || typeof node.addComponentProperty !== "function") return map;
+  let live: Dict = {};
+  try { live = node.componentPropertyDefinitions ?? {}; } catch { live = {}; }
+  // Figma allows two properties with the same display name; only the #id suffix
+  // tells them apart. Match initial live definitions by name AND type/default,
+  // and let each unmatched saved definition add its own property, duplicates
+  // included. A freshly rebuilt set starts with only its variant properties.
+  const signature = (def: any) => JSON.stringify({
+    type: def?.type ?? null,
+    defaultValue: def?.defaultValue ?? null,
+    variantOptions: def?.variantOptions ?? null,
+  });
+  const initial = Object.entries(live).map(([key, def]) => ({
+    key,
+    base: key.split("#")[0],
+    sig: signature(def),
+    used: false,
+  }));
+  for (const [key, def] of Object.entries(defs)) {
+    if (!def || typeof def !== "object") continue;
+    const type = (def as any).type;
+    const base = key.split("#")[0];
+    const sig = signature(def);
+    const match = initial.find((x) => !x.used && x.base === base && x.sig === sig);
+    if (match) {
+      match.used = true;
+      map.set(key, match.key);
+      continue;
+    }
+    if (type === "VARIANT") {
+      report.notes.push(`${path}: variant property "${base}" was not inferred from the rebuilt variant names`);
+      continue;
+    }
+    try {
+      const full = node.addComponentProperty(base, type, (def as any).defaultValue);
+      if (typeof full === "string" && full) map.set(key, full);
+    } catch (e) {
+      report.notes.push(`${path}: component property "${base}" not restored: ${msg(e)}`);
+    }
+  }
+  return map;
+}
+
+/**
+ * Replay a node's componentPropertyReferences through the old->new property
+ * map. A reference whose property was not rebuilt is named and skipped; the
+ * setter is not allowed to point at a property that does not exist.
+ */
+function applyNodeReferences(node: any, d: DumpNode, map: Map<string, string>, report: RestoreReport, path: string): void {
+  const refs = d.state?.componentPropertyReferences;
+  if (!refs || !isObj(refs)) return;
+  const out: Dict = {};
+  for (const [field, name] of Object.entries(refs)) {
+    const mapped = map.get(String(name));
+    if (mapped) out[field] = mapped;
+    else report.notes.push(`${path}: component property reference "${String(name)}" not restored because its property was not rebuilt`);
+  }
+  if (!Object.keys(out).length) return;
+  try {
+    node.componentPropertyReferences = out;
+  } catch (e) {
+    report.notes.push(`${path}: component property references not restored: ${msg(e)}`);
+  }
+}
+
+/**
+ * Walk the rebuilt children in parallel with their dumps. A component owns the
+ * properties its children reference, so a nested COMPONENT/COMPONENT_SET is a
+ * boundary: its own references are applied with the current map, while its
+ * children were handled when that component applied its own map. A component
+ * set is walked by buildComponentSet and the root restore path, which call this
+ * function on each variant with the set's map.
+ */
+function applyPropertyReferences(
+  node: any,
+  d: DumpNode,
+  map: Map<string, string>,
+  report: RestoreReport,
+  path: string,
+): void {
+  const dumps = d.children ?? [];
+  const live = Array.isArray(node.children) ? node.children : [];
+  if (dumps.length !== live.length) {
+    // A skipped child shifts every later pairing. Applying a reference by index
+    // after that would bind the wrong layer, so leave them for the report.
+    report.notes.push(`${path}: component property references not restored because ${dumps.length - live.length} child(ren) could not be rebuilt`);
+    return;
+  }
+  const count = live.length;
+  for (let i = 0; i < count; i++) {
+    const child = live[i];
+    const childDump = dumps[i];
+    const childPath = `${path}.children[${i}]`;
+    applyNodeReferences(child, childDump, map, report, childPath);
+    if (child.type === "INSTANCE") continue;
+    if (child.type === "COMPONENT" || child.type === "COMPONENT_SET") continue;
+    applyPropertyReferences(child, childDump, map, report, childPath);
   }
 }
 

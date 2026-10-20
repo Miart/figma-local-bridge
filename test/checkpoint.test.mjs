@@ -37,6 +37,7 @@ const BY_TYPE = (t) => {
   if (t === "FRAME" || t === "COMPONENT" || t === "SECTION" || t === "GROUP") {
     return {
       children: [],
+      ...(t === "COMPONENT" ? { componentPropertyDefinitions: {} } : {}),
       clipsContent: false,
       layoutMode: "NONE", paddingTop: 0, paddingRight: 0, paddingBottom: 0, paddingLeft: 0,
       itemSpacing: 0, primaryAxisAlignItems: "MIN", counterAxisAlignItems: "MIN",
@@ -92,6 +93,7 @@ const BY_TYPE = (t) => {
     };
   }
   if (t === "BOOLEAN_OPERATION") return { children: [], booleanOperation: "UNION" };
+  if (t === "COMPONENT_SET") return { children: [], componentPropertyDefinitions: {}, clipsContent: false, layoutMode: "NONE" };
   if (t === "SLICE") return { exportSettings: [] };
   if (t === "STAR") return { pointCount: 5, innerRadius: 0.5 };
   if (t === "POLYGON") return { pointCount: 6 };
@@ -128,6 +130,13 @@ function node(type, props = {}) {
     parent: null,
     resizes: 0,
     resize(w, h) { this.resizes++; this.width = w; this.height = h; },
+    addComponentProperty(name, type, defaultValue) {
+      if (!this.componentPropertyDefinitions) this.componentPropertyDefinitions = {};
+      this._propertySeq = (this._propertySeq ?? 0) + 1;
+      const key = `${name}#${this._propertySeq}:1`;
+      this.componentPropertyDefinitions[key] = { type, defaultValue };
+      return key;
+    },
     setBoundVariable(field, variable) {
       if (this.bindingRejects === field) throw new Error(`field ${field} cannot be bound on this node`);
       if (!variable || typeof variable.id !== "string") throw new Error("setBoundVariable needs a Variable object");
@@ -218,6 +227,12 @@ function fakeFigma(registry = [], options = {}) {
       nodes.forEach((n) => g.appendChild(n));
       parent.appendChild(g);
       return g;
+    },
+    combineAsVariants(nodes, parent) {
+      const set = track(node("COMPONENT_SET"));
+      nodes.forEach((n) => set.appendChild(n));
+      parent.appendChild(set);
+      return set;
     },
     union(nodes, parent) { return makeBoolean("UNION", nodes, parent); },
     subtract(nodes, parent) { return makeBoolean("SUBTRACT", nodes, parent); },
@@ -478,12 +493,12 @@ const errors = async (fn) => {
   const frame = node("FRAME");
   withChildren(frame, [
     node("RECTANGLE", { name: "keep" }),
-    node("COMPONENT_SET", { name: "Variants" }),
+    node("STAMP", { name: "Note" }),
   ]);
   const { root, unsupported } = await dumpSubtree(frame);
   check("dump: an unsupported node is named, not skipped silently",
-    unsupported.length === 1 && unsupported[0].type === "COMPONENT_SET" && unsupported[0].path === "$.children[1]");
-  check("dump: its reason names the variants", /variants/.test(unsupported[0].why));
+    unsupported.length === 1 && unsupported[0].type === "STAMP" && unsupported[0].path === "$.children[1]");
+  check("dump: its reason says it is not rebuilt", /not rebuilt/.test(unsupported[0].why));
   check("dump: its interior is not walked", root.children[1].children === undefined);
   check("dump: collectUnsupported can exclude the root",
     collectUnsupported(root, true).length === 1 && collectUnsupported(root, false).length === 1);
@@ -527,7 +542,7 @@ const errors = async (fn) => {
   const target = node("FRAME");
   withChildren(target, [node("RECTANGLE", { name: "old" })]);
   const frame = node("FRAME", { name: "Card" });
-  withChildren(frame, [node("COMPONENT_SET", { name: "Variants" }), node("RECTANGLE", { name: "kept" })]);
+  withChildren(frame, [node("STAMP", { name: "Note" }), node("RECTANGLE", { name: "kept" })]);
   const { root } = await dumpSubtree(frame);
 
   const refused = await errors(() => restoreSubtree(root, { figma, target }, {}));
@@ -755,19 +770,81 @@ const errors = async (fn) => {
     slice.exportSettings !== settings && report.created === 1 && report.skipped.length === 0);
 }
 
+{
+  const figma = fakeFigma();
+  const target = node("FRAME");
+  const defs = {
+    "Size": { type: "VARIANT", defaultValue: "Small", variantOptions: ["Small", "Large"] },
+    "Label#1:2": { type: "TEXT", defaultValue: "Play" },
+  };
+  const src = node("FRAME", { children: [node("COMPONENT_SET", {
+    name: "Button", componentPropertyDefinitions: defs,
+    children: [
+      node("COMPONENT", {
+        name: "Size=Small", componentPropertyReferences: { visible: "Label#1:2" },
+        children: [node("TEXT", {
+          name: "Label", characters: "Play",
+          componentPropertyReferences: { characters: "Label#1:2" },
+        })],
+      }),
+      node("COMPONENT", { name: "Size=Large" }),
+    ],
+  })] });
+  const { root, unsupported } = await dumpSubtree(src);
+  check("dump: a component set carries its variants, property definitions and references",
+    unsupported.length === 0 && root.children[0].children.length === 2 &&
+    root.children[0].state.componentPropertyDefinitions["Label#1:2"].defaultValue === "Play" &&
+    root.children[0].children[0].state.componentPropertyReferences.visible === "Label#1:2" &&
+    root.children[0].children[0].children[0].state.componentPropertyReferences.characters === "Label#1:2");
+
+  const report = await restoreSubtree(root, ctxFor(figma, target), {});
+  const set = target.children[0];
+  check("restore: a component set is rebuilt by combining its variant components",
+    set.type === "COMPONENT_SET" && set.children.map((c) => c.name).join(",") === "Size=Small,Size=Large" &&
+    set.resizes === 0 && report.created === 4 && report.skipped.length === 0);
+  check("restore: non-variant component properties are added back",
+    Object.values(set.componentPropertyDefinitions).some((d) => d.type === "TEXT" && d.defaultValue === "Play"));
+  const labelKey = Object.keys(set.componentPropertyDefinitions).find((k) => k.startsWith("Label#"));
+  check("restore: layer property references follow the rebuilt property name",
+    !!labelKey && set.children[0].componentPropertyReferences.visible === labelKey &&
+    set.children[0].children[0].componentPropertyReferences.characters === labelKey);
+}
+
+{
+  const figma = fakeFigma();
+  const target = node("FRAME");
+  const src = node("FRAME", { children: [node("COMPONENT", {
+    name: "Button",
+    componentPropertyDefinitions: { "Label#1:2": { type: "TEXT", defaultValue: "Play" } },
+    children: [node("TEXT", {
+      name: "Label", characters: "Play",
+      componentPropertyReferences: { characters: "Label#1:2" },
+    })],
+  })] });
+  const { root } = await dumpSubtree(src);
+  const report = await restoreSubtree(root, ctxFor(figma, target), {});
+  const comp = target.children[0];
+  const labelKey = Object.keys(comp.componentPropertyDefinitions).find((k) => k.startsWith("Label#"));
+  check("restore: a standalone component's properties and layer references are added back",
+    comp.type === "COMPONENT" &&
+    Object.values(comp.componentPropertyDefinitions).some((d) => d.type === "TEXT" && d.defaultValue === "Play") &&
+    !!labelKey && comp.children[0].componentPropertyReferences.characters === labelKey &&
+    report.skipped.length === 0);
+}
+
 // ---------------------------------------------------------------- restore: the losses, named
 
 {
   const figma = fakeFigma();
   const target = node("FRAME");
   const src = node("FRAME");
-  withChildren(src, [node("COMPONENT_SET", { name: "Variants" }), node("RECTANGLE", { name: "kept" })]);
+  withChildren(src, [node("STAMP", { name: "Note" }), node("RECTANGLE", { name: "kept" })]);
   const { root } = await dumpSubtree(src);
 
   const report = await restoreSubtree(root, ctxFor(figma, target), { allowPartial: true });
   check("allowPartial: the rest is rebuilt and the loss is listed",
     target.children.map((c) => c.name).join(",") === "kept" &&
-    report.skipped.length === 1 && report.skipped[0].type === "COMPONENT_SET" && report.created === 1);
+    report.skipped.length === 1 && report.skipped[0].type === "STAMP" && report.created === 1);
 }
 
 {

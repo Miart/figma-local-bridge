@@ -97,6 +97,32 @@ const env = (dump = node()) => ({ schema: SCHEMA, capturedAt: "2026-10-19T12:00:
 }
 
 {
+  // The #suffix is Figma's unique property id; addComponentProperty assigns a
+  // new one on every rebuild. It is a named loss, so it must not turn a correct
+  // rebuild into a non-identical diff. The display name and definition content
+  // still have to match, and references must point at the same name.
+  const defs = {
+    "Label#1:2": { type: "TEXT", defaultValue: "Play" },
+    "Visible#3:4": { type: "BOOLEAN", defaultValue: true },
+  };
+  const refs = { characters: "Label#1:2", visible: "Visible#3:4" };
+  const a = node({ state: { ...node().state, componentPropertyDefinitions: defs, componentPropertyReferences: refs } });
+  const b = node({ state: { ...node().state,
+    componentPropertyDefinitions: {
+      "Visible#9:1": { type: "BOOLEAN", defaultValue: true },
+      "Label#8:7": { type: "TEXT", defaultValue: "Play" },
+    },
+    componentPropertyReferences: { visible: "Visible#9:1", characters: "Label#8:7" },
+  } });
+  const c = node({ state: { ...node().state,
+    componentPropertyDefinitions: { ...defs, "Label#1:2": { type: "TEXT", defaultValue: "Stop" } },
+    componentPropertyReferences: refs,
+  } });
+  check("diff: component property ids are ignored, but definitions and references are not",
+    diffDumps(a, b).identical && !diffDumps(a, c).identical);
+}
+
+{
   const many = node({ state: { ...node().state, a: 1, b: 2, c: 3 } });
   const other = node({ state: { ...node().state, a: 9, b: 9, c: 9 } });
   const d = diffDumps(many, other, { limit: 2 });

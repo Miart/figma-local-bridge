@@ -359,7 +359,8 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
 - `action: "save"` records a subtree as data (`nodeId`; a page is refused) into
   one JSON file per file key. The reply carries a `summary` and the
   `limitations` a rebuild cannot carry — an INSTANCE's interior structure
-  beyond its direct overrides, and component identity. Read them before telling
+  beyond its direct overrides, component identity, and the identity and existing
+  instances of a component set. Read them before telling
   anyone the subtree will come back exactly.
 - `action: "show"` diffs the live subtree against the file field by field and
   reports the semantic fingerprint next to it. That is how "has this drifted
@@ -389,8 +390,15 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
   replayed too. A `BOOLEAN_OPERATION` tree is rebuilt from its children with the
   recorded operation (`union` / `subtract` / `intersect` / `exclude`), including
   nested operations; fewer than two rebuildable children is named and skipped.
-  A `SLICE` comes back with its geometry and `exportSettings`.
-  `COMPONENT_SET` is still refused by name.
+  A `SLICE` comes back with its geometry and `exportSettings`. A `COMPONENT_SET`
+  is rebuilt from its variant `COMPONENT`s with `figma.combineAsVariants`;
+  non-variant component properties are added back by type and default value, and
+  layer-level `componentPropertyReferences` are remapped to the new names.
+  Variant options come from the variant names, but component and property ids,
+  component keys, existing instances, property descriptions/preferred values/slot
+  settings and definition-level variable bindings do not come back. The `#id`
+  suffix is assigned by Figma, so verification compares definitions and layer
+  references by display name.
 - Style ids, node-level variable bindings and explicit variable modes travel in
   `meta`; per-run text bindings and style ids travel inside the runs. Restore
   re-links a style, variable, collection or mode when it still exists and
