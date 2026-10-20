@@ -643,6 +643,44 @@ test("build carries rotation, per-corner radii, stroke shape and text formatting
   );
 });
 
+test("build restores image paint geometry, filters, visibility and paint blend mode", async () => {
+  const ctx = makeCtx();
+  const imageTransform = [[1, 0, 0], [0, 1, 0]];
+  const filters = { exposure: 0.2, contrast: 0.1, saturation: 0, temperature: 0, tint: 0, highlights: 0, shadows: 0 };
+  const spec = {
+    buildId: "paint",
+    root: {
+      type: "FRAME", name: "Paint",
+      fills: [{
+        type: "IMAGE", imageHash: "img:1", scaleMode: "CROP",
+        imageTransform, scalingFactor: 0.5, rotation: 90, filters,
+        opacity: 0.8, blendMode: "MULTIPLY", visible: false,
+      }, {
+        type: "GRADIENT_LINEAR",
+        stops: [{ at: 0, color: "#ff0000" }, { at: 1, color: "#0000ff" }],
+        gradientTransform: [[1, 0, 0], [0, 1, 0]],
+        opacity: 0.5, blendMode: "SCREEN",
+      }, {
+        color: "#ff000080", opacity: 0.5,
+      }],
+    },
+  };
+
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.verification.ok, true);
+  const fills = ctx.currentPage.children[0].fills;
+  assert.deepEqual(fills[0], {
+    type: "IMAGE", imageHash: "img:1", scaleMode: "CROP",
+    imageTransform, scalingFactor: 0.5, rotation: 90, filters,
+    opacity: 0.8, visible: false, blendMode: "MULTIPLY",
+  });
+  assert.equal(fills[1].type, "GRADIENT_LINEAR");
+  assert.equal(fills[1].opacity, 0.5);
+  assert.equal(fills[1].blendMode, "SCREEN");
+  assert.equal(fills[1].gradientStops.length, 2);
+  assert.ok(Math.abs(fills[2].opacity - 0.5 * (128 / 255)) < 1e-9);
+});
+
 test("re-sending the same build updates in place and never duplicates", async () => {
   const ctx = makeCtx();
   const first = {

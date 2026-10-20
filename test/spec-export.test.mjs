@@ -248,6 +248,42 @@ test("layout grids and line length survive the round trip", async () => {
   assert.equal(normalized.nodes, 2);
 });
 
+test("image paint geometry, filters and paint visibility survive the export", async () => {
+  const imageTransform = [[1, 0, 0], [0, 1, 0]];
+  const filters = { exposure: 0.2, contrast: 0.1, saturation: 0, temperature: 0, tint: 0, highlights: 0, shadows: 0 };
+  const rect = node("RECTANGLE", {
+    name: "Photo",
+    fills: [{
+      type: "IMAGE", imageHash: "img:1", scaleMode: "CROP",
+      imageTransform, scalingFactor: 0.5, rotation: 90, filters,
+      opacity: 0.8, blendMode: "MULTIPLY", visible: false,
+    }, {
+      type: "GRADIENT_LINEAR",
+      gradientStops: [
+        { position: 0, color: { r: 1, g: 0, b: 0, a: 1 } },
+        { position: 1, color: { r: 0, g: 0, b: 1, a: 1 } },
+      ],
+      gradientTransform: [[1, 0, 0], [0, 1, 0]],
+      opacity: 0.5, blendMode: "SCREEN",
+    }],
+  });
+
+  const report = await runExportSpec(makeCtx(), { nodeId: rect.id });
+  assert.deepEqual(report.spec.fills[0], {
+    type: "IMAGE", imageHash: "img:1", scaleMode: "CROP",
+    imageTransform, scalingFactor: 0.5, rotation: 90, filters,
+    opacity: 0.8, visible: false, blendMode: "MULTIPLY",
+  });
+  assert.deepEqual(report.spec.fills[1], {
+    type: "GRADIENT_LINEAR",
+    stops: [{ at: 0, color: "#ff0000" }, { at: 1, color: "#0000ff" }],
+    gradientTransform: [[1, 0, 0], [0, 1, 0]],
+    opacity: 0.5, blendMode: "SCREEN",
+  });
+  assert.equal(report.warnings.length, 0);
+  assert.doesNotThrow(() => normalizeTree(report.spec));
+});
+
 test("URL links export, while NODE links and mixed runs are named", async () => {
   const url = node("TEXT", { name: "Docs", hyperlink: { type: "URL", value: "https://example.com/docs" } });
   const urlReport = await runExportSpec(makeCtx(), { nodeId: url.id });

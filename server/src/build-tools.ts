@@ -32,6 +32,23 @@ const paintSchema = z.union([
       variable: z.string().optional().describe("Local colour variable name or id"),
       imageHash: z.string().optional(),
       scaleMode: z.enum(["FILL", "FIT", "CROP", "TILE"]).optional(),
+      imageTransform: z.array(z.array(z.number())).optional().describe("IMAGE crop transform (CROP only)"),
+      scalingFactor: z.number().optional().describe("IMAGE tile scaling (TILE only)"),
+      rotation: z.number().optional().describe("IMAGE rotation in degrees"),
+      filters: z
+        .object({
+          exposure: z.number().optional(),
+          contrast: z.number().optional(),
+          saturation: z.number().optional(),
+          temperature: z.number().optional(),
+          tint: z.number().optional(),
+          highlights: z.number().optional(),
+          shadows: z.number().optional(),
+        })
+        .passthrough()
+        .optional(),
+      visible: z.boolean().optional().describe("false keeps the paint in the stack but hidden"),
+      blendMode: z.string().optional(),
       stops: z.array(z.object({ at: z.number(), color: z.string() })).optional(),
       gradientTransform: z.array(z.array(z.number())).optional(),
     })

@@ -645,7 +645,21 @@ function collectPaints(res: Resources, paints: any, where: string) {
     if (p.type && !["SOLID", "IMAGE", "GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND"].includes(String(p.type))) {
       res.blocking.push(`${where}[${i}]: unsupported paint type "${p.type}"`);
     }
-    if (p.type === "IMAGE" && !p.imageHash) res.blocking.push(`${where}[${i}]: IMAGE paint needs imageHash`);
+    if (p.visible !== undefined && typeof p.visible !== "boolean") {
+      res.blocking.push(`${where}[${i}].visible must be boolean`);
+    }
+    if (p.blendMode !== undefined && typeof p.blendMode !== "string") {
+      res.blocking.push(`${where}[${i}].blendMode must be a string`);
+    }
+    if (p.type === "IMAGE") {
+      if (!p.imageHash) res.blocking.push(`${where}[${i}]: IMAGE paint needs imageHash`);
+      if (p.imageTransform !== undefined && !Array.isArray(p.imageTransform)) {
+        res.blocking.push(`${where}[${i}].imageTransform must be a transform array`);
+      }
+      if (p.filters !== undefined && !isObj(p.filters)) {
+        res.blocking.push(`${where}[${i}].filters must be an object`);
+      }
+    }
   });
 }
 
@@ -1427,6 +1441,16 @@ function variableFallback(v: any): any {
   return { r: 0, g: 0, b: 0, a: 1 };
 }
 
+function paintCommon(paint: any, value: any, withOpacity = true): any {
+  if (!isObj(value)) return paint;
+  if (value.visible === false) paint.visible = false;
+  if (value.blendMode !== undefined && value.blendMode !== "NORMAL") paint.blendMode = String(value.blendMode);
+  // solidPaint already combined the colour alpha with `opacity`; overwriting it
+  // here would discard the alpha half of a #rrggbbaa colour.
+  if (withOpacity && value.opacity !== undefined) paint.opacity = Math.max(0, Math.min(1, Number(value.opacity)));
+  return paint;
+}
+
 function paintFromSpec(ctx: any, value: any, res: Resources): any {
   if (typeof value === "string") return solidPaint(value);
   if (!isObj(value)) throw new Error("paint must be a colour string or object");
@@ -1440,24 +1464,29 @@ function paintFromSpec(ctx: any, value: any, res: Resources): any {
     const v = res.variables.get(String(value.variable));
     if (!v) throw new Error(`variable "${value.variable}" was not resolved`);
     const fallback = value.color ? parseColor(value.color) : variableFallback(v);
-    const paint: any = {
+    let paint: any = {
       type: "SOLID",
       color: { r: fallback.r, g: fallback.g, b: fallback.b },
       opacity: value.opacity === undefined ? fallback.a : Math.max(0, Math.min(1, Number(value.opacity))),
     };
     try {
-      return ctx.variables.setBoundVariableForPaint(paint, "color", v);
+      paint = ctx.variables.setBoundVariableForPaint(paint, "color", v);
     } catch {
-      return paint;
+      /* the literal paint is the fallback */
     }
+    return paintCommon(paint, value);
   }
   if (value.type === "IMAGE") {
-    return {
+    const paint: any = {
       type: "IMAGE",
       imageHash: String(value.imageHash),
       scaleMode: value.scaleMode || "FILL",
-      ...(value.opacity !== undefined ? { opacity: Number(value.opacity) } : {}),
     };
+    if (value.imageTransform !== undefined) paint.imageTransform = value.imageTransform;
+    if (value.scalingFactor !== undefined) paint.scalingFactor = Number(value.scalingFactor);
+    if (value.rotation !== undefined) paint.rotation = Number(value.rotation);
+    if (value.filters !== undefined) paint.filters = value.filters;
+    return paintCommon(paint, value);
   }
   if (value.type && String(value.type).startsWith("GRADIENT")) {
     const stops = (value.stops || []).map((s: any) => ({
@@ -1465,14 +1494,13 @@ function paintFromSpec(ctx: any, value: any, res: Resources): any {
       color: parseColor(s.color),
     }));
     if (stops.length < 2) throw new Error(`${value.type} needs at least two stops`);
-    return {
+    return paintCommon({
       type: value.type,
       gradientStops: stops,
       gradientTransform: value.gradientTransform || [[1, 0, 0], [0, 1, 0]],
-      ...(value.opacity !== undefined ? { opacity: Number(value.opacity) } : {}),
-    };
+    }, value);
   }
-  return solidPaint(value.color !== undefined ? value.color : value, value.opacity);
+  return paintCommon(solidPaint(value.color !== undefined ? value.color : value, value.opacity), value, false);
 }
 
 function paintsFromSpec(ctx: any, value: any, res: Resources): any[] {

@@ -142,8 +142,11 @@ style/variable links into `fillStyle`/`strokeStyle`/`textStyle`/`effectStyle`,
 `variable` or `textVariable`. URL text links travel in the spec; a NODE link is
 exported with a file-local warning. Mixed text becomes a base style plus
 ordered `runs`, so mixed fonts, sizes, text/fill style links, text variable
-bindings, case, decoration, spacing and links survive a rebuild. Direct
-instance overrides become `overrides` entries with structural paths built from
+bindings, case, decoration, spacing and links survive a rebuild. An IMAGE
+paint carries its crop transform, tile scaling, rotation and filters; every
+supported paint carries `visible` and `blendMode`, including an invisible paint
+that stays in the stack. Direct instance overrides become `overrides` entries
+with structural paths built from
 the main component's layer names, so a renamed layer still resolves; the
 instance interior itself is recreated from the main component, not carried in
 the spec. A node the build cannot express — an unsupported type, a frame created
@@ -157,8 +160,8 @@ not fit the 128 KiB per-node / 192 KiB total budget is listed as unsupported
 with the reason. A built SVG leaf is re-recognised as `SVG` on the next build,
 so re-sending it updates in place; a changed `svg` replaces its interior while
 keeping the frame's id and key, and an unchanged source is not touched. Read `unsupported` and `warnings` before building it: an
-override field the build cannot express, a mixed value or a paint the spec
-cannot express has no exact representation. `truncated: true` means the spec is
+override field the build cannot express, a mixed value or a paint TYPE the
+spec cannot express (`VIDEO`, `PATTERN`, `SHADER`) has no exact representation. `truncated: true` means the spec is
 incomplete and must not be built as-is.
 
 ## Finding things, and checking the result

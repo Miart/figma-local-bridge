@@ -122,6 +122,15 @@ async function variableName(ctx: any, id: any, cache: Map<string, any>): Promise
   return name;
 }
 
+function paintCommon(out: Json, paint: any): Json {
+  if (paint.opacity !== undefined && Number(paint.opacity) !== 1) out.opacity = round(Number(paint.opacity));
+  // An invisible paint is still a paint in the list: dropping it would change
+  // the stack and its blend mode, even when nothing on screen changes today.
+  if (paint.visible === false) out.visible = false;
+  if (paint.blendMode && paint.blendMode !== "NORMAL") out.blendMode = paint.blendMode;
+  return out;
+}
+
 async function paintToSpec(
   ctx: any,
   paint: any,
@@ -129,26 +138,32 @@ async function paintToSpec(
   warnings: string[],
   path: string,
 ): Promise<any | null> {
-  if (!paint || paint.visible === false) return null;
+  if (!paint) return null;
   if (paint.type === "SOLID" && paint.color) {
     const out: Json = { color: hex(paint.color) };
     if (!out.color) {
       warnings.push(`${path}: a SOLID paint has an unreadable colour and was omitted`);
       return null;
     }
-    if (paint.opacity !== undefined && Number(paint.opacity) !== 1) out.opacity = round(Number(paint.opacity));
     const alias = paint.boundVariables && paint.boundVariables.color && paint.boundVariables.color.id;
     if (alias) {
       const name = await variableName(ctx, alias, vars);
       if (name) out.variable = name;
       else warnings.push(`${path}: paint bound to variable ${alias}, which could not be resolved; the literal colour was exported`);
     }
-    return out;
+    return paintCommon(out, paint);
   }
-  if (paint.type === "IMAGE" && paint.imageHash) {
+  if (paint.type === "IMAGE") {
+    if (!paint.imageHash) {
+      warnings.push(`${path}: an IMAGE paint has no imageHash and was omitted`);
+      return null;
+    }
     const out: Json = { type: "IMAGE", imageHash: paint.imageHash, scaleMode: paint.scaleMode || "FILL" };
-    if (paint.opacity !== undefined && Number(paint.opacity) !== 1) out.opacity = round(Number(paint.opacity));
-    return out;
+    if (paint.imageTransform) out.imageTransform = paint.imageTransform;
+    if (paint.scalingFactor !== undefined) out.scalingFactor = paint.scalingFactor;
+    if (paint.rotation !== undefined) out.rotation = paint.rotation;
+    if (paint.filters) out.filters = paint.filters;
+    return paintCommon(out, paint);
   }
   if (paint.type && String(paint.type).startsWith("GRADIENT")) {
     const stops = (paint.gradientStops || []).map((s: any) => ({
@@ -161,8 +176,7 @@ async function paintToSpec(
     }
     const out: Json = { type: paint.type, stops };
     if (paint.gradientTransform) out.gradientTransform = paint.gradientTransform;
-    if (paint.opacity !== undefined && Number(paint.opacity) !== 1) out.opacity = round(Number(paint.opacity));
-    return out;
+    return paintCommon(out, paint);
   }
   warnings.push(`${path}: paint type "${paint.type}" is not representable and was omitted`);
   return null;
