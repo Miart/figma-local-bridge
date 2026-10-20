@@ -30,7 +30,7 @@ function makeCtx() {
     fills: [], strokes: [], strokeWeight: 1, strokeAlign: "INSIDE", strokeDashes: [],
     strokeCap: "NONE", strokeJoin: "MITER", strokeMiterLimit: 4,
     cornerRadius: 0, topLeftRadius: 0, topRightRadius: 0, bottomRightRadius: 0, bottomLeftRadius: 0,
-    isMask: false, itemReverseZIndex: false, strokesIncludedInLayout: false, effects: [],
+    isMask: false, itemReverseZIndex: false, strokesIncludedInLayout: false, effects: [], layoutGrids: [],
     textCase: "ORIGINAL", textDecoration: "NONE", paragraphSpacing: 0, paragraphIndent: 0,
     constraints: { horizontal: "MIN", vertical: "MIN" },
     layoutMode: "NONE", itemSpacing: 0,
@@ -250,10 +250,16 @@ test("build carries rotation, per-corner radii, stroke shape and text formatting
       topLeftRadius: 12, topRightRadius: 0, bottomRightRadius: 8, bottomLeftRadius: 2,
       strokeCap: "ROUND", strokeJoin: "ROUND", strokeMiterLimit: 6,
       isMask: true, itemReverseZIndex: true, strokesIncludedInLayout: true,
+      layoutGrids: [{
+        pattern: "COLUMNS", count: 3, gutterSize: 8, offset: 4,
+        sectionSize: 96, alignment: "STRETCH", color: "#ff00001a",
+      }],
       children: [{
         type: "TEXT", name: "Label", text: "Hello",
         textCase: "UPPER", textDecoration: "UNDERLINE",
         paragraphSpacing: 6, paragraphIndent: 4,
+      }, {
+        type: "LINE", name: "Divider", length: 120, rotation: 30,
       }],
     },
   };
@@ -261,6 +267,7 @@ test("build carries rotation, per-corner radii, stroke shape and text formatting
   assert.equal(applied.verification.ok, true);
   const root = ctx.currentPage.children[0];
   const label = root.children[0];
+  const divider = root.children[1];
   assert.equal(root.rotation, 15);
   assert.equal(root.topLeftRadius, 12);
   assert.equal(root.topRightRadius, 0);
@@ -272,6 +279,14 @@ test("build carries rotation, per-corner radii, stroke shape and text formatting
   assert.equal(root.isMask, true);
   assert.equal(root.itemReverseZIndex, true);
   assert.equal(root.strokesIncludedInLayout, true);
+  assert.equal(root.layoutGrids.length, 1);
+  assert.equal(root.layoutGrids[0].pattern, "COLUMNS");
+  assert.equal(root.layoutGrids[0].count, 3);
+  assert.equal(root.layoutGrids[0].gutterSize, 8);
+  assert.equal(root.layoutGrids[0].alignment, "STRETCH");
+  assert.equal(divider.width, 120);
+  assert.equal(divider.height, 0);
+  assert.equal(divider.rotation, 30);
   assert.equal(label.textCase, "UPPER");
   assert.equal(label.textDecoration, "UNDERLINE");
   assert.equal(label.paragraphSpacing, 6);
@@ -280,6 +295,10 @@ test("build carries rotation, per-corner radii, stroke shape and text formatting
   assert.throws(
     () => normalizeTree({ type: "FRAME", strokeCap: "POINTY" }),
     /strokeCap/,
+  );
+  assert.throws(
+    () => normalizeTree({ type: "RECTANGLE", length: 10 }),
+    /only valid on LINE/,
   );
 });
 

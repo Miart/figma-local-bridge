@@ -51,6 +51,8 @@ const STROKE_CAPS = new Set(["NONE", "ROUND", "SQUARE", "ARROW_LINES", "ARROW_EQ
 const STROKE_JOINS = new Set(["MITER", "BEVEL", "ROUND"]);
 const TEXT_CASES = new Set(["ORIGINAL", "UPPER", "LOWER", "TITLE", "SMALL_CAPS", "SMALL_CAPS_FORCED"]);
 const TEXT_DECORATIONS = new Set(["NONE", "UNDERLINE", "STRIKETHROUGH"]);
+const GRID_PATTERNS = new Set(["COLUMNS", "ROWS", "GRID"]);
+const GRID_ALIGNMENTS = new Set(["MIN", "MAX", "CENTER", "STRETCH"]);
 
 type Json = any;
 
@@ -272,8 +274,14 @@ function validateNode(
   if (raw.visible !== undefined && typeof raw.visible !== "boolean") throw new Error(`${path}.visible must be boolean`);
   if (raw.opacity !== undefined) validateNumber(raw.opacity, `${path}.opacity`, { min: 0, max: 1 });
   if (raw.size !== undefined) out.spec.size = validateSize(raw.size, `${path}.size`);
+  if (raw.length !== undefined) {
+    if (type !== "LINE") throw new Error(`${path}.length is only valid on LINE; use size for other nodes`);
+    if (raw.size !== undefined) throw new Error(`${path}: LINE takes length or size, not both`);
+    out.spec.length = validateNumber(raw.length, `${path}.length`, { positive: true });
+  }
   if (raw.position !== undefined) out.spec.position = validatePoint(raw.position, `${path}.position`);
   if (raw.layout !== undefined) out.spec.layout = validateLayout(raw.layout, `${path}.layout`);
+  if (raw.layoutGrids !== undefined) out.spec.layoutGrids = layoutGridsFromSpec(raw.layoutGrids, `${path}.layoutGrids`);
   if (raw.rotation !== undefined) validateNumber(raw.rotation, `${path}.rotation`);
   if (raw.cornerRadius !== undefined) validateNumber(raw.cornerRadius, `${path}.cornerRadius`, { min: 0 });
   for (const corner of ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"]) {
@@ -1213,6 +1221,38 @@ function paintsFromSpec(ctx: any, value: any, res: Resources): any[] {
   return list.map((v) => paintFromSpec(ctx, v, res));
 }
 
+function layoutGridsFromSpec(value: any, path = "layoutGrids"): any[] {
+  if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
+  if (value.length > 32) throw new Error(`${path} has ${value.length} grids; the limit is 32`);
+  return value.map((g: any, i: number) => {
+    const at = `${path}[${i}]`;
+    if (!isObj(g)) throw new Error(`${at} must be an object`);
+    const pattern = String(g.pattern || "").toUpperCase();
+    if (!GRID_PATTERNS.has(pattern)) throw new Error(`${at}.pattern must be COLUMNS, ROWS or GRID`);
+    if (g.visible !== undefined && typeof g.visible !== "boolean") throw new Error(`${at}.visible must be boolean`);
+    const alignment = g.alignment === undefined ? "MIN" : String(g.alignment);
+    if (!GRID_ALIGNMENTS.has(alignment)) throw new Error(`${at}.alignment must be MIN, MAX, CENTER or STRETCH`);
+    const nums: Record<string, number> = {
+      gutterSize: g.gutterSize === undefined ? 20 : validateNumber(g.gutterSize, `${at}.gutterSize`, { min: 0 }),
+      offset: g.offset === undefined ? 0 : validateNumber(g.offset, `${at}.offset`, { min: 0 }),
+      count: g.count === undefined ? 5 : validateNumber(g.count, `${at}.count`, { positive: true }),
+      sectionSize: g.sectionSize === undefined ? (pattern === "GRID" ? 8 : 100) : validateNumber(g.sectionSize, `${at}.sectionSize`, { positive: true }),
+    };
+    if (!Number.isInteger(nums.count)) throw new Error(`${at}.count must be an integer`);
+    const color = parseColor(g.color === undefined ? "#ff00001a" : g.color);
+    return {
+      pattern,
+      visible: g.visible !== false,
+      color: { r: color.r, g: color.g, b: color.b, a: color.a },
+      alignment,
+      gutterSize: nums.gutterSize,
+      offset: nums.offset,
+      count: nums.count,
+      sectionSize: nums.sectionSize,
+    };
+  });
+}
+
 function effectsFromSpec(value: any): any[] {
   if (!Array.isArray(value)) throw new Error("effects must be an array");
   return value.map((e: any) => {
@@ -1365,6 +1405,7 @@ function applyCommonProps(node: any, spec: Json, res: Resources, ctx: any) {
     node.effects = effectsFromSpec(spec.effects);
   }
   if (spec.dashPattern !== undefined && "dashPattern" in node) node.dashPattern = spec.dashPattern;
+  if (spec.layoutGrids !== undefined && "layoutGrids" in node) node.layoutGrids = layoutGridsFromSpec(spec.layoutGrids);
   if (spec.isMask !== undefined && "isMask" in node) node.isMask = !!spec.isMask;
   if (spec.itemReverseZIndex !== undefined && "itemReverseZIndex" in node) node.itemReverseZIndex = !!spec.itemReverseZIndex;
   if (spec.strokesIncludedInLayout !== undefined && "strokesIncludedInLayout" in node) {
@@ -1515,6 +1556,7 @@ async function applyNode(
 
   applyCommonProps(node, spec, res, ctx);
   if (n.type === "TEXT") await applyTextProps(ctx, node, spec, res);
+  else if (n.type === "LINE" && spec.length !== undefined && "resize" in node) node.resize(Number(spec.length), 0);
   else if (spec.size !== undefined && "resize" in node) node.resize(Number(spec.size.width), Number(spec.size.height));
 
   if (n.type === "INSTANCE") {

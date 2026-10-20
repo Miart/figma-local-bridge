@@ -83,6 +83,19 @@ const layoutSchema = z
   })
   .passthrough();
 
+const layoutGridSchema = z
+  .object({
+    pattern: z.enum(["COLUMNS", "ROWS", "GRID"]),
+    visible: z.boolean().optional(),
+    color: z.string().optional().describe("A colour with optional alpha; default is 10% red"),
+    alignment: z.enum(["MIN", "MAX", "CENTER", "STRETCH"]).optional(),
+    gutterSize: z.number().min(0).optional(),
+    offset: z.number().min(0).optional(),
+    count: z.number().int().min(1).optional(),
+    sectionSize: z.number().positive().optional(),
+  })
+  .passthrough();
+
 /**
  * The IR node. Kept deliberately structural: every field here has a direct
  * Plugin API counterpart. Anything that would require an agent to fall back to
@@ -132,6 +145,7 @@ const buildNodeSchema: z.ZodType<any> = z.lazy(() =>
       isMask: z.boolean().optional(),
       itemReverseZIndex: z.boolean().optional(),
       strokesIncludedInLayout: z.boolean().optional(),
+      layoutGrids: z.array(layoutGridSchema).max(32).optional(),
       effects: z.array(z.any()).optional(),
       opacity: z.number().min(0).max(1).optional(),
       visible: z.boolean().optional(),
@@ -142,6 +156,7 @@ const buildNodeSchema: z.ZodType<any> = z.lazy(() =>
         .optional(),
 
       size: z.object({ width: z.number().positive(), height: z.number().positive() }).optional(),
+      length: z.number().positive().optional().describe("LINE only: width in pixels; the build creates a horizontal line and rotation angles it"),
       position: z.object({ x: z.number(), y: z.number() }).optional(),
       layout: layoutSchema.optional(),
 

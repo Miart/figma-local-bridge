@@ -214,6 +214,35 @@ function effectsFor(node: any, warnings: string[], path: string): any[] | undefi
   return out;
 }
 
+function gridsFor(node: any, warnings: string[], path: string): any[] | undefined {
+  if (!Array.isArray(node.layoutGrids) || !node.layoutGrids.length) return undefined;
+  const out: any[] = [];
+  for (let i = 0; i < node.layoutGrids.length; i++) {
+    const g = node.layoutGrids[i];
+    const pattern = String(g && g.pattern || "").toUpperCase();
+    if (!g || !["COLUMNS", "ROWS", "GRID"].includes(pattern)) {
+      warnings.push(`${path}.layoutGrids[${i}]: pattern "${g && g.pattern}" is not representable and was omitted`);
+      continue;
+    }
+    const color = hex(g.color);
+    if (!color) {
+      warnings.push(`${path}.layoutGrids[${i}]: colour is unreadable and was omitted`);
+      continue;
+    }
+    out.push({
+      pattern,
+      visible: g.visible !== false,
+      color,
+      alignment: g.alignment || "MIN",
+      gutterSize: round(Number(g.gutterSize || 0)),
+      offset: round(Number(g.offset || 0)),
+      count: Math.max(1, Math.round(Number(g.count || 1))),
+      sectionSize: round(Number(g.sectionSize || 1)),
+    });
+  }
+  return out.length ? out : undefined;
+}
+
 function containerLayout(node: any): Json | undefined {
   if (!("layoutMode" in node)) return undefined;
   const out: Json = { mode: node.layoutMode || "NONE" };
@@ -379,12 +408,15 @@ async function exportNode(
 
   if (Math.abs(Number(node.rotation) || 0) > 0.01) spec.rotation = round(Number(node.rotation));
   if (node.type === "LINE") {
-    state.warnings.push(`${path}: LINE length is not representable; the build creates a default-length line (rotation is kept)`);
+    if (Number(node.width) > 0) spec.length = round(Number(node.width));
+    else state.warnings.push(`${path}: LINE has no positive width, so its length is not representable`);
+    if (Math.abs(Number(node.height) || 0) > 0.01) {
+      state.warnings.push(`${path}: LINE has a non-zero height ${round(Number(node.height))}; only a straight line is representable`);
+    }
   }
   if (node.isMask === true) spec.isMask = true;
-  if (Array.isArray(node.layoutGrids) && node.layoutGrids.length) {
-    state.warnings.push(`${path}: layoutGrids are not representable and were omitted`);
-  }
+  const grids = gridsFor(node, state.warnings, path);
+  if (grids) spec.layoutGrids = grids;
   if (node.itemReverseZIndex === true) spec.itemReverseZIndex = true;
   if (node.strokesIncludedInLayout === true) spec.strokesIncludedInLayout = true;
 

@@ -48,6 +48,7 @@ function node(type, opts = {}) {
     isMask: opts.isMask === true,
     itemReverseZIndex: opts.itemReverseZIndex === true,
     strokesIncludedInLayout: opts.strokesIncludedInLayout === true,
+    layoutGrids: opts.layoutGrids || [],
     cornerSmoothing: opts.cornerSmoothing || 0,
     constraints: opts.constraints || { horizontal: "MIN", vertical: "MIN" },
     layoutMode: opts.layoutMode || "NONE",
@@ -198,6 +199,32 @@ test("exports a keyed card with styles, text and auto layout", async () => {
   const normalized = normalizeTree(report.spec);
   assert.equal(normalized.nodes, 3);
   assert.deepEqual(normalized.keys, ["card", "bg", "title"]);
+});
+
+test("layout grids and line length survive the round trip", async () => {
+  const line = node("LINE", { name: "Rule", width: 120, height: 0, rotation: 30 });
+  const frame = node("FRAME", {
+    name: "Gridded", width: 360, height: 200,
+    layoutGrids: [{
+      pattern: "COLUMNS", visible: true,
+      color: { r: 1, g: 0, b: 0, a: 0.1 },
+      alignment: "STRETCH", gutterSize: 8, offset: 4, count: 3, sectionSize: 96,
+    }],
+    children: [line],
+  });
+
+  const report = await runExportSpec(makeCtx(), { nodeId: frame.id });
+  assert.equal(report.spec.layoutGrids[0].pattern, "COLUMNS");
+  assert.equal(report.spec.layoutGrids[0].color, "#ff00001a");
+  assert.equal(report.spec.layoutGrids[0].count, 3);
+  assert.equal(report.spec.layoutGrids[0].sectionSize, 96);
+  assert.equal(report.spec.children[0].length, 120);
+  assert.equal(report.spec.children[0].rotation, 30);
+  assert.equal(report.spec.children[0].size, undefined);
+  assert.equal(report.warnings.some((w) => w.includes("LINE length")), false);
+
+  const normalized = normalizeTree(report.spec);
+  assert.equal(normalized.nodes, 2);
 });
 
 test("variables, derived keys and unsupported nodes are named", async () => {

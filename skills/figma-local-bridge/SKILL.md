@@ -73,7 +73,8 @@ half a design applied.
   duplicates. `prune:true` makes the tree exact by deleting keyed children the
   spec no longer contains; protected nodes are skipped and reported. The tree
   also carries rotation (degrees), per-corner radii, stroke cap/join/miter,
-  masks, layout inclusion flags, and text case/decoration/paragraph spacing.
+  masks, layout grids, layout inclusion flags, text case/decoration/paragraph
+  spacing, and an exact `LINE` length.
 - `figma_patch` takes a sparse tree under `rootNodeId`, `buildId` or
   `rootKey`. Children match by key. A missing key is refused unless
   `allowCreate:true`; a key under the wrong parent is refused rather than
