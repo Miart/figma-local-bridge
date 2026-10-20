@@ -36,7 +36,7 @@ export const MAX_DEPTH = 40;
  * it travels with the data instead of living only in this file.
  */
 export const LIMITATIONS: readonly string[] = [
-  "instance interiors are not captured: a restored INSTANCE shows its main component's current content (component properties are re-applied)",
+  "instance interiors and their direct overrides are not captured: a restored INSTANCE shows its main component's current content (component properties are re-applied)",
   "text runs are rebuilt (font, size, fills, text/fill style links, variable bindings, case, decoration, line height, letter spacing and hyperlink)",
   "style ids are re-linked when the style still exists; node-level and run-level variable bindings and explicit modes are re-linked when their variable, collection and mode still exist, and every missing link is reported",
   "a restored COMPONENT is a NEW component: the checkpoint's key, id and instances do not come back",

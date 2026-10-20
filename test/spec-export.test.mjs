@@ -110,6 +110,7 @@ function node(type, opts = {}) {
   if (type === "INSTANCE") {
     p.main = opts.main || null;
     p.componentProperties = opts.componentProperties || {};
+    p.overrides = opts.overrides || [];
     p.getMainComponentAsync = async () => p.main;
   }
   for (const child of p.children) child.parent = p;
@@ -464,8 +465,81 @@ test("an instance carries its main component and properties, but not its interio
   assert.deepEqual(report.spec.position, { x: 10, y: 20 });
   assert.equal(report.spec.opacity, 0.5);
   assert.equal(report.spec.children, undefined);
-  assert.ok(report.warnings.some((w) => /instance interiors/.test(w)));
+  assert.equal(report.spec.overrides, undefined);
+  assert.ok(!report.warnings.some((w) => /instance interiors/.test(w)));
   assert.ok(report.warnings.some((w) => /property "Icon"/.test(w)));
+});
+
+test("direct instance overrides export as structural paths", async () => {
+  const main = {
+    id: "1:2", key: "component-key", name: "Button",
+    children: [{ name: "Label", children: [] }, { name: "Icon", children: [] }],
+  };
+  const solid = (r, g, b) => [{ type: "SOLID", color: { r, g, b }, opacity: 1 }];
+  const label = node("TEXT", {
+    name: "Label", characters: "Play", fontSize: 16,
+    fontName: { family: "Inter", style: "Bold" },
+    hyperlink: { type: "URL", value: "https://example.com/play" },
+    fills: solid(0, 0, 1),
+  });
+  const icon = node("RECTANGLE", {
+    name: "Icon", width: 24, height: 24, visible: false, opacity: 0.4,
+    fills: solid(1, 0, 0),
+  });
+  const inst = node("INSTANCE", {
+    name: "Play button", main, children: [label, icon],
+    overrides: [
+      { id: label.id, overriddenFields: ["characters", "fontSize", "fontName", "hyperlink"] },
+      { id: icon.id, overriddenFields: ["visible", "opacity", "fills", "width", "height"] },
+    ],
+  });
+  const report = await runExportSpec(makeCtx(), { nodeId: inst.id });
+  assert.deepEqual(report.spec.overrides.Label.path, [{ name: "Label", index: 0 }]);
+  assert.equal(report.spec.overrides.Label.text, "Play");
+  assert.equal(report.spec.overrides.Label.fontSize, 16);
+  assert.deepEqual(report.spec.overrides.Label.font, { family: "Inter", style: "Bold" });
+  assert.equal(report.spec.overrides.Label.hyperlink.value, "https://example.com/play");
+  assert.deepEqual(report.spec.overrides.Icon.path, [{ name: "Icon", index: 1 }]);
+  assert.equal(report.spec.overrides.Icon.visible, false);
+  assert.equal(report.spec.overrides.Icon.opacity, 0.4);
+  assert.deepEqual(report.spec.overrides.Icon.size, { width: 24, height: 24 });
+  assert.equal(report.spec.overrides.Icon.fills[0].color, "#ff0000");
+  assert.ok(!report.warnings.some((w) => /instance interiors/.test(w)));
+});
+
+test("an override path uses the main component's layer names, not the rename", async () => {
+  const main = { id: "1:2", key: "component-key", name: "Button", children: [{ name: "Label", children: [] }] };
+  const label = node("TEXT", { name: "Renamed label", characters: "Play" });
+  const inst = node("INSTANCE", {
+    name: "Button", main, children: [label],
+    overrides: [{ id: label.id, overriddenFields: ["name", "characters"] }],
+  });
+  const report = await runExportSpec(makeCtx(), { nodeId: inst.id });
+  assert.deepEqual(report.spec.overrides["Renamed label"].path, [{ name: "Label", index: 0 }]);
+  assert.equal(report.spec.overrides["Renamed label"].name, "Renamed label");
+  assert.equal(report.spec.overrides["Renamed label"].text, "Play");
+});
+
+test("duplicate instance layer names keep distinct paths, and unsupported fields are named", async () => {
+  const main = {
+    id: "1:2", key: "component-key", name: "List",
+    children: [{ name: "Label", children: [] }, { name: "Label", children: [] }],
+  };
+  const first = node("TEXT", { name: "Label", characters: "A" });
+  const second = node("TEXT", { name: "Label", characters: "B" });
+  const inst = node("INSTANCE", {
+    name: "List", main, children: [first, second],
+    overrides: [
+      { id: first.id, overriddenFields: ["characters"] },
+      { id: second.id, overriddenFields: ["characters", "reactions"] },
+    ],
+  });
+  const report = await runExportSpec(makeCtx(), { nodeId: inst.id });
+  assert.deepEqual(report.spec.overrides.Label.path, [{ name: "Label", index: 0 }]);
+  assert.equal(report.spec.overrides.Label.text, "A");
+  assert.deepEqual(report.spec.overrides["Label#2"].path, [{ name: "Label", index: 1 }]);
+  assert.equal(report.spec.overrides["Label#2"].text, "B");
+  assert.ok(report.warnings.some((w) => /reactions/.test(w) && /cannot represent/.test(w)));
 });
 
 test("a detached instance is skipped, not exported as a fake instance", async () => {

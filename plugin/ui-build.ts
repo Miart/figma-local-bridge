@@ -678,6 +678,55 @@ async function resolveVariables(ctx: any, res: Resources) {
   }
 }
 
+function collectOverrideResources(
+  res: Resources,
+  overrides: Json,
+  key: string,
+  textStyles: any[],
+  paintStyles: any[],
+  effectStyles: any[],
+): void {
+  for (const [name, value] of Object.entries(overrides || {}) as Array<[string, any]>) {
+    if (!isObj(value)) continue;
+    const at = `${key}.overrides["${name}"]`;
+    if (value.font !== undefined) addFont(res, value.font, `${at}.font`);
+    if (value.textStyle !== undefined && value.textStyle !== null) {
+      const ref = String(value.textStyle);
+      const st = findStyle(textStyles, ref);
+      if (!st) res.blocking.push(`${at}: text style "${ref}" not found`);
+      else {
+        res.textStyles.set(ref, st);
+        addFont(res, st.fontName, `${at} text style "${st.name}"`);
+        if (!res.styleNames.text.includes(st.name)) res.styleNames.text.push(st.name);
+      }
+    }
+    for (const field of ["fillStyle", "strokeStyle"] as const) {
+      if (value[field] === undefined || value[field] === null) continue;
+      const ref = String(value[field]);
+      const st = findStyle(paintStyles, ref, "paint");
+      if (!st) res.blocking.push(`${at}: paint style "${ref}" not found`);
+      else {
+        res.paintStyles.set(ref, st);
+        if (!res.styleNames.paint.includes(st.name)) res.styleNames.paint.push(st.name);
+      }
+    }
+    if (value.effectStyle !== undefined && value.effectStyle !== null) {
+      const ref = String(value.effectStyle);
+      const st = findStyle(effectStyles, ref, "effect");
+      if (!st) res.blocking.push(`${at}: effect style "${ref}" not found`);
+      else {
+        res.effectStyles.set(ref, st);
+        if (!res.styleNames.effect.includes(st.name)) res.styleNames.effect.push(st.name);
+      }
+    }
+    collectPaints(res, value.fills, `${at}.fills`);
+    collectPaints(res, value.strokes, `${at}.strokes`);
+    if (value.text !== undefined) {
+      res.warnings.push(`${at}: text override; its font is loaded when the instance exists`);
+    }
+  }
+}
+
 async function collectResources(ctx: any, root: NormalizedNode): Promise<Resources> {
   const res = resourceMap();
   const textStyles = await loadStyleList(ctx, "text");
@@ -764,12 +813,7 @@ async function collectResources(ctx: any, root: NormalizedNode): Promise<Resourc
     collectPaints(res, s.fills, `${n.key}.fills`);
     collectPaints(res, s.strokes, `${n.key}.strokes`);
     if (n.type === "INSTANCE" && s.overrides && isObj(s.overrides)) {
-      for (const name of Object.keys(s.overrides)) {
-        const o = s.overrides[name];
-        if (isObj(o) && o.text !== undefined) {
-          res.warnings.push(`${n.key}: override "${name}" sets text; its font is loaded when the instance exists`);
-        }
-      }
+      collectOverrideResources(res, s.overrides, n.key, textStyles, paintStyles, effectStyles);
     }
     if (s.componentId || s.componentKey || s.componentName || s.componentSetKey) {
       res.componentRefs.push({
@@ -1770,41 +1814,151 @@ function componentPropsValid(node: any, props: Json): string[] {
   return bad;
 }
 
-async function applyOverrides(ctx: any, instance: any, overrides: Json, res: Resources, warnings: string[]) {
+function overridePathTarget(instance: any, path: any, at: string, warnings: string[]): any | null {
+  if (!Array.isArray(path) || !path.length) {
+    warnings.push(`${at}.path must be a non-empty array of {name,index} steps`);
+    return null;
+  }
+  let node = instance;
+  for (let i = 0; i < path.length; i++) {
+    const step = path[i];
+    let index: number;
+    let expected: string | null = null;
+    if (typeof step === "number") {
+      index = step;
+    } else if (isObj(step) && Number.isInteger(step.index)) {
+      index = step.index;
+      if (step.name !== undefined) expected = String(step.name);
+    } else {
+      warnings.push(`${at}.path[${i}] must be {name,index} or an index`);
+      return null;
+    }
+    const child = (node.children || [])[index];
+    if (!child) {
+      warnings.push(`${at}.path[${i}]: no child at index ${index}`);
+      return null;
+    }
+    if (expected !== null && String(child.name) !== expected) {
+      warnings.push(`${at}.path[${i}]: expected "${expected}" at index ${index}, found "${child.name}"`);
+      return null;
+    }
+    node = child;
+  }
+  if (node === instance) {
+    warnings.push(`${at}.path must name a layer inside the instance`);
+    return null;
+  }
+  return node;
+}
+
+async function loadTargetFont(ctx: any, target: any): Promise<void> {
+  if (target.fontName && target.fontName !== ctx.mixed) {
+    await ctx.loadFontAsync(target.fontName);
+    return;
+  }
+  if (typeof target.getRangeAllFontNames === "function") {
+    const len = typeof target.characters === "string" ? target.characters.length : 0;
+    if (len > 0) for (const f of target.getRangeAllFontNames(0, len) || []) await ctx.loadFontAsync(f);
+  }
+}
+
+async function applyOverrides(ctx: any, instance: any, overrides: Json, res: Resources, warnings: string[], where: string) {
   for (const name of Object.keys(overrides || {})) {
     const override = overrides[name];
+    const at = `${where}.overrides["${name}"]`;
     if (!isObj(override)) {
-      warnings.push(`override "${name}" is not an object; skipped`);
+      warnings.push(`${at} is not an object; skipped`);
       continue;
     }
     let target: any = null;
-    try {
-      target = instance.findOne((n: any) => n.name === name || n.getPluginData(KEY_DATA) === name);
-    } catch {
-      target = null;
+    if (override.path !== undefined) {
+      target = overridePathTarget(instance, override.path, at, warnings);
+    } else {
+      try {
+        target = instance.findOne((n: any) => n.name === name || n.getPluginData(KEY_DATA) === name);
+      } catch {
+        target = null;
+      }
+      if (!target) warnings.push(`${at}: no layer with that name or key inside the instance`);
     }
-    if (!target) {
-      warnings.push(`override "${name}": no layer with that name or key inside the instance`);
-      continue;
+    if (!target) continue;
+
+    // Style links first: a literal value in the same override is the more
+    // specific statement and must survive the style assignment.
+    if (override.textStyle !== undefined && target.type === "TEXT") {
+      const st = override.textStyle === null ? null : res.textStyles.get(String(override.textStyle));
+      if (override.textStyle !== null && !st) warnings.push(`${at}.textStyle: text style "${override.textStyle}" was not resolved`);
+      else {
+        if (st && st.fontName) await ctx.loadFontAsync(st.fontName);
+        if ("textStyleId" in target) target.textStyleId = st ? st.id : "";
+      }
     }
+    for (const [field, map] of [["fillStyle", res.paintStyles], ["strokeStyle", res.paintStyles], ["effectStyle", res.effectStyles]] as const) {
+      if (override[field] === undefined || !(field.replace("Style", "StyleId") in target)) continue;
+      const style = override[field] === null ? null : (map as Map<string, any>).get(String(override[field]));
+      if (override[field] !== null && !style) {
+        warnings.push(`${at}.${field}: style "${override[field]}" was not resolved`);
+        continue;
+      }
+      const idField = field.replace("Style", "StyleId");
+      target[idField] = style ? style.id : "";
+    }
+
+    if (override.name !== undefined && "name" in target) target.name = String(override.name);
     if (override.visible !== undefined) target.visible = !!override.visible;
+    if (override.locked !== undefined && "locked" in target) target.locked = !!override.locked;
     if (override.opacity !== undefined) target.opacity = Number(override.opacity);
+    if (override.blendMode !== undefined && "blendMode" in target) target.blendMode = String(override.blendMode);
+    if (override.rotation !== undefined && "rotation" in target) target.rotation = Number(override.rotation);
+    if (override.cornerRadius !== undefined && "cornerRadius" in target) target.cornerRadius = Number(override.cornerRadius);
+    for (const corner of ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"]) {
+      if (override[corner] !== undefined && corner in target) target[corner] = Number(override[corner]);
+    }
+    if (override.strokeWeight !== undefined && "strokeWeight" in target) target.strokeWeight = Number(override.strokeWeight);
     if (override.fills !== undefined && "fills" in target) target.fills = paintsFromSpec(ctx, override.fills, res);
     if (override.strokes !== undefined && "strokes" in target) target.strokes = paintsFromSpec(ctx, override.strokes, res);
-    if (override.text !== undefined && target.type === "TEXT") {
-      if (target.fontName && target.fontName !== ctx.mixed) await ctx.loadFontAsync(target.fontName);
-      else if (typeof target.getRangeAllFontNames === "function") {
-        const len = typeof target.characters === "string" ? target.characters.length : 0;
-        if (len > 0) for (const f of target.getRangeAllFontNames(0, len) || []) await ctx.loadFontAsync(f);
+    if (override.effects !== undefined && "effects" in target) target.effects = effectsFromSpec(override.effects);
+
+    if (target.type === "TEXT") {
+      if (override.font !== undefined) {
+        const font = fontSpec(override.font);
+        if (!font) warnings.push(`${at}.font: cannot parse ${JSON.stringify(override.font)}`);
+        else {
+          await ctx.loadFontAsync(font);
+          target.fontName = font;
+        }
       }
-      target.characters = String(override.text);
-    }
-    if (override.fontSize !== undefined && target.type === "TEXT") target.fontSize = Number(override.fontSize);
-    if (override.hyperlink !== undefined && target.type === "TEXT") {
-      target.hyperlink = hyperlinkFromSpec(override.hyperlink, `override "${name}".hyperlink`);
+      if (override.text !== undefined) {
+        await loadTargetFont(ctx, target);
+        target.characters = String(override.text);
+      }
+      if (override.fontSize !== undefined) target.fontSize = Number(override.fontSize);
+      if (override.textCase !== undefined) target.textCase = String(override.textCase);
+      if (override.textDecoration !== undefined) target.textDecoration = String(override.textDecoration);
+      if (override.lineHeight !== undefined) {
+        target.lineHeight = typeof override.lineHeight === "number"
+          ? { unit: "PIXELS", value: Number(override.lineHeight) }
+          : override.lineHeight;
+      }
+      if (override.letterSpacing !== undefined) {
+        target.letterSpacing = typeof override.letterSpacing === "number"
+          ? { unit: "PIXELS", value: Number(override.letterSpacing) }
+          : override.letterSpacing;
+      }
+      if (override.paragraphSpacing !== undefined) target.paragraphSpacing = Number(override.paragraphSpacing);
+      if (override.paragraphIndent !== undefined) target.paragraphIndent = Number(override.paragraphIndent);
+      if (override.textAlignHorizontal !== undefined) target.textAlignHorizontal = String(override.textAlignHorizontal);
+      if (override.textAlignVertical !== undefined) target.textAlignVertical = String(override.textAlignVertical);
+      if (override.textAutoResize !== undefined) target.textAutoResize = String(override.textAutoResize);
+      if (override.hyperlink !== undefined) {
+        target.hyperlink = hyperlinkFromSpec(override.hyperlink, `${at}.hyperlink`);
+      }
     }
     if (override.size !== undefined && "resize" in target) {
-      target.resize(Number(override.size.width), Number(override.size.height));
+      const width = Number(override.size.width);
+      const height = Number(override.size.height);
+      if (!Number.isFinite(width) || !Number.isFinite(height)) warnings.push(`${at}.size must carry numeric width and height`);
+      else target.resize(width, height);
     }
   }
 }
@@ -1879,7 +2033,7 @@ async function applyNode(
       }
       node.setProperties(spec.properties);
     }
-    if (spec.overrides !== undefined) await applyOverrides(ctx, node, spec.overrides, res, opts.warnings);
+    if (spec.overrides !== undefined) await applyOverrides(ctx, node, spec.overrides, res, opts.warnings, n.key);
   }
 
   if (spec.layout !== undefined) applyChildLayout(node, spec.layout);

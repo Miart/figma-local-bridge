@@ -28,6 +28,7 @@ function makeCtx({ textStyles = [], paintStyles = [], localVariables = [] } = {}
     id: nextId(), type, name: type, x: 0, y: 0, width: 100, height: 100,
     opacity: 1, blendMode: "NORMAL", visible: true, locked: false, rotation: 0,
     fills: [], strokes: [], strokeWeight: 1, strokeAlign: "INSIDE", strokeDashes: [],
+    fillStyleId: "", strokeStyleId: "", effectStyleId: "", textStyleId: "",
     strokeCap: "NONE", strokeJoin: "MITER", strokeMiterLimit: 4,
     cornerRadius: 0, topLeftRadius: 0, topRightRadius: 0, bottomRightRadius: 0, bottomLeftRadius: 0,
     isMask: false, itemReverseZIndex: false, strokesIncludedInLayout: false, effects: [], layoutGrids: [],
@@ -114,6 +115,16 @@ function makeCtx({ textStyles = [], paintStyles = [], localVariables = [] } = {}
       return out;
     },
     getMainComponentAsync() { return Promise.resolve(this.mainComponent || null); },
+    createInstance() {
+      const inst = defaults("INSTANCE");
+      inst.name = this.name;
+      inst.width = this.width;
+      inst.height = this.height;
+      inst.mainComponent = this;
+      byId.set(inst.id, inst);
+      for (const child of this.children || []) inst.appendChild(child.clone());
+      return inst;
+    },
     setProperties(props) { this.properties = { ...(this.properties || {}), ...props }; },
     getRangeAllFontNames() { return this.fontName ? [this.fontName] : []; },
     setRangeFontName(start, end, value) { (this.rangeOps ||= []).push({ field: "font", start, end, value }); },
@@ -421,6 +432,71 @@ test("a text variable of the wrong type blocks the build before writing", async 
   assert.equal(plan.status, "blocked");
   assert.match(plan.blocking.join(" "), /COLOR.*FLOAT/);
   assert.equal(ctx.metrics.undos, 0);
+});
+
+test("instance overrides resolve by path and apply styles, literals and size", async () => {
+  const ctx = makeCtx({
+    textStyles: [{ id: "S:text", name: "body/label", fontName: { family: "Inter", style: "Bold" } }],
+    paintStyles: [{ id: "S:paint", name: "brand/red", paints: [] }],
+  });
+  const comp = ctx.createComponent();
+  comp.name = "Button";
+  comp.resize(200, 60);
+  const label = ctx.createText();
+  label.name = "Label";
+  label.characters = "Main";
+  comp.appendChild(label);
+  const icon = ctx.createRectangle();
+  icon.name = "Icon";
+  comp.appendChild(icon);
+
+  const spec = {
+    buildId: "instance-overrides",
+    root: {
+      type: "INSTANCE", key: "button", name: "Button", componentId: comp.id,
+      overrides: {
+        Label: {
+          path: [{ name: "Label", index: 0 }],
+          textStyle: "body/label", fillStyle: "brand/red",
+          text: "Play", fontSize: 22,
+          hyperlink: { type: "URL", value: "https://example.com/play" },
+        },
+        Icon: {
+          path: [{ name: "Icon", index: 1 }],
+          visible: false, opacity: 0.4, size: { width: 30, height: 30 },
+          rotation: 10, cornerRadius: 4, strokeWeight: 2,
+        },
+        Stale: {
+          path: [{ name: "Gone", index: 0 }],
+          text: "this must not land",
+        },
+      },
+    },
+  };
+
+  const dry = await runBuild(ctx, { ...spec, dryRun: true });
+  assert.equal(dry.status, "dry_run");
+  assert.deepEqual(dry.fonts, ["Inter/Bold"]);
+
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.status, "applied");
+  assert.equal(applied.verification.ok, true);
+  const instance = ctx.currentPage.children[0];
+  const buttonLabel = instance.children[0];
+  assert.equal(buttonLabel.characters, "Play");
+  assert.equal(buttonLabel.fontSize, 22);
+  assert.equal(buttonLabel.textStyleId, "S:text");
+  assert.equal(buttonLabel.fillStyleId, "S:paint");
+  assert.equal(buttonLabel.hyperlink.value, "https://example.com/play");
+  const buttonIcon = instance.children[1];
+  assert.equal(buttonIcon.visible, false);
+  assert.equal(buttonIcon.opacity, 0.4);
+  assert.equal(buttonIcon.width, 30);
+  assert.equal(buttonIcon.height, 30);
+  assert.equal(buttonIcon.rotation, 10);
+  assert.equal(buttonIcon.cornerRadius, 4);
+  assert.equal(buttonIcon.strokeWeight, 2);
+  assert.ok(applied.warnings.some((w) => /expected "Gone" at index 0, found "Label"/.test(w)));
 });
 
 test("build carries rotation, per-corner radii, stroke shape and text formatting", async () => {

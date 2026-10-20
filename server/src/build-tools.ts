@@ -210,7 +210,7 @@ const buildNodeSchema: z.ZodType<any> = z.lazy(() =>
       componentName: z.string().optional().describe("Exact local component name; ambiguous names are refused"),
       componentSetKey: z.string().optional(),
       properties: z.record(z.union([z.string(), z.boolean()])).optional().describe("Instance component properties / variants"),
-      overrides: z.record(z.any()).optional().describe("Map of layer name or key -> {text, visible, opacity, fills, strokes, fontSize, hyperlink, size}"),
+      overrides: z.record(z.any()).optional().describe("Map of layer name or key -> override, or an override with a path: [{name,index}, ...]. Fields: text, font, fontSize, textStyle, textCase, textDecoration, lineHeight, letterSpacing, paragraphSpacing, paragraphIndent, textAlignHorizontal/Vertical, textAutoResize, hyperlink, fills, strokes, fillStyle, strokeStyle, effectStyle, effects, visible, locked, opacity, blendMode, rotation, cornerRadius and per-corner radii, strokeWeight, size, name"),
 
       svg: z.string().optional(),
       protected: z.boolean().optional().describe("Refuse prune deletion of this node"),

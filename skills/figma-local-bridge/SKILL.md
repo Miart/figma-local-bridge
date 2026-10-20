@@ -111,6 +111,15 @@ characters it is about to write. `figma_batch_edit`'s `set_text` still sets one
 font per op; use `figma_build` / `figma_patch` for per-range styling and
 bindings.
 
+An INSTANCE's `overrides` map changes layers inside the instance without
+detaching it. The map key is a layer name or build key; when names repeat, give
+the override a `path: [{name, index}, ...]` and use any unique label as the
+key. Fields cover text, font and size, text style and formatting, hyperlink,
+fills/strokes and their styles, effects and effect style, visibility, opacity,
+blend mode, rotation, corner radii, stroke weight, size and name. A path is
+resolved against the recreated instance before writing; a stale name or index
+is a warning and that override is skipped, never applied to a guessed layer.
+
 The safe sequence for all three:
 
 1. Call with `dryRun:true` (the default). Read the plan, `planId`,
@@ -133,11 +142,14 @@ style/variable links into `fillStyle`/`strokeStyle`/`textStyle`/`effectStyle`,
 `variable` or `textVariable`. URL text links travel in the spec; a NODE link is
 exported with a file-local warning. Mixed text becomes a base style plus
 ordered `runs`, so mixed fonts, sizes, text/fill style links, text variable
-bindings, case, decoration, spacing and links survive a rebuild. Read
-`unsupported` and `warnings` before building it: an SVG source, a detached
-instance, an instance interior or a paint the spec cannot express has no exact
-representation. `truncated: true` means the spec is incomplete and must not be
-built as-is.
+bindings, case, decoration, spacing and links survive a rebuild. Direct
+instance overrides become `overrides` entries with structural paths built from
+the main component's layer names, so a renamed layer still resolves; the
+instance interior itself is recreated from the main component, not carried in
+the spec. Read `unsupported` and `warnings` before building it: an SVG source,
+a detached instance, an override field the build cannot express or a paint the
+spec cannot express has no exact representation. `truncated: true` means the
+spec is incomplete and must not be built as-is.
 
 ## Finding things, and checking the result
 
@@ -333,8 +345,9 @@ saved undo step. `figma_checkpoint` is a description plus a rebuild:
 
 - `action: "save"` records a subtree as data (`nodeId`; a page is refused) into
   one JSON file per file key. The reply carries a `summary` and the
-  `limitations` a rebuild cannot carry — instance interiors and component
-  identity. Read them before telling anyone the subtree will come back exactly.
+  `limitations` a rebuild cannot carry — instance interiors (including their
+  overrides) and component identity. Read them before telling anyone the
+  subtree will come back exactly.
 - `action: "show"` diffs the live subtree against the file field by field and
   reports the semantic fingerprint next to it. That is how "has this drifted
   already?" gets answered before a rebuild is chosen.

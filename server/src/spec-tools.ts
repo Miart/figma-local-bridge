@@ -22,7 +22,7 @@ export function registerSpecTools(server: McpServer, client: FigmaClient) {
   server.tool(
     "figma_export_build_spec",
     "Turn a live subtree into a figma_build spec. Keys that are already stored are kept; nodes without one get the same derived key the build engine would choose. Fills, strokes and effects use styles or variables when the node is linked to them, and plain values otherwise; rotation, per-corner radii, stroke shape, layout grids, LINE length and text formatting are carried. " +
-      "The reply is deliberately lossy and says where: unsupported node types, SVG source that the Plugin API cannot read, instance interiors, mixed fonts and unrepresentable paints are listed under unsupported/warnings. " +
+      "The reply is deliberately lossy and says where: unsupported node types, SVG source that the Plugin API cannot read, mixed fonts and unrepresentable paints are listed under unsupported/warnings, and direct instance overrides travel as paths plus the fields a rebuild can express while unsupported override fields are named. " +
       "Read-only; never modifies the file. A truncated export is marked truncated and must not be built as-is.",
     {
       nodeId: figmaNodeId().optional().describe("Subtree root; defaults to the single selected node"),

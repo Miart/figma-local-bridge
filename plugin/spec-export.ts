@@ -397,6 +397,264 @@ async function textRunsFor(
   return runs;
 }
 
+function instanceDescendants(root: any): Map<string, any> {
+  const out = new Map<string, any>();
+  const walk = (node: any) => {
+    for (const child of node.children || []) {
+      if (!child || typeof child.id !== "string") continue;
+      out.set(child.id, child);
+      walk(child);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+function overridePathFrom(instance: any, target: any, main: any): any[] | null {
+  const nodes: any[] = [];
+  let node = target;
+  while (node && node !== instance) {
+    const parent = node.parent;
+    if (!parent) return null;
+    nodes.unshift(node);
+    node = parent;
+  }
+  if (node !== instance || !nodes.length) return null;
+
+  // Names come from the main component, not from the instance: renaming a layer
+  // inside an instance is itself an override, and a path that used the new name
+  // would not match the layer the rebuild creates from the main component.
+  const path: any[] = [];
+  let base = main;
+  for (const step of nodes) {
+    const parent = step.parent;
+    const index = (parent.children || []).indexOf(step);
+    if (index < 0) return null;
+    const baseChild = base && Array.isArray(base.children) ? base.children[index] : null;
+    const name = baseChild && typeof baseChild.name === "string" ? baseChild.name : "";
+    path.push(name ? { name, index } : { index });
+    base = baseChild || null;
+  }
+  return path;
+}
+
+/**
+ * A build spec cannot contain an instance's interior, but it can say which
+ * layers the instance overrides. Only direct overrides are exposed by the API;
+ * each one is exported as a structural path plus the fields the rebuild can
+ * express. Anything else is named instead of silently rebuilding the default.
+ */
+async function instanceOverridesFor(ctx: any, instance: any, main: any, state: Json, path: string): Promise<Json | undefined> {
+  const entries = Array.isArray(instance.overrides) ? instance.overrides : [];
+  if (!entries.length) return undefined;
+  const descendants = instanceDescendants(instance);
+  const overrides: Json = {};
+  for (const entry of entries) {
+    if (!isObj(entry) || typeof entry.id !== "string") {
+      state.warnings.push(`${path}: an instance override entry has no node id and was skipped`);
+      continue;
+    }
+    const target = descendants.get(entry.id);
+    if (!target) {
+      state.warnings.push(`${path}: override target ${entry.id} is not inside this instance; skipped`);
+      continue;
+    }
+    const steps = overridePathFrom(instance, target, main);
+    if (!steps) {
+      state.warnings.push(`${path}: override target "${target.name}" is not reachable from this instance; skipped`);
+      continue;
+    }
+    const at = `${path}: instance override on "${target.name}"`;
+    const out: Json = { path: steps };
+    const unsupported: string[] = [];
+    const wants = { fills: false, strokes: false, effects: false, size: false };
+    const fields: string[] = Array.isArray(entry.overriddenFields)
+      ? [...new Set((entry.overriddenFields as any[]).map((field) => String(field)))]
+      : [];
+
+    for (const field of fields) {
+      switch (field) {
+        case "name":
+          if (typeof target.name === "string") out.name = target.name;
+          else unsupported.push(field);
+          break;
+        case "characters":
+          if (target.type === "TEXT" && typeof target.characters === "string") out.text = target.characters;
+          else unsupported.push(field);
+          break;
+        case "fontName": {
+          const font = compactFont(target.fontName);
+          if (font) out.font = font;
+          else unsupported.push(field);
+          break;
+        }
+        case "fontSize":
+          if (Number.isFinite(Number(target.fontSize))) out.fontSize = round(Number(target.fontSize));
+          else unsupported.push(field);
+          break;
+        case "textCase":
+          if (typeof target.textCase === "string") out.textCase = target.textCase;
+          else unsupported.push(field);
+          break;
+        case "textDecoration":
+          if (typeof target.textDecoration === "string") out.textDecoration = target.textDecoration;
+          else unsupported.push(field);
+          break;
+        case "lineHeight":
+          if (target.lineHeight && !isMixed(target.lineHeight)) out.lineHeight = plain(target.lineHeight);
+          else unsupported.push(field);
+          break;
+        case "letterSpacing":
+          if (target.letterSpacing && !isMixed(target.letterSpacing)) out.letterSpacing = plain(target.letterSpacing);
+          else unsupported.push(field);
+          break;
+        case "paragraphSpacing":
+          if (Number.isFinite(Number(target.paragraphSpacing))) out.paragraphSpacing = round(Number(target.paragraphSpacing));
+          else unsupported.push(field);
+          break;
+        case "paragraphIndent":
+          if (Number.isFinite(Number(target.paragraphIndent))) out.paragraphIndent = round(Number(target.paragraphIndent));
+          else unsupported.push(field);
+          break;
+        case "textAlignHorizontal":
+          if (typeof target.textAlignHorizontal === "string") out.textAlignHorizontal = target.textAlignHorizontal;
+          else unsupported.push(field);
+          break;
+        case "textAlignVertical":
+          if (typeof target.textAlignVertical === "string") out.textAlignVertical = target.textAlignVertical;
+          else unsupported.push(field);
+          break;
+        case "textAutoResize":
+          if (typeof target.textAutoResize === "string") out.textAutoResize = target.textAutoResize;
+          else unsupported.push(field);
+          break;
+        case "hyperlink":
+          out.hyperlink = compactLink(target.hyperlink);
+          break;
+        case "visible":
+          out.visible = target.visible !== false;
+          break;
+        case "locked":
+          out.locked = target.locked === true;
+          break;
+        case "opacity":
+          if (Number.isFinite(Number(target.opacity))) out.opacity = round(Number(target.opacity));
+          else unsupported.push(field);
+          break;
+        case "blendMode":
+          if (typeof target.blendMode === "string") out.blendMode = target.blendMode;
+          else unsupported.push(field);
+          break;
+        case "rotation":
+          if (Number.isFinite(Number(target.rotation))) out.rotation = round(Number(target.rotation));
+          else unsupported.push(field);
+          break;
+        case "cornerRadius":
+          if (Number.isFinite(Number(target.cornerRadius))) out.cornerRadius = round(Number(target.cornerRadius));
+          else unsupported.push(field);
+          break;
+        case "topLeftRadius":
+        case "topRightRadius":
+        case "bottomLeftRadius":
+        case "bottomRightRadius":
+          if (Number.isFinite(Number(target[field]))) out[field] = round(Number(target[field]));
+          else unsupported.push(field);
+          break;
+        case "strokeWeight":
+          if (Number.isFinite(Number(target.strokeWeight))) out.strokeWeight = round(Number(target.strokeWeight));
+          else unsupported.push(field);
+          break;
+        case "fills":
+          wants.fills = true;
+          break;
+        case "strokes":
+          wants.strokes = true;
+          break;
+        case "effects":
+          wants.effects = true;
+          break;
+        case "width":
+        case "height":
+          wants.size = true;
+          break;
+        case "fillStyleId": {
+          const style = await styleInfo(ctx, target.fillStyleId, state.styles);
+          if (style) out.fillStyle = style.name;
+          else {
+            state.warnings.push(`${at}: fill style ${target.fillStyleId || "(none)"} no longer resolves; literal fills were exported`);
+            wants.fills = true;
+          }
+          break;
+        }
+        case "strokeStyleId": {
+          const style = await styleInfo(ctx, target.strokeStyleId, state.styles);
+          if (style) out.strokeStyle = style.name;
+          else {
+            state.warnings.push(`${at}: stroke style ${target.strokeStyleId || "(none)"} no longer resolves; literal strokes were exported`);
+            wants.strokes = true;
+          }
+          break;
+        }
+        case "effectStyleId": {
+          const style = await styleInfo(ctx, target.effectStyleId, state.styles);
+          if (style) out.effectStyle = style.name;
+          else {
+            state.warnings.push(`${at}: effect style ${target.effectStyleId || "(none)"} no longer resolves; literal effects were exported`);
+            wants.effects = true;
+          }
+          break;
+        }
+        case "textStyleId": {
+          const style = await styleInfo(ctx, target.textStyleId, state.styles);
+          if (style) out.textStyle = style.name;
+          else {
+            state.warnings.push(`${at}: text style ${target.textStyleId || "(none)"} no longer resolves; literal font and size were exported`);
+            const font = compactFont(target.fontName);
+            if (font) out.font = font;
+            if (Number.isFinite(Number(target.fontSize))) out.fontSize = round(Number(target.fontSize));
+          }
+          break;
+        }
+        default:
+          unsupported.push(field);
+      }
+    }
+
+    if (wants.fills) {
+      const paints = await paintsToSpec(ctx, target.fills, state.vars, state.warnings, `${path}.overrides["${target.name}"].fills`);
+      if (paints) out.fills = paints;
+      else unsupported.push("fills (mixed or unreadable)");
+    }
+    if (wants.strokes) {
+      const paints = await paintsToSpec(ctx, target.strokes, state.vars, state.warnings, `${path}.overrides["${target.name}"].strokes`);
+      if (paints) out.strokes = paints;
+      else unsupported.push("strokes (mixed or unreadable)");
+    }
+    if (wants.effects) {
+      const effects = effectsFor(target, state.warnings, `${path}.overrides["${target.name}"].effects`);
+      if (effects) out.effects = effects;
+      else unsupported.push("effects (unreadable)");
+    }
+    if (wants.size) {
+      const width = Number(target.width);
+      const height = Number(target.height);
+      if (Number.isFinite(width) && Number.isFinite(height)) out.size = { width: round(width), height: round(height) };
+      else unsupported.push("size");
+    }
+    if (unsupported.length) {
+      state.warnings.push(`${at} changes ${unsupported.join(", ")}, which a build spec cannot represent`);
+    }
+    if (Object.keys(out).length > 1) {
+      const base = String(target.name || target.type || "layer");
+      let key = base;
+      let n = 2;
+      while (Object.prototype.hasOwnProperty.call(overrides, key)) key = `${base}#${n++}`;
+      overrides[key] = out;
+    }
+  }
+  return Object.keys(overrides).length ? overrides : undefined;
+}
+
 function effectsFor(node: any, warnings: string[], path: string): any[] | undefined {
   if (!Array.isArray(node.effects)) return undefined;
   const out: any[] = [];
@@ -566,7 +824,8 @@ async function exportNode(
       state.warnings.push(`${path}: component properties could not be read: ${errMsg(e)}`);
     }
     if (Object.keys(properties).length) spec.properties = properties;
-    state.warnings.push(`${path}: instance interiors and per-layer overrides are not part of a build spec`);
+    const overrides = await instanceOverridesFor(ctx, node, main, state, path);
+    if (overrides) spec.overrides = overrides;
   }
 
   const size = [Number(node.width), Number(node.height)];
