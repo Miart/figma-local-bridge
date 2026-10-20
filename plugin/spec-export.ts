@@ -167,18 +167,46 @@ async function paintToSpec(
       ? { x: Number(paint.spacing.x), y: Number(paint.spacing.y) }
       : { x: 0, y: 0 };
     const scalingFactor = paint.scalingFactor === undefined ? 1 : Number(paint.scalingFactor);
+    const tileType = paint.tileType || "RECTANGULAR";
+    const horizontalAlignment = paint.horizontalAlignment || "START";
     if (!Number.isFinite(spacing.x) || !Number.isFinite(spacing.y) || !Number.isFinite(scalingFactor) || scalingFactor <= 0) {
       warnings.push(`${path}: a PATTERN paint has an unreadable scaling factor or spacing and was omitted`);
+      return null;
+    }
+    if (!["RECTANGULAR", "HORIZONTAL_HEXAGONAL", "VERTICAL_HEXAGONAL"].includes(tileType) ||
+        !["START", "CENTER", "END"].includes(horizontalAlignment)) {
+      warnings.push(`${path}: a PATTERN paint has an unknown tile type or horizontal alignment and was omitted`);
       return null;
     }
     return paintCommon({
       type: "PATTERN",
       sourceNodeId,
-      tileType: paint.tileType || "RECTANGULAR",
+      tileType,
       scalingFactor,
       spacing,
-      horizontalAlignment: paint.horizontalAlignment || "START",
+      horizontalAlignment,
     }, paint);
+  }
+  if (paint.type === "SHADER") {
+    const shaderId = typeof paint.id === "string" ? paint.id : "";
+    if (!shaderId) {
+      warnings.push(`${path}: a SHADER paint has no id and was omitted`);
+      return null;
+    }
+    const out: Json = { type: "SHADER", shaderId };
+    if (paint.properties !== undefined) {
+      if (!isObj(paint.properties)) {
+        warnings.push(`${path}: a SHADER paint has unreadable properties; they were omitted and the shader defaults apply`);
+      } else {
+        try {
+          const properties = JSON.parse(JSON.stringify(paint.properties));
+          if (Object.keys(properties).length) out.properties = properties;
+        } catch {
+          warnings.push(`${path}: a SHADER paint has properties that are not JSON-serializable; they were omitted`);
+        }
+      }
+    }
+    return paintCommon(out, paint);
   }
   if (paint.type === "IMAGE" || paint.type === "VIDEO") {
     const hash = paint.type === "IMAGE" ? paint.imageHash : paint.videoHash;

@@ -26,7 +26,7 @@ const paintSchema = z.union([
   z.string().describe("A colour: #rrggbb, #rrggbbaa, rgb(...) or rgba(...)"),
   z
     .object({
-      type: z.string().optional().describe("SOLID | IMAGE | VIDEO | PATTERN | GRADIENT_*; a bare string is a solid colour"),
+      type: z.string().optional().describe("SOLID | IMAGE | VIDEO | PATTERN | SHADER | GRADIENT_*; a bare string is a solid colour"),
       color: z.string().optional(),
       opacity: z.number().min(0).max(1).optional(),
       variable: z.string().optional().describe("Local colour variable name or id"),
@@ -36,6 +36,8 @@ const paintSchema = z.union([
       tileType: z.enum(["RECTANGULAR", "HORIZONTAL_HEXAGONAL", "VERTICAL_HEXAGONAL"]).optional().describe("PATTERN tiling"),
       spacing: z.object({ x: z.number(), y: z.number() }).optional().describe("PATTERN tile spacing"),
       horizontalAlignment: z.enum(["START", "CENTER", "END"]).optional().describe("PATTERN horizontal alignment"),
+      shaderId: z.string().optional().describe("SHADER only: id from listAvailableShaders; imported on apply"),
+      properties: z.record(z.any()).optional().describe("SHADER only: property assignments keyed by shader definition id"),
       scaleMode: z.enum(["FILL", "FIT", "CROP", "TILE"]).optional(),
       imageTransform: z.array(z.array(z.number())).optional().describe("IMAGE crop transform (CROP only)"),
       videoTransform: z.array(z.array(z.number())).optional().describe("VIDEO crop transform (CROP only)"),
@@ -290,6 +292,7 @@ export function registerBuildTools(server: McpServer, client: FigmaClient, caps:
       "An SVG leaf is created as a frame; re-sending it updates that frame in place, and a changed svg source replaces its interior while keeping the id and key. " +
       "A BOOLEAN_OPERATION is created from at least two operands in spec order (first operand is the subtract/intersect base) and can change its operation in place; its size is derived from the operands and is ignored. " +
       "A PATTERN paint resolves its file-local source node id before writing and is refused when that node is missing. " +
+      "A SHADER paint must resolve to an available fill shader; an unimported shader is imported inside the write transaction. " +
       "Refuses type changes, ambiguous component names, unknown keys, position inside auto-layout, component swaps, and unsupported node types.",
     {
       buildId: z

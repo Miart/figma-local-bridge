@@ -317,6 +317,26 @@ test("pattern paints export their source and tiling fields", async () => {
   assert.doesNotThrow(() => normalizeTree(report.spec));
 });
 
+test("shader paints export their id, properties and paint state", async () => {
+  const rect = node("RECTANGLE", {
+    name: "Shader",
+    fills: [{
+      type: "SHADER", id: "S:noise",
+      properties: { intensity: 0.5, tint: { type: "VARIABLE_ALIAS", id: "V:1" } },
+      opacity: 0.6, blendMode: "MULTIPLY", visible: false,
+    }],
+  });
+
+  const report = await runExportSpec(makeCtx(), { nodeId: rect.id });
+  assert.deepEqual(report.spec.fills[0], {
+    type: "SHADER", shaderId: "S:noise",
+    properties: { intensity: 0.5, tint: { type: "VARIABLE_ALIAS", id: "V:1" } },
+    opacity: 0.6, visible: false, blendMode: "MULTIPLY",
+  });
+  assert.equal(report.warnings.length, 0);
+  assert.doesNotThrow(() => normalizeTree(report.spec));
+});
+
 test("URL links export, while NODE links and mixed runs are named", async () => {
   const url = node("TEXT", { name: "Docs", hyperlink: { type: "URL", value: "https://example.com/docs" } });
   const urlReport = await runExportSpec(makeCtx(), { nodeId: url.id });

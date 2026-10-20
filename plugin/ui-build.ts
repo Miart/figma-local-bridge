@@ -591,6 +591,8 @@ interface Resources {
   components: Map<string, any>;
   patternSources: Map<string, any>;
   patternSourceIds: string[];
+  shaders: Map<string, any>;
+  shaderIds: string[];
   styleNames: { text: string[]; paint: string[]; effect: string[] };
   variableNames: string[];
   componentRefs: Json[];
@@ -609,6 +611,8 @@ function resourceMap(): Resources {
     components: new Map(),
     patternSources: new Map(),
     patternSourceIds: [],
+    shaders: new Map(),
+    shaderIds: [],
     styleNames: { text: [], paint: [], effect: [] },
     variableNames: [],
     componentRefs: [],
@@ -683,7 +687,7 @@ function collectPaints(res: Resources, paints: any, where: string) {
     if (p.color !== undefined) {
       try { parseColor(p.color); } catch (e) { res.blocking.push(`${where}[${i}]: ${errMsg(e)}`); }
     }
-    if (p.type && !["SOLID", "IMAGE", "VIDEO", "PATTERN", "GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND"].includes(String(p.type))) {
+    if (p.type && !["SOLID", "IMAGE", "VIDEO", "PATTERN", "SHADER", "GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND"].includes(String(p.type))) {
       res.blocking.push(`${where}[${i}]: unsupported paint type "${p.type}"`);
     }
     if (p.visible !== undefined && typeof p.visible !== "boolean") {
@@ -718,6 +722,25 @@ function collectPaints(res: Resources, paints: any, where: string) {
       }
       if (p.variable !== undefined) {
         res.blocking.push(`${where}[${i}]: a PATTERN paint cannot also carry a colour variable`);
+      }
+    }
+    if (p.type === "SHADER") {
+      const shaderId = typeof p.shaderId === "string" ? p.shaderId.trim() : "";
+      if (!shaderId) res.blocking.push(`${where}[${i}]: SHADER paint needs shaderId`);
+      else if (!res.shaderIds.includes(shaderId)) res.shaderIds.push(shaderId);
+      if (p.properties !== undefined) {
+        if (!isObj(p.properties)) res.blocking.push(`${where}[${i}].properties must be an object keyed by shader definition id`);
+        else {
+          try { JSON.stringify(p.properties); } catch {
+            res.blocking.push(`${where}[${i}].properties is not JSON-serializable`);
+          }
+        }
+      }
+      if (p.propertyMetadata !== undefined) {
+        res.blocking.push(`${where}[${i}].propertyMetadata is read-only; omit it and send properties only`);
+      }
+      if (p.variable !== undefined) {
+        res.blocking.push(`${where}[${i}]: a SHADER paint cannot also carry a colour variable`);
       }
     }
     if (p.type === "IMAGE" || p.type === "VIDEO") {
@@ -756,6 +779,62 @@ async function resolvePatternSources(ctx: any, res: Resources) {
       continue;
     }
     res.patternSources.set(id, node);
+  }
+}
+
+async function resolveShaders(ctx: any, res: Resources) {
+  if (!res.shaderIds.length) return;
+  if (typeof ctx.listAvailableShaders !== "function") {
+    res.blocking.push("SHADER paints need listAvailableShaders, which this Figma host does not provide");
+    return;
+  }
+  let list: any[] = [];
+  try {
+    const raw = await ctx.listAvailableShaders();
+    if (!Array.isArray(raw)) throw new Error("listAvailableShaders returned a non-array");
+    list = raw;
+  } catch (e) {
+    res.blocking.push(`shaders could not be listed: ${errMsg(e)}`);
+    return;
+  }
+  for (const id of res.shaderIds) {
+    const hits = list.filter((shader: any) => shader && shader.id === id);
+    if (!hits.length) {
+      res.blocking.push(`shader ${id} is not available to this file; import it into the file or use an owned/subscribed shader`);
+      continue;
+    }
+    if (hits.length > 1) {
+      res.blocking.push(`shader ${id} matches ${hits.length} available shaders`);
+      continue;
+    }
+    const shader = hits[0];
+    res.shaders.set(id, shader);
+    if (shader.type !== "fill") {
+      res.blocking.push(`shader ${id} is a ${shader.type || "non-fill"} shader, not a fill shader`);
+    }
+  }
+}
+
+async function importShaders(ctx: any, res: Resources) {
+  for (const [id, shader] of [...res.shaders.entries()]) {
+    if (shader.type !== "fill" || shader.imported === true) continue;
+    if (typeof ctx.importShaderById !== "function") {
+      res.blocking.push(`shader ${id} is not imported and importShaderById is unavailable`);
+      continue;
+    }
+    try {
+      const imported = await ctx.importShaderById(id);
+      if (!imported) {
+        res.blocking.push(`shader ${id} could not be imported`);
+        continue;
+      }
+      res.shaders.set(id, imported);
+      if (imported.type !== "fill") {
+        res.blocking.push(`shader ${id} imported as a ${imported.type || "non-fill"} shader, not a fill shader`);
+      }
+    } catch (e) {
+      res.blocking.push(`shader ${id} could not be imported: ${errMsg(e)}`);
+    }
   }
 }
 
@@ -942,6 +1021,7 @@ async function collectResources(ctx: any, root: NormalizedNode): Promise<Resourc
   };
   visit(root);
   await resolvePatternSources(ctx, res);
+  await resolveShaders(ctx, res);
   await resolveVariables(ctx, res);
   return res;
 }
@@ -1188,6 +1268,7 @@ export interface Plan {
   variables: string[];
   components: Json[];
   patterns: Json[];
+  shaders: Json[];
   warnings: string[];
   blocking: string[];
   prune: boolean;
@@ -1211,6 +1292,7 @@ function emptyPlan(): Plan {
     variables: [],
     components: [],
     patterns: [],
+    shaders: [],
     warnings: [],
     blocking: [],
     prune: false,
@@ -1348,6 +1430,7 @@ async function planBuild(ctx: any, p: Json): Promise<Plan> {
     const source = res.patternSources.get(nodeId);
     return { nodeId, type: source ? source.type : null, name: source ? source.name : null, resolved: !!source };
   });
+  plan.shaders = shaderReport(res);
 
   plan.counts.create = plan.planned.create.length;
   plan.counts.update = plan.planned.update.length;
@@ -1541,6 +1624,7 @@ async function planPatch(ctx: any, p: Json): Promise<Plan> {
     const source = res.patternSources.get(nodeId);
     return { nodeId, type: source ? source.type : null, name: source ? source.name : null, resolved: !!source };
   });
+  plan.shaders = shaderReport(res);
   plan.counts.create = plan.planned.create.length;
   plan.counts.update = plan.planned.update.length;
   plan.counts.unchanged = plan.planned.unchanged.length;
@@ -1631,6 +1715,19 @@ function paintFromSpec(ctx: any, value: any, res: Resources): any {
       spacing,
       horizontalAlignment,
     }, value);
+  }
+  if (value.type === "SHADER") {
+    const shaderId = typeof value.shaderId === "string" ? value.shaderId.trim() : "";
+    if (!shaderId) throw new Error("SHADER paint needs shaderId");
+    const shader = res.shaders.get(shaderId);
+    if (!shader) throw new Error(`shader ${shaderId} was not resolved`);
+    if (shader.type !== "fill") throw new Error(`shader ${shaderId} is not a fill shader`);
+    const paint: any = { type: "SHADER", id: shaderId };
+    if (value.properties !== undefined) {
+      if (!isObj(value.properties)) throw new Error("SHADER properties must be an object keyed by shader definition id");
+      paint.properties = JSON.parse(JSON.stringify(value.properties));
+    }
+    return paintCommon(paint, value);
   }
   if (value.type === "IMAGE" || value.type === "VIDEO") {
     const isVideo = value.type === "VIDEO";
@@ -2527,6 +2624,19 @@ function componentReport(res: Resources): Json[] {
   }));
 }
 
+function shaderReport(res: Resources): Json[] {
+  return res.shaderIds.map((shaderId) => {
+    const shader = res.shaders.get(shaderId);
+    return {
+      shaderId,
+      name: shader ? shader.name : null,
+      type: shader ? shader.type : null,
+      imported: shader ? shader.imported === true : null,
+      resolved: !!shader && shader.type === "fill",
+    };
+  });
+}
+
 async function applyPlan(ctx: any, plan: Plan, p: Json): Promise<Json> {
   const res: Resources = (plan as any)._res;
   const tree: NormalizedNode = (plan as any)._tree;
@@ -2550,6 +2660,9 @@ async function applyPlan(ctx: any, plan: Plan, p: Json): Promise<Json> {
     await resolveComponents(ctx, res, true);
     if (res.blocking.length) throw new Error("cannot resolve components: " + res.blocking.join("; "));
     plan.components = componentReport(res);
+    await importShaders(ctx, res);
+    if (res.blocking.length) throw new Error("cannot resolve shaders: " + res.blocking.join("; "));
+    plan.shaders = shaderReport(res);
 
     const parent = existingRoot ? existingRoot.parent : requestedParent;
     if (!parent) throw new Error("root has no parent");
@@ -2706,6 +2819,7 @@ function blocked(plan: Plan, t0: number): Json {
     variables: plan.variables,
     components: plan.components,
     patterns: plan.patterns,
+    shaders: plan.shaders,
     ms: { plan: Date.now() - t0 },
   };
 }
@@ -2755,6 +2869,7 @@ export async function runBuild(ctx: any, params: Json): Promise<Json> {
     variables: plan.variables,
     components: plan.components,
     patterns: plan.patterns,
+    shaders: plan.shaders,
     ...applied,
     ms: { plan: planMs(plan), apply: applied.ms.apply, total: Date.now() - t0 },
   };
@@ -2805,6 +2920,7 @@ export async function runPatch(ctx: any, params: Json): Promise<Json> {
     variables: plan.variables,
     components: plan.components,
     patterns: plan.patterns,
+    shaders: plan.shaders,
     ...applied,
     ms: { plan: planMs(plan), apply: applied.ms.apply, total: Date.now() - t0 },
   };

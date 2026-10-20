@@ -18,11 +18,12 @@ import { runBatch } from "../plugin/batch.mjs";
 let seq = 0;
 const nextId = () => `${++seq}:${seq}`;
 
-function makeCtx({ textStyles = [], paintStyles = [], localVariables = [] } = {}) {
+function makeCtx({ textStyles = [], paintStyles = [], localVariables = [], shaders = [] } = {}) {
   const byId = new Map();
   const fonts = [];
   let undos = 0;
   let triggers = 0;
+  let imports = 0;
 
   const defaults = (type) => ({
     id: nextId(), type, name: type, x: 0, y: 0, width: 100, height: 100,
@@ -161,6 +162,14 @@ function makeCtx({ textStyles = [], paintStyles = [], localVariables = [] } = {}
     async getLocalTextStylesAsync() { return textStyles; },
     async getLocalPaintStylesAsync() { return paintStyles; },
     async getLocalEffectStylesAsync() { return []; },
+    async listAvailableShaders() { return shaders; },
+    async importShaderById(id) {
+      imports++;
+      const shader = shaders.find((candidate) => candidate.id === id);
+      if (!shader) throw new Error(`shader ${id} not found`);
+      shader.imported = true;
+      return { ...shader, imported: true };
+    },
     variables: {
       async getLocalVariablesAsync() { return localVariables; },
       setBoundVariableForPaint(p) { return p; },
@@ -197,6 +206,7 @@ function makeCtx({ textStyles = [], paintStyles = [], localVariables = [] } = {}
     metrics: {
       get undos() { return undos; },
       get triggers() { return triggers; },
+      get imports() { return imports; },
       get fonts() { return fonts.slice(); },
       byId,
     },
@@ -970,6 +980,70 @@ test("a pattern paint resolves its source node and carries tiling fields", async
   });
   assert.equal(invalid.status, "blocked");
   assert.match(invalid.blocking.join("\n"), /tileType/);
+});
+
+test("a shader paint imports its shader and applies properties", async () => {
+  const shaders = [
+    { id: "S:noise", name: "Noise", type: "fill", imported: false, propertyDefinitions: { intensity: {}, tint: {} } },
+    { id: "S:blur", name: "Blur", type: "effect", imported: true, propertyDefinitions: {} },
+  ];
+  const ctx = makeCtx({ shaders });
+  const spec = {
+    buildId: "shader",
+    root: {
+      type: "FRAME", name: "Shader",
+      fills: [{
+        type: "SHADER", shaderId: "S:noise",
+        properties: { intensity: 0.5, tint: { type: "VARIABLE_ALIAS", id: "V:1" } },
+        opacity: 0.7, blendMode: "SCREEN", visible: false,
+      }],
+    },
+  };
+
+  const dry = await runBuild(ctx, spec);
+  assert.equal(dry.status, "dry_run");
+  assert.deepEqual(dry.shaders, [{
+    shaderId: "S:noise", name: "Noise", type: "fill", imported: false, resolved: true,
+  }]);
+  assert.equal(ctx.metrics.imports, 0);
+
+  const applied = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(applied.status, "applied");
+  assert.equal(ctx.metrics.imports, 1);
+  assert.deepEqual(applied.shaders, [{
+    shaderId: "S:noise", name: "Noise", type: "fill", imported: true, resolved: true,
+  }]);
+  const frame = ctx.currentPage.children.find((n) => n.type === "FRAME");
+  assert.deepEqual(frame.fills[0], {
+    type: "SHADER", id: "S:noise",
+    properties: { intensity: 0.5, tint: { type: "VARIABLE_ALIAS", id: "V:1" } },
+    opacity: 0.7, visible: false, blendMode: "SCREEN",
+  });
+
+  const again = await runBuild(ctx, { ...spec, dryRun: false });
+  assert.equal(again.status, "applied");
+  assert.equal(ctx.metrics.imports, 1);
+
+  const effect = await runBuild(ctx, {
+    buildId: "effect-shader",
+    root: { type: "FRAME", name: "Effect", fills: [{ type: "SHADER", shaderId: "S:blur" }] },
+  });
+  assert.equal(effect.status, "blocked");
+  assert.match(effect.blocking.join("\n"), /not a fill shader/);
+
+  const missing = await runBuild(ctx, {
+    buildId: "missing-shader",
+    root: { type: "FRAME", name: "Missing", fills: [{ type: "SHADER", shaderId: "S:missing" }] },
+  });
+  assert.equal(missing.status, "blocked");
+  assert.match(missing.blocking.join("\n"), /shader S:missing is not available/);
+
+  const badProperties = await runBuild(ctx, {
+    buildId: "bad-shader-properties",
+    root: { type: "FRAME", name: "Bad", fills: [{ type: "SHADER", shaderId: "S:noise", properties: [] }] },
+  });
+  assert.equal(badProperties.status, "blocked");
+  assert.match(badProperties.blocking.join("\n"), /properties must be an object/);
 });
 
 test("re-sending the same build updates in place and never duplicates", async () => {

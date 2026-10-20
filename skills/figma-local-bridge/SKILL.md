@@ -79,7 +79,9 @@ half a design applied.
   variable bindings, case, decoration, line height, letter spacing and
   hyperlink), whole-text `textVariable` bindings, an exact `LINE` length,
   PATTERN paints (a file-local source node id plus tile type, scaling factor,
-  spacing and horizontal alignment), and boolean operations. A
+  spacing and horizontal alignment), SHADER paints (a shader id plus optional
+  property assignments keyed by definition id; an unimported fill shader is
+  imported on apply; effect shaders are refused), and boolean operations. A
   `BOOLEAN_OPERATION` carries `booleanOperation`
   (`UNION`, `SUBTRACT`, `INTERSECT` or `EXCLUDE`) and at least two children in
   spec order. Its operands are built first and combined into one boolean; the
@@ -158,8 +160,12 @@ bindings, case, decoration, spacing and links survive a rebuild. An IMAGE or
 VIDEO paint carries its crop transform, tile scaling, rotation and filters (a
 video hash is file-local, like an image hash); a PATTERN paint carries its
 source node id, tile type, scaling factor, spacing and horizontal alignment
-(the source node is file-local); every supported paint carries `visible` and
-`blendMode`, including an invisible paint that stays in the stack. Direct
+(the source node is file-local); a SHADER paint carries its shader id and
+property assignments keyed by definition id, including variable aliases, which
+must resolve in the target file (the shader must be available in the target
+file and is imported on apply); every supported paint carries
+`visible` and `blendMode`, including an invisible paint that stays in the
+stack. Direct
 instance overrides become `overrides` entries
 with structural paths built from
 the main component's layer names, so a renamed layer still resolves; the
@@ -177,8 +183,8 @@ not fit the 128 KiB per-node / 192 KiB total budget is listed as unsupported
 with the reason. A built SVG leaf is re-recognised as `SVG` on the next build,
 so re-sending it updates in place; a changed `svg` replaces its interior while
 keeping the frame's id and key, and an unchanged source is not touched. Read `unsupported` and `warnings` before building it: an
-override field the build cannot express, a mixed value or a paint TYPE the
-spec cannot express (`SHADER`) has no exact representation. `truncated: true` means the spec is
+override field the build cannot express or a mixed value has no exact
+representation. `truncated: true` means the spec is
 incomplete and must not be built as-is.
 
 ## Finding things, and checking the result
