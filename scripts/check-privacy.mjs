@@ -46,6 +46,56 @@ const MAX_BYTES = 2 * 1024 * 1024;
 
 const PLACEHOLDER_HOMES = new Set(["example", "me", "user", "A & B", "runner", "you"]);
 
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * One denylisted term becomes two checks: a separator-tolerant phrase for
+ * `Blocked One` / `blocked_one`, and a compact token check for identifiers
+ * such as `blockedOne`. The compact check is per whitespace token, so ordinary
+ * prose like `b lo ck ed` is not mistaken for `blocked`.
+ */
+function denylistMatcher(term) {
+  const words = String(term)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean);
+  if (!words.length) return null;
+  return {
+    compact: words.join("").toLowerCase(),
+    separated: new RegExp(words.map(escapeRegExp).join("[\\s._/-]*"), "i"),
+  };
+}
+
+function matchesDenylistTerm(line, matcher) {
+  if (matcher.separated.test(line)) return true;
+  for (const token of line.split(/\s+/)) {
+    const compact = token.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+    if (compact.includes(matcher.compact)) return true;
+  }
+  return false;
+}
+
+function denylistFindings(lines, denylist, file) {
+  const findings = [];
+  const matchers = denylist.map(denylistMatcher).filter(Boolean);
+  for (let i = 0; i < lines.length; i++) {
+    for (const matcher of matchers) {
+      if (matchesDenylistTerm(lines[i], matcher)) {
+        // Never echo the term: the terminal may be logged or shared.
+        findings.push({ kind: "denylisted-term", file, line: i + 1, detail: "a configured denylisted term" });
+      }
+    }
+  }
+  return findings;
+}
+
+/** Denylist-only check, used for the scanner and its tests, which contain
+ *  deliberately fake secrets and addresses that the full scan would flag. */
+export function scanDenylist(text, { denylist = [], file = "" } = {}) {
+  return denylistFindings(String(text).split(/\r?\n/), denylist, file);
+}
+
 /** A match is a finding; `text` is only used to make the message useful. */
 export function scanText(text, { denylist = [], file = "" } = {}) {
   const findings = [];
@@ -91,13 +141,9 @@ export function scanText(text, { denylist = [], file = "" } = {}) {
       add("configured-secret", i + 1, "a non-empty secret in a config assignment");
     }
 
-    const lower = line.toLowerCase();
-    for (const term of denylist) {
-      if (!term) continue;
-      if (lower.includes(term.toLowerCase())) add("denylisted-term", i + 1, `"${term}"`);
-    }
   }
 
+  findings.push(...denylistFindings(lines, denylist, file));
   return findings;
 }
 
@@ -157,8 +203,7 @@ function main(argv) {
   }
 
   const denylist = loadDenylist();
-  const files = (staged ? stagedFiles() : trackedFiles())
-    .filter((f) => f !== SCANNER && f !== TEST_SCANNER);
+  const files = staged ? stagedFiles() : trackedFiles();
 
   const findings = [];
   for (const file of files) {
@@ -169,7 +214,8 @@ function main(argv) {
       continue; // deleted since the index was read; the index pass covers it
     }
     if (text == null) continue;
-    findings.push(...scanText(text, { denylist, file }));
+    const check = file === SCANNER || file === TEST_SCANNER ? scanDenylist : scanText;
+    findings.push(...check(text, { denylist, file }));
   }
 
   const scope = staged ? "staged" : "tracked";

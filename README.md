@@ -148,9 +148,12 @@ The daemon exists for three concrete reasons:
 ### Repository privacy
 
 This is a public repository; names from private client projects must not enter
-it, even as “just an example”. `npm run check:privacy` scans every tracked file.
-The optional pre-commit hook scans the exact staged bytes, so a secret or a
-project name cannot slip in after the last manual check:
+it, even as “just an example”. `npm run check:privacy` scans every tracked file
+and matches a configured term across spaces, hyphens, underscores and camelCase,
+so an identifier such as `projectName` is caught as well as the prose form. A
+finding reports the file and line, never the term itself. The optional
+pre-commit hook scans the exact staged bytes, so a secret or a project name
+cannot slip in after the last manual check:
 
 ```sh
 npm run check:privacy          # tracked files

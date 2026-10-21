@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { scanText } from "../scripts/check-privacy.mjs";
+import { scanDenylist, scanText } from "../scripts/check-privacy.mjs";
 
 const kinds = (findings) => findings.map((f) => f.kind);
 
@@ -39,7 +39,46 @@ test("privacy scan: allows the placeholders this repository documents", () => {
   assert.deepEqual(scanText(text, { denylist: [] }), []);
 });
 
-test("privacy scan: a local denylist catches company and project names", () => {
+test("privacy scan: denylist matches identifiers and separator variants", () => {
+  const denylist = [
+    "Blocked One",
+    "BlockedTwo",
+    "BlockedThree",
+    "BlockedFour",
+    "BlockedFive",
+    "BlockedSix",
+    "BlockedSeven",
+  ];
+  const text = [
+    "const blockedOne = 1;",
+    "const blocked_one = 1;",
+    "const BlockedOne = 1;",
+    "const blockedTwo = 1;",
+    "const blocked_two = 1;",
+    "const blockedThree = 1;",
+    "const blocked_four = 1;",
+    "const blockedFive = 1;",
+    "const blockedSix = 1;",
+    "const blocked_seven = 1;",
+  ].join("\n");
+  const findings = scanText(text, { denylist });
+  assert.deepEqual(findings.map((f) => f.kind), Array(10).fill("denylisted-term"));
+  assert.deepEqual(findings.map((f) => f.line), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.ok(findings.every((f) => !/blocked/i.test(f.detail)));
+});
+
+test("privacy scan: a single-word term does not match across spaces", () => {
+  assert.deepEqual(scanText("b lo ck ed", { denylist: ["Blocked"] }), []);
+});
+
+test("privacy scan: denylist-only mode checks scanner sources too", () => {
+  const findings = scanDenylist("const blockedOne = 1;", {
+    denylist: ["Blocked One"], file: "scripts/check-privacy.mjs",
+  });
+  assert.deepEqual(kinds(findings), ["denylisted-term"]);
+});
+
+test("privacy scan: a local denylist catches configured terms", () => {
   const text = "We tested this against Blocked One and the Blocked Two file.";
   const findings = scanText(text, { denylist: ["Blocked One", "Blocked Two"], file: "docs/note.md" });
   assert.deepEqual(kinds(findings), ["denylisted-term", "denylisted-term"]);
