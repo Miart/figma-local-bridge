@@ -87,7 +87,7 @@ try {
     "figma_download_assets", "figma_get_code_connect_map", "figma_use", "figma_upload_assets", "figma_add_code_connect_map",
     "figma_compare", "figma_checkpoint", "figma_ops", "figma_cancel",
     "figma_build", "figma_patch", "figma_batch_edit", "figma_swap_component", "figma_variant_set",
-    "figma_audit", "figma_index", "figma_search", "figma_design_system", "figma_tokens", "figma_export_build_spec"];
+    "figma_audit", "figma_index", "figma_search", "figma_design_system", "figma_tokens", "figma_export_build_spec", "figma_review"];
   const missing = expected.filter((n) => !tools.includes(n));
   check("all parity tools are registered", missing.length === 0, "missing: " + missing.join(","));
 
@@ -112,7 +112,7 @@ try {
         capture: { window: { x: 10, y: 20, width: 100, height: 50 }, exportSettings: { format: "PNG", contentsOnly: true, useAbsoluteBounds: true, constraint: { type: "SCALE", value: 1 } }, clipping: "Rectangles are layout AABBs." },
         ms: 3,
       });
-      case "get_screenshot": return ok({ nodeId: "1:2", name: "Card", format: env.params.format, scale: env.params.scale, bytes: 70, width: 1, height: 1, base64: PNG_1x1 });
+      case "get_screenshot": return ok({ nodeId: env.params.nodeId || "1:2", name: "Card", format: env.params.format, scale: env.params.scale, bytes: 70, width: 1, height: 1, base64: PNG_1x1 });
       case "export_nodes": return ok({ files: [{ nodeId: "1:2", name: "Card/Hero", format: "PNG", bytes: 70, base64: PNG_1x1 }, { nodeId: "9:9", error: "not found or not exportable" }] });
       case "use_figma":
         if (env.params.code.includes("throw")) return fail("boom (rolled back)\nconsole output before the error:\nhi");
@@ -274,20 +274,32 @@ try {
           resultsTruncated: 0,
           warnings: [],
         });
-      case "audit":
+      case "inspect":
+        return ok({
+          node: { id: env.params.nodeId || "1:2", name: "Card", type: "FRAME" },
+          fingerprint: { hash: "fp-structure", appearanceHash: "fp-appearance", geometryHash: "fp-geometry", childrenHash: "fp-children", geometryStatus: "EXACT" },
+          warnings: [],
+        });
+      case "audit": {
+        const auditRoot = env.params.rootNodeId || "0:1";
+        const findings = [{ rule: "contrast", severity: "error", nodeId: "1:3", nodeKey: "hud/title#0", name: "Title", type: "TEXT", path: "Card / Title", detail: "contrast 2.1:1", ratio: 2.1 }];
+        if (auditRoot === "1:3") {
+          findings.push({ rule: "placeholder-text", severity: "error", nodeId: "1:4", nodeKey: "hud/body#0", name: "Body", type: "TEXT", path: "Card / Body", detail: "Lorem ipsum" });
+        }
         return ok({
           schema: "audit-v2",
-          scope: { id: env.params.rootNodeId || "0:1", name: "Card", type: "FRAME" },
+          scope: { id: auditRoot, name: "Card", type: "FRAME" },
           rules: [{ id: "contrast", description: "text contrast", severity: "error" }],
           nodesScanned: 4,
           truncated: false,
           includeHidden: false,
-          counts: { error: 1, warning: 0, info: 0, total: 1 },
-          byRule: { contrast: 1 },
-          findings: [{ rule: "contrast", severity: "error", nodeId: "1:3", nodeKey: "hud/title#0", name: "Title", type: "TEXT", path: "Card / Title", detail: "contrast 2.1:1", ratio: 2.1 }],
+          counts: { error: findings.length, warning: 0, info: 0, total: findings.length },
+          byRule: findings.reduce((m, f) => ({ ...m, [f.rule]: (m[f.rule] || 0) + 1 }), {}),
+          findings,
           findingsTruncated: 0,
           warnings: [],
         });
+      }
       case "batch":
         return ok({
           status: env.params.dryRun === false ? "applied" : "dry_run",
@@ -692,6 +704,54 @@ try {
     auditReq.method === "audit" && auditReq.params.rootNodeId === "1:2" && auditReq.params.suggest === false &&
       audit.schema === "audit-v2" && audit.findings[0].rule === "contrast" && audit.counts.error === 1,
     JSON.stringify(audit).slice(0, 200));
+
+  const reviewDir = join(dir, "reviews");
+  const reviewSaved = c.text(await c.rpc("tools/call", {
+    name: "figma_review",
+    arguments: { action: "save", nodeId: "1:2", dir: reviewDir, rules: ["contrast"], suggest: false },
+  }));
+  check("figma_review saves a PNG, the audit and the structure fingerprint",
+    reviewSaved.action === "save" && reviewSaved.audit.counts.error === 1 &&
+      reviewSaved.node.name === "Card" && reviewSaved.fingerprint.hash === "fp-structure" &&
+      fs.existsSync(reviewSaved.path) && fs.existsSync(reviewSaved.imagePath),
+    JSON.stringify(reviewSaved).slice(0, 200));
+  const reviewCompared = reportOf(await c.rpc("tools/call", {
+    name: "figma_review",
+    arguments: { action: "compare", id: reviewSaved.id, dir: reviewDir, inline: false },
+  }));
+  check("figma_review compares against the baseline and says unchanged",
+    reviewCompared.action === "compare" && reviewCompared.status === "unchanged" &&
+      reviewCompared.visual.identical === true && reviewCompared.audit.delta.total === 0 &&
+      reviewCompared.structure.fingerprintEqual === true,
+    JSON.stringify(reviewCompared).slice(0, 240));
+  const reviewList = c.text(await c.rpc("tools/call", {
+    name: "figma_review",
+    arguments: { action: "list", dir: reviewDir },
+  }));
+  check("figma_review lists and drops a local baseline",
+    reviewList.action === "list" && reviewList.count === 1 && reviewList.reviews[0].id === reviewSaved.id,
+    JSON.stringify(reviewList).slice(0, 200));
+  const reviewDropped = c.text(await c.rpc("tools/call", {
+    name: "figma_review",
+    arguments: { action: "drop", id: reviewSaved.id, dir: reviewDir },
+  }));
+  check("figma_review drop removes the bundle",
+    reviewDropped.action === "drop" && reviewDropped.files.length === 3,
+    JSON.stringify(reviewDropped).slice(0, 200));
+
+  const reviewRegressedBase = c.text(await c.rpc("tools/call", {
+    name: "figma_review",
+    arguments: { action: "save", nodeId: "1:2", dir: reviewDir, rules: ["contrast"], suggest: false },
+  }));
+  const reviewRegressed = reportOf(await c.rpc("tools/call", {
+    name: "figma_review",
+    arguments: { action: "compare", id: reviewRegressedBase.id, nodeId: "1:3", dir: reviewDir, inline: false },
+  }));
+  check("figma_review calls a new finding a regression",
+    reviewRegressed.status === "regressed" && reviewRegressed.regressions.total === 1 &&
+      reviewRegressed.audit.new.total === 1 && reviewRegressed.audit.new.list[0].rule === "placeholder-text" &&
+      reviewRegressed.visual.identical === true,
+    JSON.stringify(reviewRegressed).slice(0, 260));
 
   const indexSeenBefore = seen.length;
   const index = c.text(await c.rpc("tools/call", {

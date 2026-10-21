@@ -126,7 +126,7 @@ export function registerCompareTool(server: McpServer, client: FigmaClient) {
 }
 
 /** Name the scale the caller probably meant, when the sizes are a clean multiple. */
-function scaleHint(reference: [number, number], render: [number, number]): string | null {
+export function scaleHint(reference: [number, number], render: [number, number]): string | null {
   const factors = [2, 3, 4];
   for (const f of factors) {
     const near = (x: number, y: number) => Math.abs(x / y - f) <= 0.05 * f;

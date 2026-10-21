@@ -46,8 +46,11 @@ figma_search, figma_design_system, figma_tokens and figma_export_build_spec are
 read-only unless figma_tokens is applying an import. figma_tokens covers local
 variables only: export, diff and a dry-run-first import with a planId, a live
 fingerprint and one undo transaction; prune is opt-in and destructive.
-The last one turns a live subtree back into a figma_build spec; read its
-unsupported/warnings, and never build a result marked truncated.
+figma_review saves a local visual + audit + structure baseline and compares the
+live node after an edit: read its status, new/resolved findings and regressions.
+It writes only local files, not the document; a truncated audit makes its delta
+incomplete. The last one turns a live subtree back into a figma_build spec; read
+its unsupported/warnings, and never build a result marked truncated.
 
 Writes are serialized, so a call can wait behind another write for longer than
 its caller waits. When one times out, figma_ops (opId from the error) says
@@ -102,7 +105,7 @@ export function registerGuide(server: McpServer): void {
     {
       title: "figma-local-bridge — operating guide",
       description:
-        "How to drive the bridge: fileKey rules, rev/replayed, what may be retried, figma_use scope and rollback, write gating.",
+        "How to drive the bridge: fileKey rules, rev/replayed, what may be retried, guarded edits, figma_review baselines, figma_use scope and rollback, write gating.",
       mimeType: GUIDE_MIME,
     },
     async (uri) => ({

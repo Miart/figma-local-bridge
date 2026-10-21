@@ -309,6 +309,10 @@ incomplete and must not be built as-is.
   sha256, and `diff` compares that file to the live file by stable key. It is
   read-only: syncing values back into Figma still goes through the specific
   write tools.
+- `figma_review` is the before/after measurement for an iteration: save a
+  baseline, edit, compare. It reports new/resolved audit findings and pixel/
+  structural changes together; see the section below. Use `figma_compare` for
+  a mockup, and `figma_checkpoint` when a subtree must be restorable.
 
 ## Design tokens: variables, not styles
 
@@ -518,6 +522,51 @@ their files go to `outDir`, a temp directory by default.
   reference's own pixels), largest clusters, plus a heatmap. It is how a rebuild
   is proven to have landed instead of eyeballed — and a size mismatch is a
   finding, while a clean 2×/3×/4× ratio means you passed the wrong `scale`.
+
+## Iterating on a subtree with a baseline
+
+`figma_review` is the loop tool: save a baseline, edit, compare, repeat. It is
+read-only for the document; the baseline and heatmap are local files.
+
+- `save` renders the node, audits it with the requested rules, and records the
+  semantic fingerprint alongside the PNG and the full audit report:
+  `{ action: "save", nodeId, name?, rules?, suggest?, scale? }`. The reply has
+  the review `id`, paths and the audit counts. Save **before** the edit.
+- `compare` re-renders, re-audits and re-inspects the live node and diffs it
+  against the baseline: `{ action: "compare", id? }`. With no `id` it uses the
+  newest baseline for the file. It reports `visual` (bbox, clusters, heatmap),
+  `structure.fingerprintEqual`, `audit.new` / `resolved` / `changed`, severity
+  `delta`, `regressions`, `improvements` and `next`.
+- Read `status` before anything else: `regressed` means a new error/warning
+  finding or a render-size change; `improved` means a previous problem is
+  gone; `changed` is a neutral pixel/structural/finding change; `unchanged`
+  permits walking away. Never describe a neutral `changed` as an improvement.
+- The baseline's rules, `includeHidden` and `suggest` are reused by `compare`
+  (and its scale unless you override it), so a delta is not caused by different
+  audit settings. To ask a different audit question, save a new baseline.
+- If `audit.complete` is false, the new/resolved lists may be incomplete even
+  though the severity counts are complete; raise `maxFindings` and redo the
+  baseline. A new error/warning may be a previously truncated finding.
+- A capture that sees different `rev` values for image, audit and structure is
+  refused: the three would not describe one state. Retry when the file is
+  quiet.
+- Accept a step by saving a new baseline (the id changes). Keep the old one if
+  you may need to compare against it; `list` shows them and `drop` removes the
+  PNG, JSON and heatmap. `latest` is the default.
+- A rebuilt node has a new id: pass `nodeId` to `compare`. If the id is gone,
+  the plugin says so; this is not a visual regression.
+- This is not `figma_checkpoint`: a review baseline cannot restore a subtree.
+  Use `figma_checkpoint` before a risky rebuild, then `figma_review` to judge
+  the result. Use `figma_compare` when the reference is a mockup rather than an
+  earlier iteration.
+
+A safe loop:
+
+1. `figma_review { action:"save", nodeId }`.
+2. Apply one guarded edit (`figma_build` / `figma_patch` / `figma_batch_edit`).
+3. `figma_review { action:"compare" }`; read `status`, `regressions`, `next`.
+4. If `regressed`, fix the named new finding or restore the checkpoint; then
+   compare again. If accepted, save a fresh baseline and continue.
 
 ## A call that timed out, and the write nobody is waiting for
 

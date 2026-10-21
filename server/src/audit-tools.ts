@@ -18,7 +18,7 @@ const content = (v: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }],
 });
 
-const RULE_IDS = [
+export const AUDIT_RULE_IDS = [
   "duplicate-key",
   "unkeyed-node",
   "hardcoded-fill",
@@ -44,7 +44,7 @@ export function registerAuditTools(server: McpServer, client: FigmaClient) {
         .optional()
         .describe("Page or subtree to audit; defaults to the current page"),
       rules: z
-        .array(z.enum(RULE_IDS))
+        .array(z.enum(AUDIT_RULE_IDS))
         .min(1)
         .optional()
         .describe(
