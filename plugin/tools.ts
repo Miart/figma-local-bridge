@@ -30,6 +30,7 @@ import { runVariantSet } from "./variant-sets";
 import { runAudit } from "./audit";
 import { runIndex, runSearch } from "./index";
 import { runDesignSystem } from "./design-system";
+import { runTokens } from "./tokens";
 import { runExportSpec } from "./spec-export";
 
 const NS = "figma-local-bridge";
@@ -798,6 +799,7 @@ export const MUTATING_METHODS: ReadonlySet<string> = new Set([
   "batch",
   "swap_component",
   "variant_set",
+  "tokens",
 ]);
 
 export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
@@ -1763,6 +1765,11 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
   /** Local styles, variables and components as one comparable snapshot. */
   async design_system(p: Json) {
     return runDesignSystem(figma, p);
+  },
+
+  /** Design-token export, diff and guarded variable import. */
+  async tokens(p: Json) {
+    return runTokens(figma, p);
   },
 
   /**

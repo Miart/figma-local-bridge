@@ -306,6 +306,80 @@ incomplete and must not be built as-is.
   read-only: syncing values back into Figma still goes through the specific
   write tools.
 
+## Design tokens: variables, not styles
+
+`figma_tokens` is the write path for variables. It does not invent paint/text/
+effect styles from token names; those still go through `figma_build`,
+`figma_batch_edit` or `figma_use`.
+
+- `export` writes the native `figma-tokens/v1` form: every local collection,
+  its modes, and every variable's type, description, per-mode value and alias.
+  `diff` compares that file with the live file. Both are reads; neither writes
+  to Figma.
+- `import` defaults to `dryRun:true`. Read `summary`, `changes`, `warnings` and
+  `blocking`; then apply with the returned `planId` and **`expectedFingerprint`**
+  (the dry run's `fingerprint` value — the argument name differs on purpose).
+  The `planId` covers the file bytes, target file and options; the fingerprint
+  covers the file identity plus the live variable
+  collections/modes/values/descriptions/aliases, and the server refuses a
+  changed file before the plugin is called. A prune dry run
+  must also use `allowDestructive:true` to enumerate the deletes, and the same
+  value is part of the planId; apply with the same argument.
+- A native alias is `{"alias":{"collection":"Theme","name":"color/bg"}}`. It is
+  applied with `createVariableAlias`; it is not flattened into a copy. A
+  remote/library alias is
+  `{"alias":{"collection":"Library","name":"text","remote":true,"id":"VariableID:…"}}`;
+  the id is required so an unchanged binding can be recognized, and a new or
+  different one is refused rather than guessed. DTCG `{color.bg}` aliases are
+  accepted inside the one collection being imported.
+  A minimal native document:
+
+  ```json
+  {
+    "schema": "figma-tokens/v1",
+    "collections": [{
+      "name": "Theme", "modes": ["Light", "Dark"], "defaultMode": "Light",
+      "variables": [{
+        "name": "color/bg", "type": "COLOR", "description": "page background",
+        "values": { "Light": "#ffffff", "Dark": "#000000" }
+      }, {
+        "name": "color/text", "type": "COLOR",
+        "values": { "Light": "#111111", "Dark": "#eeeeee" }
+      }]
+    }]
+  }
+  ```
+- A plain DTCG tree is accepted with `collection` and `mode`. Supported types:
+  `color`, `number`, `dimension` (px becomes a unitless FLOAT, with a warning),
+  `string`, `boolean`, `fontFamily` (an array becomes one comma-joined STRING)
+  and `fontWeight`. `shadow`, `gradient`, `typography`, `cubicBezier`,
+  `transition` and other composite types are **blocking**: the import does not
+  silently skip them.
+- A variable's type cannot change in Figma. A document that asks for COLOR over
+  an existing FLOAT is a blocking finding, not a recreate.
+- Collections, modes and variables are matched by **name**. Renaming one is a
+  create plus (with prune) a delete, not an identity-preserving rename. A mode
+  rename creates a new mode and leaves the old one: modes are never deleted.
+- Modes not named by the document are preserved on existing variables. A new
+  variable gets those modes filled from the default managed mode, and the plan
+  lists them under `fillsUnmanagedModes`.
+- `prune` is off by default. With `prune:true` and `allowDestructive:true` it
+  deletes variables in the named collections that the document no longer has.
+  It never deletes a collection or a mode. A variable alias pointing at a
+  variable being pruned blocks the plan; node bindings cannot be enumerated and
+  are named as a breakage risk, not silently protected.
+- Apply is one undo transaction and reads every collection, mode, description,
+  literal and alias back from fresh state. A mismatch rolls it back. If Figma
+  refuses the undo, the error says `ROLLBACK FAILED`; do not retry blindly.
+- Export carries the fields above, but only for variables. A variable `EASING`
+  or `TIMING` is named and skipped; styles, variable scopes, code syntax,
+  hidden-from-publishing flags, publish keys and extended-collection parentage
+  are not carried. A remote/library alias is exported with `remote:true`, its
+  name and its live variable id; an unchanged value round-trips and is
+  preserved, while a new or different remote binding is refused instead of
+  being rebound by name. Colours are 8-bit hex; matching is by name inside a
+  collection, so a rename is a delete plus a create, not a preserved identity.
+
 ## The snippet standard library (`flb`)
 
 `use_figma` runs its body with three arguments: `figma`, `console` and `flb`.

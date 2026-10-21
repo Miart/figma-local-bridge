@@ -230,5 +230,16 @@ await build({
   logLevel: "warning",
 });
 
+// tokens.ts turns design-token documents into variables. A dry run has to be
+// the same plan the apply executes, so the tests drive this shipped module.
+await build({
+  entryPoints: [join(here, "tokens.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "tokens.mjs"),
+  logLevel: "warning",
+});
+
 console.log("plugin built ->", join(here, "code.js"));
-console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs, helpers.mjs, exports.mjs, ui-build.mjs, batch.mjs, audit.mjs, index.mjs, design-system.mjs, spec-export.mjs, component-swap.mjs, variant-sets.mjs");
+console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs, helpers.mjs, exports.mjs, ui-build.mjs, batch.mjs, audit.mjs, index.mjs, design-system.mjs, spec-export.mjs, component-swap.mjs, variant-sets.mjs, tokens.mjs");

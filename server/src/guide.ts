@@ -42,7 +42,10 @@ figma_inspect before retrying; after "not sent", retrying is free.
 Prefer figma_build/patch for a keyed tree and figma_batch_edit for many small
 edits: all three default to dryRun:true, return a planId and fingerprints, and
 refuse an apply whose plan or targets changed. figma_audit, figma_index,
-figma_search, figma_design_system and figma_export_build_spec are read-only.
+figma_search, figma_design_system, figma_tokens and figma_export_build_spec are
+read-only unless figma_tokens is applying an import. figma_tokens covers local
+variables only: export, diff and a dry-run-first import with a planId, a live
+fingerprint and one undo transaction; prune is opt-in and destructive.
 The last one turns a live subtree back into a figma_build spec; read its
 unsupported/warnings, and never build a result marked truncated.
 

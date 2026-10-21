@@ -87,7 +87,7 @@ try {
     "figma_download_assets", "figma_get_code_connect_map", "figma_use", "figma_upload_assets", "figma_add_code_connect_map",
     "figma_compare", "figma_checkpoint", "figma_ops", "figma_cancel",
     "figma_build", "figma_patch", "figma_batch_edit", "figma_swap_component", "figma_variant_set",
-    "figma_audit", "figma_index", "figma_search", "figma_design_system", "figma_export_build_spec"];
+    "figma_audit", "figma_index", "figma_search", "figma_design_system", "figma_tokens", "figma_export_build_spec"];
   const missing = expected.filter((n) => !tools.includes(n));
   check("all parity tools are registered", missing.length === 0, "missing: " + missing.join(","));
 
@@ -187,6 +187,49 @@ try {
           verification: env.params.dryRun === false ? { ok: true, problems: [] } : undefined,
           planId: env.params.planId,
           ms: { plan: 2, apply: 1, total: 3 },
+        });
+      case "tokens":
+        if (env.params.action === "export") {
+          return ok({
+            status: "exported",
+            schema: "figma-tokens/v1",
+            document: {
+              schema: "figma-tokens/v1",
+              file: { name: "Test file", key: "FILEKEY" },
+              collections: [{
+                name: "Theme",
+                modes: ["Light"],
+                defaultMode: "Light",
+                variables: [{
+                  name: "color/bg", type: "COLOR", description: "background",
+                  values: { Light: "#ffffff" },
+                }],
+              }],
+            },
+            counts: { collections: 1, variables: 1, modes: 1, skipped: 0 },
+            warnings: [],
+            ms: { export: 1 },
+          });
+        }
+        return ok({
+          status: env.params.dryRun === false ? "applied" : "dry_run",
+          schema: "figma-tokens/v1",
+          dryRun: env.params.dryRun !== false,
+          summary: {
+            collections: { create: 1, existing: 0, modesCreate: 1, extraModes: 0 },
+            variables: { create: 1, update: 0, delete: 0, unchanged: 0 },
+            changes: 2,
+            truncated: false,
+          },
+          changes: [
+            { kind: "collection", action: "create", collection: "Theme", modes: ["Light"], defaultMode: "Light" },
+            { kind: "variable", action: "create", collection: "Theme", name: "color/bg", type: "COLOR", values: { Light: { before: null, after: "#ffffff" } } },
+          ],
+          fingerprint: "token-fp",
+          warnings: [],
+          blocking: [],
+          ...(env.params.dryRun === false ? { verification: { ok: true, problems: [] } } : {}),
+          ms: { plan: 2, ...(env.params.dryRun === false ? { apply: 1 } : {}) },
         });
       case "design_system":
         return ok({
@@ -702,6 +745,75 @@ try {
     dsDiff.action === "diff" && dsDiff.counts.added === 0 && dsDiff.counts.removed === 0 &&
       dsDiff.counts.changed === 0 && dsDiff.counts.unchanged === 1,
     JSON.stringify(dsDiff).slice(0, 200));
+
+  const tokenPath = join(os.tmpdir(), "figma-local-bridge-tokens-e2e.json");
+  try { fs.unlinkSync(tokenPath); } catch {}
+  const tokenExport = c.text(await c.rpc("tools/call", {
+    name: "figma_tokens",
+    arguments: { action: "export", path: tokenPath },
+  }));
+  check("figma_tokens exports a figma-tokens/v1 document to disk",
+    tokenExport.action === "export" && tokenExport.schema === "figma-tokens/v1" &&
+      tokenExport.counts.variables === 1 && tokenExport.sha256.length === 64 &&
+      fs.existsSync(tokenPath) && JSON.parse(fs.readFileSync(tokenPath, "utf8")).schema === "figma-tokens/v1",
+    JSON.stringify(tokenExport).slice(0, 200));
+
+  const tokenSeenBefore = seen.length;
+  const tokenDry = c.text(await c.rpc("tools/call", {
+    name: "figma_tokens",
+    arguments: { action: "import", path: tokenPath, dryRun: true },
+  }));
+  const tokenReq = seen[tokenSeenBefore];
+  check("figma_tokens dry run sends the parsed document and returns a planId plus fingerprint",
+    tokenReq.method === "tokens" && tokenReq.params.action === "import" && tokenReq.params.dryRun === true &&
+      tokenDry.status === "dry_run" && tokenDry.fingerprint === "token-fp" &&
+      typeof tokenDry.planId === "string" && tokenDry.planId.length === 20 && tokenDry.sourceSha256.length === 64,
+    JSON.stringify(tokenDry).slice(0, 240));
+
+  const tokenApplied = c.text(await c.rpc("tools/call", {
+    name: "figma_tokens",
+    arguments: {
+      action: "import", path: tokenPath, dryRun: false,
+      planId: tokenDry.planId, expectedFingerprint: tokenDry.fingerprint,
+    },
+  }));
+  check("figma_tokens applies with the dry-run planId and fingerprint",
+    tokenApplied.status === "applied" && tokenApplied.appliedPlanId === tokenDry.planId &&
+      tokenApplied.verification.ok === true,
+    JSON.stringify(tokenApplied).slice(0, 200));
+
+  const tokenMismatchSeen = seen.length;
+  fs.appendFileSync(tokenPath, "\n");
+  const tokenMismatch = await c.rpc("tools/call", {
+    name: "figma_tokens",
+    arguments: {
+      action: "import", path: tokenPath, dryRun: false,
+      planId: tokenDry.planId, expectedFingerprint: tokenDry.fingerprint,
+    },
+  });
+  const tokenMismatchMsg = String(tokenMismatch.error?.message ?? tokenMismatch.result?.content?.[0]?.text ?? JSON.stringify(tokenMismatch));
+  check("figma_tokens refuses a file that changed since the dry run before sending",
+    /PLAN_MISMATCH/.test(tokenMismatchMsg) && seen.length === tokenMismatchSeen,
+    tokenMismatchMsg.slice(0, 180));
+
+  const tokenNoPlan = await c.rpc("tools/call", {
+    name: "figma_tokens",
+    arguments: { action: "import", path: tokenPath, dryRun: false, expectedFingerprint: "token-fp" },
+  });
+  const tokenNoPlanMsg = String(tokenNoPlan.error?.message ?? tokenNoPlan.result?.content?.[0]?.text ?? JSON.stringify(tokenNoPlan));
+  check("figma_tokens apply requires the dry-run planId", /needs planId/.test(tokenNoPlanMsg), tokenNoPlanMsg.slice(0, 140));
+
+  const tokenPrune = await c.rpc("tools/call", {
+    name: "figma_tokens",
+    arguments: {
+      action: "import", path: tokenPath, dryRun: false, prune: true,
+      planId: tokenDry.planId, expectedFingerprint: tokenDry.fingerprint,
+    },
+  });
+  const tokenPruneMsg = String(tokenPrune.error?.message ?? tokenPrune.result?.content?.[0]?.text ?? JSON.stringify(tokenPrune));
+  check("figma_tokens prune needs explicit destructive approval",
+    /allowDestructive:true/.test(tokenPruneMsg), tokenPruneMsg.slice(0, 160));
+  try { fs.unlinkSync(tokenPath); } catch {}
 
   const specSeenBefore = seen.length;
   const spec = c.text(await c.rpc("tools/call", {

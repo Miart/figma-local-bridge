@@ -17,6 +17,7 @@ import { registerVariantTools } from "./variant-tools.js";
 import { registerAuditTools } from "./audit-tools.js";
 import { registerIndexTools } from "./index-tools.js";
 import { registerDesignSystemTools } from "./design-system-tools.js";
+import { registerTokenTools } from "./token-tools.js";
 import { registerSpecTools } from "./spec-tools.js";
 
 export interface Capabilities {
@@ -122,6 +123,9 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   registerAuditTools(server, client);
   registerIndexTools(server, client);
   registerDesignSystemTools(server, client);
+  // Token import follows the same plan/fingerprint/apply split; export and
+  // diff are reads of the document, and apply checks caps at call time.
+  registerTokenTools(server, client, caps);
   // The reverse of build is a read of the document; it belongs in both modes.
   registerSpecTools(server, client);
 
