@@ -32,3 +32,19 @@ release/
 # logs and OS junk
 *.log
 .DS_Store
+
+# local privacy denylist: names of clients/projects must never be committed
+.privacy-denylist
+
+# local secrets and captures
+.env
+.env.*
+!.env.example
+*.secret
+*.token
+*.pem
+*.key
+*.p12
+*.mobileprovision
+*.har
+*.har.gz

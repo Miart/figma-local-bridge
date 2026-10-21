@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuse a commit that carries a home path, a real e-mail, a credential, a HAR
+# or a locally denylisted company/project name. See scripts/check-privacy.mjs.
+exec node scripts/check-privacy.mjs --staged

@@ -218,7 +218,7 @@ try {
 
   const resRead = await rpc("resources/read", { uri: "figma-local://guide/skill" });
   const guideText = resRead.result?.contents?.[0]?.text || "";
-  check("guide resource reads back SKILL.md",
+  check("guide resource reads back GUIDE.md",
     guideText.includes(armed) && guideText.includes("scopeNodeId"),
     `${guideText.length} chars`);
 

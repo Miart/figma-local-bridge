@@ -68,14 +68,12 @@ function info(node: any, depth: number, builtRoot: any, includeText: boolean): J
   };
   if (builtRoot) out.build = { id: builtRoot.id, name: builtRoot.name, buildId: buildOf(builtRoot) };
   if (includeText && node.type === "TEXT") out.text = textOf(node).slice(0, TRUNC_TEXT);
-  if (node.type === "INSTANCE") {
-    try {
-      const main = node.mainComponent;
-      if (main) out.component = { id: main.id, name: main.name, key: main.key };
-    } catch {
-      /* dynamic-page: the async getter is the only safe one; search does not need it */
-    }
-  }
+  // Deliberately no `component` field for INSTANCE. This manifest declares
+  // documentAccess: "dynamic-page", where the synchronous `node.mainComponent`
+  // getter THROWS (and logs to Figma's console even when caught). Resolving it
+  // with `getMainComponentAsync()` for every instance would turn a cheap index
+  // into one round trip per instance. `figma_inspect` and `flb.main` answer the
+  // question for a single node, where the cost is justified.
   return out;
 }
 

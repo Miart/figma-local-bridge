@@ -986,7 +986,12 @@ async function exportNode(
   let main: any = null;
   if (direct && node.type === "INSTANCE") {
     try {
-      main = typeof node.getMainComponentAsync === "function" ? await node.getMainComponentAsync() : node.mainComponent;
+      // dynamic-page: never read the synchronous `mainComponent` getter, even
+      // as a fallback — it throws (and logs) under this manifest.
+      if (typeof node.getMainComponentAsync !== "function") {
+        throw new Error("getMainComponentAsync is missing on this INSTANCE");
+      }
+      main = await node.getMainComponentAsync();
     } catch {
       main = null;
     }

@@ -224,6 +224,34 @@ test("byId: resolves through the ASYNC getter, and says a missing id belongs to 
   await assert.rejects(() => flb.byId("12:345"), /no node 12:345 in this file[\s\S]*figma_get_metadata/);
 });
 
+// ---------------------------------------------------------------- flb.main
+
+test("main: reads an INSTANCE through getMainComponentAsync and never the sync getter", async () => {
+  const api = makeApi();
+  const flb = makeHelpers(api);
+  const master = api.add("COMPONENT", "Button");
+  const instance = api.add("INSTANCE", "Button");
+  instance.getMainComponentAsync = async () => master;
+  let syncReads = 0;
+  Object.defineProperty(instance, "mainComponent", {
+    configurable: true,
+    get() {
+      syncReads++;
+      throw new Error("Cannot call with documentAccess: dynamic-page. Use node.getMainComponentAsync instead.");
+    },
+  });
+
+  assert.equal(await flb.main(instance), master);
+  assert.equal(syncReads, 0, "the synchronous getter throws (and logs) under dynamic-page");
+
+  const detached = api.add("INSTANCE", "Detached");
+  detached.getMainComponentAsync = async () => null;
+  assert.equal(await flb.main(detached), null, "a detached instance is a null main component, not an error");
+
+  await assert.rejects(() => flb.main(api.add("FRAME", "Plain")), /is not an INSTANCE/);
+  await assert.rejects(() => flb.main(api.add("INSTANCE", "No async")), /has no getMainComponentAsync/);
+});
+
 // ---------------------------------------------------------------- flb.find / flb.one
 
 test("find: filters by name, type and pattern, and searches inside a node", () => {

@@ -1,0 +1,755 @@
+# figma-local-bridge — operating guide
+
+The bridge drives the Figma desktop app through a plugin panel. This is the
+part that tool schemas cannot say: which file a call lands in, what `rev` and
+`replayed` mean, and which failure may be retried. The schemas stay
+authoritative about arguments.
+
+## Connecting a new install
+
+macOS 0.34.1 ships a self-contained release: unzip it and double-click
+`Install.command`. It installs a per-user LaunchAgent, backs up and configures
+the MCP clients it detects, and copies the token to the clipboard without
+printing it. Figma has no API for registering a development plugin, so the
+user must still choose **Plugins → Development → Import plugin from
+manifest…** on `~/Library/Application Support/Figma Local Bridge/app/plugin/manifest.json`,
+run the plugin, and paste the token. The installer is unsigned in 0.34.1;
+Gatekeeper may require right-click → Open. `Uninstall.command` removes the app,
+LaunchAgent and this bridge's entries. From a source checkout, `npm run setup`
+does the same after `npm run build`.
+
+## Which file a call lands in
+
+Every local tool takes an optional `fileKey`; the cloud tools take a required
+`fileKey` naming the REST file to read.
+
+- Call `figma_ping` first when you do not know what is open: it reports the
+  daemon, the active page and every connected file (`fileKey` + name).
+- **One** file connected: `fileKey` may be omitted.
+- **Several** files connected: a call without `fileKey` is **refused before it
+  is sent**, with the list of candidates. Pass the key — never guess and never
+  "pick the most recent". A file that has never been saved gets a session key
+  like `unsaved-a1b2c3d4`.
+- An unroutable request is answered immediately. A timeout therefore means the
+  plugin is connected but slow, not that the wrong file was addressed.
+
+## Local capabilities, optional cloud tools, and what is not available
+
+`figma_ping` is also the capability report. It returns `capabilities.local.mode`
+(`read-only`, `write`, or `write+destructive`) and `capabilities.cloud`:
+
+- The cloud adapter is **off by default**. `cloud.available` is false unless the
+  MCP process has `FIGMA_CLOUD=1` and exactly one of `FIGMA_CLOUD_TOKEN` (PAT) or
+  `FIGMA_CLOUD_OAUTH_TOKEN` (OAuth). A token alone is not consent to cloud calls.
+- When `cloud.available` is true, the five registered tools are
+  `figma_cloud_ping`, `figma_cloud_get_file`, `figma_cloud_get_nodes`,
+  `figma_cloud_get_image` and `figma_cloud_download_image`. They read
+  documented Figma REST `GET` endpoints and work without the local daemon. Use
+  them for a file that is not open; use the local tools for the open document.
+- Cloud is read-only **with respect to Figma**. It cannot create or edit a
+  file, generate a design or image, run a shader, a generative plugin or Weave.
+  If a user asks for one of those, say it is not available here and point to the
+  official remote Figma MCP or the Figma UI. Never imitate it with a local
+  workaround and call the result the same thing. The one local write is
+  `figma_cloud_download_image`, which saves rendered bytes to `outDir`; the
+  Figma document is untouched.
+- `figma_cloud_ping` requires `current_user:read`; file/node/image reads and
+  downloads need `file_content:read`. `401`/`403` are
+  `CLOUD_UNAUTHORIZED`/`CLOUD_FORBIDDEN`, not a reason to retry. A `429` carries
+  `retryAfterSeconds` and is not retried automatically.
+  `CLOUD_RESPONSE_TOO_LARGE` means narrow `nodeIds`/`depth`, lower the render
+  scale, or raise `maxBytes`/`maxTotalBytes` deliberately; the reply or file is
+  refused, never truncated.
+- `figma_cloud_get_image` returns temporary URLs, not downloaded files.
+  `figma_cloud_download_image` is the explicit byte path: it calls the image
+  endpoint, fetches each signed URL **without the Figma token**, verifies the
+  PNG/JPEG/SVG/PDF signature, caps each image and the call total, writes
+  `figma-<nodeId>.<ext>` under `outDir`, and refuses to overwrite unless
+  `overwrite:true`. A non-HTTPS URL, a redirect, a bad signature or a local
+  write failure is `CLOUD_DOWNLOAD_BLOCKED`, `CLOUD_BAD_IMAGE` or
+  `CLOUD_DOWNLOAD_FAILED`; it never claims a partial set was complete.
+- The adapter does not run an OAuth authorization flow or refresh an expired
+  token; the caller supplies a valid access token.
+- Tools the official server marks remote-only but that the open file can answer
+  — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — are
+  real local reads here, not cloud calls.
+- The cloud boundary is part of the answer, not an error: a missing hosted
+  capability is a deliberate limit, not something to paper over.
+
+## rev, replayed, and what may be retried
+
+Every answer that came from the plugin carries two facts on its envelope:
+
+- `rev` — the document revision the answer was produced at. It advances on
+  failed writes too: a write that failed and rolled back is **not** the state
+  you last saw. Identical screenshot bytes with a higher `rev` mean Figma's
+  export cache is stale, not that your edit did nothing.
+- `replayed` — the answer came from the plugin's `opId` cache, so the method
+  did **not** run again. Retries reuse the same `opId` by design: a replay is
+  safe, and it is proof that nothing was applied twice.
+
+When an error says a call `may or may not have been applied`, do **not** retry
+blindly — re-check with `figma_inspect` and only then decide. When it says the
+call was `not sent`, retrying is free.
+
+`FIGMA_BRIDGE_OFFLINE` means the plugin is not running: say so and stop instead
+of looping on retries.
+
+`FIGMA_BRIDGE_UNKNOWN_FILE` means the key is not (or no longer) connected — an
+unsaved file's key changes when its panel reloads. Do not retry the same key:
+the error lists what is connected, take one of those.
+
+## Writes
+
+Mutations are serialized by the bridge, one at a time, because Figma's undo
+barrier is global. Prefer the specific tools over raw code:
+
+- `figma_inspect` with `compareWith` answers `EQUIVALENT` / `DIFFERENT` /
+  `INCONCLUSIVE` *before* you mutate.
+- `figma_replace_repeated_with_component` is transactional and refuses unless
+  every target is provably equivalent; run it with `dryRun: true` first.
+- `figma_use` is the raw Plugin API. It requires `allowDestructive: true` and a
+  `scopeNodeId` naming the only subtree it may touch (unless `allowPageWide`);
+  anything created, deleted, reparented or altered outside that scope is rolled
+  back, and page-global changes (variables, styles) need `allowGlobalChanges`.
+  One call = one undo step. Return the ids you create and keep calls small.
+- Work that escapes the call (a fire-and-forget promise) escapes the diff too —
+  a timeout does **not** roll back, and the error says so.
+- Writes can be off: `FIGMA_BRIDGE_WRITE=0` leaves the mutating tools
+  unregistered, and `figma_use` additionally needs `FIGMA_BRIDGE_DESTRUCTIVE=1`.
+
+## Declarative editing and component swap: build, patch, batch, swap
+
+The first three tools are the preferred way to change a tree. They resolve every
+target and every resource **before** the first write, so a typo cannot leave
+half a design applied.
+
+- `figma_build` takes a `buildId` and a full tree. The root gets that id in
+  `pluginData`; every node gets a stable key (`parent/slug#index` unless you
+  supply one). Re-send the same buildId and it updates in place — never
+  duplicates. `prune:true` makes the tree exact by deleting keyed children the
+  spec no longer contains; protected nodes are skipped and reported. The tree
+  also carries rotation (degrees), per-corner radii, stroke cap/join/miter,
+  masks, layout grids, layout inclusion flags, text case/decoration/paragraph
+  spacing, text hyperlinks (URL, or NODE by node id), text runs (ordered
+  character ranges with their own font, size, text style, fills, fill style,
+  variable bindings, case, decoration, line height, letter spacing and
+  hyperlink), whole-text `textVariable` bindings, an exact `LINE` length,
+  PATTERN paints (a file-local source node id plus tile type, scaling factor,
+  spacing and horizontal alignment), SHADER paints (a shader id plus optional
+  property assignments keyed by definition id; an unimported fill shader is
+  imported on apply; effect shaders are refused), and boolean operations. A
+  `BOOLEAN_OPERATION` carries `booleanOperation`
+  (`UNION`, `SUBTRACT`, `INTERSECT` or `EXCLUDE`) and at least two children in
+  spec order. Its operands are built first and combined into one boolean; the
+  operation can change in place on a repeat build, and its size is derived from
+  the operands (a supplied size is warned about and ignored). Nested booleans
+  build inside-out.
+- `figma_patch` takes a sparse tree under `rootNodeId`, `buildId` or
+  `rootKey`. Children match by key. A missing key is refused unless
+  `allowCreate:true`; a key under the wrong parent is refused rather than
+  duplicated. `prune:true` deletes omitted keyed children at patched levels.
+  A boolean patch may list only the operands it changes when `prune` is false;
+  pruning a boolean requires at least two operands in the patch. A sparse
+  boolean patch keeps the existing operand order and appends a new operand;
+  send the complete ordered list with `prune:true` to enforce order.
+- `figma_batch_edit` takes up to 200 small ops on many targets in one
+  transaction. Targets are `nodeId` or stable `key`. Ops: `set_text`,
+  `set_name`/`rename`, `set_fill`, `set_stroke`, `resize`, `move`,
+  `set_visible`, `set_opacity`, `set_rotation`, `set_layout`, `set_variant`,
+  `set_constraints`, `duplicate`, `reparent`. `duplicate` and `reparent` take
+  a destination `parentId` or `parentKey`; the key is resolved on the current
+  page. The dry run returns the resolved destination and adds its non-page
+  fingerprint to the same `fingerprints` map as the targets — pass that whole
+  map on apply, or a changed destination is not guarded. A `reparent.index` is
+  the final child index; omitted appends. Reordering inside the current parent
+  keeps `layoutPositioning`; moving into auto-layout uses `ABSOLUTE` when
+  preserving the canvas position (default) and `AUTO` with
+  `preserveAbsolute:false`. A destination inside an `INSTANCE` or
+  `COMPONENT_SET` is refused; inside a `COMPONENT` it is reported as an edit
+  to the component definition. To extend an existing set, use
+  `figma_variant_set` `add`, not a batch reparent. Moving into or out of a
+  protected parent is refused, because that changes the parent's children. A
+  duplicate whose `newKey` already exists is a no-op and reports an existing
+  node under a different parent. Every target, destination, font, paint style
+  and variant property is resolved first; a failed op rolls the whole batch
+  back unless `stopOnError:false`, which reports the exact failure and what
+  did apply.
+
+## Authoring a variant set
+
+`figma_variant_set` treats a `COMPONENT_SET` as a matrix. There is no direct
+`variantProperties` setter: a variant's `Property=Value` name is what Figma
+parses into the matrix, so the tool writes names and then reads the API fields
+back to prove the matrix landed.
+
+- `action:"combine"` takes standalone `COMPONENT`s, a set `name`, and the
+  properties each component should represent. Every component must use the
+  same property names, no combination may repeat, and a component already in
+  a set, inside an `INSTANCE`, or nested in another listed component is
+  refused. Components are renamed, then `figma.combineAsVariants` moves them
+  into a new set appended to `parentId`/`parentKey` (or their common parent).
+- `action:"add"` takes `sourceId`/`sourceKey` (an existing variant) and a
+  complete new `properties` map. It clones the source's structure — not its
+  instances — inserts the clone (optionally at `index`) and verifies the new
+  combination. An existing combination is refused; use `edit`.
+- `action:"edit"` takes `variantId`/`variantKey` and the complete new
+  `properties`. It renames the variant in place, so its id and instances
+  survive; their variant property values follow. The same combination is a
+  no-op.
+- Property names and values cannot contain comma, equals or a newline. All
+  variants must expose the same property names; a set whose variants do not
+  expose `variantProperties` is refused instead of guessed at.
+- A dry run (the default) returns `fingerprints` for every component and the
+  set, plus the destination layout for combine. Apply with
+  `dryRun:false`, the returned `planId` and that whole map. After writing, the
+  tool verifies `variantProperties` and `variantGroupProperties`; if Figma did
+  not accept the names, the transaction is rolled back rather than reported
+  as an applied matrix. If the undo itself fails, the error says `ROLLBACK
+  FAILED` and tells you to inspect before retrying.
+- A combine destination inside an `INSTANCE`, any `COMPONENT_SET` (including a
+  variant) or a `COMPONENT` definition is refused: Figma will not reparent a
+  component into a component definition. `add` and `edit` still operate on an
+  existing set inside a component and name that edit. A combine appends the
+  set; move it afterwards with `figma_batch_edit` if placement matters.
+
+## Swapping an instance's component
+
+`figma_swap_component` changes one or more `INSTANCE`s to another main
+component. It does not assign `mainComponent` directly: it calls
+`swapComponent` inside one undo transaction, then replays what that editor
+heuristic does not promise to keep.
+
+- Target the component by `componentId`, `componentKey`, `componentName`,
+  `componentSetId` or `componentSetKey`. A set needs `variantProperties` (for
+  example `{ "Size": "L" }`); omit it and the default variant is used with a
+  warning. An ambiguous component name is refused with the candidates.
+- A dry run (the default) compares the old and new structures and returns a
+  per-target fingerprint of the instance and the target component, the mapped
+  overrides, the root-level state it will preserve, every named loss and every
+  remapped path (`compatibility.changes`; `compatibility.losses` holds only
+  actual losses). Apply
+  with `dryRun:false`, the returned `planId` and `expectedFingerprints`. Apply
+  re-plans before the first write and refuses if the instance, its properties
+  or the target component moved since the dry run.
+- A direct override path is exact index+name first, then a unique name in the
+  new component (reported as `override-remapped`). A changed node type, a
+  missing layer, a changed nested component or an unsupported override field
+  is a loss. It is never applied to a different node type.
+- Component properties are mapped by display name and type. `BOOLEAN`, `TEXT`
+  and `INSTANCE_SWAP` values are replayed; `VARIANT` properties belong to the
+  chosen target, and `SLOT` properties cannot be set through the Plugin API.
+  A renamed or type-changed property is reported, not invented.
+- Root-level state that differs from the old main component is preserved:
+  custom name, manually resized geometry, opacity, visibility, paints/strokes/
+  effects and their style links, layout placement, constraints, rotation and
+  min/max size. `preserveSize:false` adopts the new component's size;
+  `preserveRootOverrides:false` adopts all root defaults.
+- `allowLoss:true` is required to apply a swap whose plan names a loss; the
+  apply report carries the predicted losses separately from what was
+  restored. `allowUnverified:true` is required for a library key whose
+  structure could not be checked before import. Any unexpected loss during
+  apply rolls the whole transaction back.
+- A target that is itself nested inside another `INSTANCE` is refused: that is
+  an override of the outer instance. Nested instance overrides deeper than 12
+  levels block the swap rather than being silently truncated.
+
+A no-op (the target already points at that component) writes nothing. The
+tool is registered in read-only mode for dry runs; only apply checks write
+access.
+
+On a TEXT node, `runs` are absolute UTF-16 character offsets (`start`
+inclusive, `end` exclusive), sorted and non-overlapping. Each run needs at
+least one field; fields it omits inherit the node's base text properties.
+`textStyle` and `fillStyle` take a local style name or id and link that range;
+`null` clears a link inherited from the base, and `fillStyle` and `fills` are
+mutually exclusive on one run. A TEXT node's `textVariable` binds base text
+fields, and a run's `variable` binds that range; both are objects keyed by
+Figma's field names (`fontFamily`, `fontStyle`, `fontWeight`, `fontSize`,
+`letterSpacing`, `lineHeight`, `paragraphSpacing`, `paragraphIndent`). The value
+is a local variable name/id, and `null` clears a binding inherited from the
+base. A literal run value does not remove a base binding; set that field to
+`null` in the run's `variable` map when the range should be unbound. Build
+resolves the variable and checks its `STRING`/`FLOAT` type before writing. A
+`fontFamily`/`fontStyle` binding changes the font, so Figma may need that font
+loaded; the build rolls back and names the font error if it is not.
+Send `text` with `runs`, because the engine validates every range against the
+characters it is about to write. `figma_batch_edit`'s `set_text` still sets one
+font per op; use `figma_build` / `figma_patch` for per-range styling and
+bindings.
+
+An INSTANCE's `overrides` map changes layers inside the instance without
+detaching it. The map key is a layer name or build key; when names repeat, give
+the override a `path: [{name, index}, ...]` and use any unique label as the
+key. Fields cover text, font and size, text style and formatting, hyperlink,
+fills/strokes and their styles, effects and effect style, visibility, opacity,
+blend mode, rotation, corner radii, stroke weight, size and name. A path is
+resolved against the recreated instance before writing; a stale name or index
+is a warning and that override is skipped, never applied to a guessed layer.
+
+The safe sequence for build, patch, batch and swap:
+
+1. Call with `dryRun:true` (the default). Read the plan, `planId`,
+   `fingerprints` / `fingerprint`, and any warnings.
+2. If the plan is right, call again with `dryRun:false`, the returned
+   `planId`, and the returned fingerprint(s).
+3. The apply refuses a different plan or a target that moved since the dry run
+   **before** the plugin writes anything. A failed apply is rolled back and
+   says so; never retry a blind write.
+
+A batch cannot target a node created by an earlier `duplicate` in the same
+batch — its key does not exist at plan time. Split that into two calls.
+`figma_build` / `figma_patch` do not implicitly move a keyed node to another
+parent; use `batch` with `reparent`, `parentKey` and (when order matters) a
+final `index`. Pass the destination fingerprint from the dry run with the
+target fingerprints.
+
+To bring a hand-made tree into this language, `figma_export_build_spec`
+returns a spec that `figma_build` accepts. It keeps keys that already exist,
+derives the same key the build engine would for nodes without one, and turns
+style/variable links into `fillStyle`/`strokeStyle`/`textStyle`/`effectStyle`,
+`variable` or `textVariable`. URL text links travel in the spec; a NODE link is
+exported with a file-local warning. Mixed text becomes a base style plus
+ordered `runs`, so mixed fonts, sizes, text/fill style links, text variable
+bindings, case, decoration, spacing and links survive a rebuild. An IMAGE or
+VIDEO paint carries its crop transform, tile scaling, rotation and filters (a
+video hash is file-local, like an image hash); a PATTERN paint carries its
+source node id, tile type, scaling factor, spacing and horizontal alignment
+(the source node is file-local); a SHADER paint carries its shader id and
+property assignments keyed by definition id, including variable aliases, which
+must resolve in the target file (the shader must be available in the target
+file and is imported on apply); every supported paint carries
+`visible` and `blendMode`, including an invisible paint that stays in the
+stack. Direct
+instance overrides become `overrides` entries
+with structural paths built from
+the main component's layer names, so a renamed layer still resolves; the
+instance interior itself is recreated from the main component, not carried in
+the spec. A `BOOLEAN_OPERATION` is exported as a live boolean with its operation
+and children, not as a flattened SVG. A node the build cannot express — an
+unsupported type, a frame created from SVG, a detached instance — is exported
+as its inline SVG render when `svgFallback` is on (the default). The rebuild is
+a flattened frame: appearance
+survives, but the original child layers, component identity, overrides and
+style/variable links do not and text becomes outlines; every fallback is named
+in `warnings` and counted in `counts.svgFallbacks`. Slices are never flattened; `svgFallback: false` lists
+those nodes as unsupported instead. A fallback that cannot be rendered or does
+not fit the 128 KiB per-node / 192 KiB total budget is listed as unsupported
+with the reason. A built SVG leaf is re-recognised as `SVG` on the next build,
+so re-sending it updates in place; a changed `svg` replaces its interior while
+keeping the frame's id and key, and an unchanged source is not touched. Read `unsupported` and `warnings` before building it: an
+override field the build cannot express or a mixed value has no exact
+representation. `truncated: true` means the spec is
+incomplete and must not be built as-is.
+
+## Finding things, and checking the result
+
+- `figma_index` returns a compact flat index of a page/subtree: id, stable
+  key, name, type, path, depth, size, child count, build root. Use it to learn
+  the shape before inspecting one subtree. It stops at `maxNodes` and says so.
+  It deliberately does not resolve an INSTANCE's main component: under
+  dynamic-page the synchronous getter throws, and one async lookup per instance
+  would turn the index into N round trips. Use `figma_inspect` or `flb.main`
+  for one node.
+- `figma_search` finds nodes by name, stable key or text — substring, regex or
+  glob — with `types`, `keyPrefix` and `hasKey` filters. It returns the match
+  fields, a text snippet and the path, not the whole tree.
+- `figma_audit` is read-only. It reports duplicate keys, unkeyed nodes inside a
+  built tree, literal fills/strokes that are neither a paint style nor a
+  variable, text without a text style, placeholder copy, detached instances,
+  WCAG AA contrast against the effective background, default names, and
+  opt-in off-scale spacing/radius, empty text and literal effects. A contrast
+  finding is exact for solid text on a solid effective background;
+  gradients/images are reported as unknown, not guessed. With `suggest:true`
+  (default) a hardcoded colour names exact local paint-style and colour-variable
+  candidates, unstyled text names exact local text-style candidates, and
+  spacing/radius names the nearest on-scale value. These are candidates, not
+  bindings: check the mode and apply the token deliberately.
+- `figma_design_system` snapshots styles, variables (with modes and values) and
+  components. `inventory` returns it, `export` writes a JSON file with a
+  sha256, and `diff` compares that file to the live file by stable key. It is
+  read-only: syncing values back into Figma still goes through the specific
+  write tools.
+- `figma_review` is the before/after measurement for an iteration: save a
+  baseline, edit, compare. It reports new/resolved audit findings and pixel/
+  structural changes together; see the section below. Use `figma_compare` for
+  a mockup, and `figma_checkpoint` when a subtree must be restorable.
+
+## Design tokens: variables, not styles
+
+`figma_tokens` is the write path for variables. It does not invent paint/text/
+effect styles from token names; those still go through `figma_build`,
+`figma_batch_edit` or `figma_use`.
+
+- `export` writes the native `figma-tokens/v1` form: every local collection,
+  its modes, and every variable's type, description, per-mode value and alias.
+  `diff` compares that file with the live file. Both are reads; neither writes
+  to Figma.
+- `import` defaults to `dryRun:true`. Read `summary`, `changes`, `warnings` and
+  `blocking`; then apply with the returned `planId` and **`expectedFingerprint`**
+  (the dry run's `fingerprint` value — the argument name differs on purpose).
+  The `planId` covers the file bytes, target file and options; the fingerprint
+  covers the file identity plus the live variable
+  collections/modes/values/descriptions/aliases, and the server refuses a
+  changed file before the plugin is called. A prune dry run
+  must also use `allowDestructive:true` to enumerate the deletes, and the same
+  value is part of the planId; apply with the same argument.
+- A native alias is `{"alias":{"collection":"Theme","name":"color/bg"}}`. It is
+  applied with `createVariableAlias`; it is not flattened into a copy. A
+  remote/library alias is
+  `{"alias":{"collection":"Library","name":"text","remote":true,"id":"VariableID:…"}}`;
+  the id is required so an unchanged binding can be recognized, and a new or
+  different one is refused rather than guessed. DTCG `{color.bg}` aliases are
+  accepted inside the one collection being imported.
+  A minimal native document:
+
+  ```json
+  {
+    "schema": "figma-tokens/v1",
+    "collections": [{
+      "name": "Theme", "modes": ["Light", "Dark"], "defaultMode": "Light",
+      "variables": [{
+        "name": "color/bg", "type": "COLOR", "description": "page background",
+        "values": { "Light": "#ffffff", "Dark": "#000000" }
+      }, {
+        "name": "color/text", "type": "COLOR",
+        "values": { "Light": "#111111", "Dark": "#eeeeee" }
+      }]
+    }]
+  }
+  ```
+- A plain DTCG tree is accepted with `collection` and `mode`. Supported types:
+  `color`, `number`, `dimension` (px becomes a unitless FLOAT, with a warning),
+  `string`, `boolean`, `fontFamily` (an array becomes one comma-joined STRING)
+  and `fontWeight`. `shadow`, `gradient`, `typography`, `cubicBezier`,
+  `transition` and other composite types are **blocking**: the import does not
+  silently skip them.
+- A variable's type cannot change in Figma. A document that asks for COLOR over
+  an existing FLOAT is a blocking finding, not a recreate.
+- Collections, modes and variables are matched by **name**. Renaming one is a
+  create plus (with prune) a delete, not an identity-preserving rename. A mode
+  rename creates a new mode and leaves the old one: modes are never deleted.
+- Modes not named by the document are preserved on existing variables. A new
+  variable gets those modes filled from the default managed mode, and the plan
+  lists them under `fillsUnmanagedModes`.
+- `prune` is off by default. With `prune:true` and `allowDestructive:true` it
+  deletes variables in the named collections that the document no longer has.
+  It never deletes a collection or a mode. A variable alias pointing at a
+  variable being pruned blocks the plan; node bindings cannot be enumerated and
+  are named as a breakage risk, not silently protected.
+- Apply is one undo transaction and reads every collection, mode, description,
+  literal and alias back from fresh state. A mismatch rolls it back. If Figma
+  refuses the undo, the error says `ROLLBACK FAILED`; do not retry blindly.
+- Export carries the fields above, but only for variables. A variable `EASING`
+  or `TIMING` is named and skipped; styles, variable scopes, code syntax,
+  hidden-from-publishing flags, publish keys and extended-collection parentage
+  are not carried. A remote/library alias is exported with `remote:true`, its
+  name and its live variable id; an unchanged value round-trips and is
+  preserved, while a new or different remote binding is refused instead of
+  being rebound by name. Colours are 8-bit hex; matching is by name inside a
+  collection, so a rename is a delete plus a create, not a preserved identity.
+
+## The snippet standard library (`flb`)
+
+`use_figma` runs its body with three arguments: `figma`, `console` and `flb`.
+`flb` is not a second API — it is the Plugin API with this manifest's traps
+named (`plugin/helpers.ts`), so a snippet does not rediscover them by failing:
+
+- the manifest declares `"documentAccess": "dynamic-page"`, where
+  `figma.getNodeById` **throws** and an INSTANCE's synchronous
+  `node.mainComponent` getter **throws** too (Figma logs it even if the snippet
+  catches it). `await flb.byId(id)` uses the async form; `await flb.main(node)`
+  (or `await node.getMainComponentAsync()`) is the only safe main-component
+  read. A detached instance returns `null`.
+- `flb.find({within, name, match, type})` and `flb.one(...)` search descendants
+  (`match` is a RegExp or a pattern string). Neither will answer with a silently
+  truncated list; `one` refuses an ambiguous pick and names what else matched.
+- `flb.bbox(node, {render: true})` returns **absolute** bounds. `render: true`
+  is what is actually drawn — shadows and strokes included — and that is what
+  packing sprites has to use, because layout bounds stop at the node's box. A
+  node with nothing to draw reports layout bounds and says the render bounds
+  were null.
+- `flb.clear(node)` removes the children and returns what was removed.
+- `flb.flatten(node)` detaches every instance in the subtree, outermost first
+  (Figma's own `detachInstance`, so overrides survive) — the flat-sprite step.
+  It throws if anything could not be detached instead of reporting a half-flat
+  tree. **The node you passed in is dead afterwards**: Figma invalidates a
+  detached instance, so even reading its `name` throws `The node with id … does
+  not exist`. Carry on with the returned `root` (or `detached[i].frame`) — a
+  snippet that kept the old node to report on later dies on the way out.
+- `flb.grid(nodes, {parent, cell, columns, gap, origin, fit})` arranges nodes in
+  uniform cells — the atlas layout. `origin` and the returned cell boxes are
+  ABSOLUTE document coordinates; `cell` defaults to the largest render bounds;
+  `fit: true` scales sprites DOWN into their cells (never up). It refuses the
+  three cases where placement would quietly not happen: an auto-layout parent
+  (unless the children are `layoutPositioning = "ABSOLUTE"`), a node that cannot
+  be resized (an INSTANCE — flatten it first; a HUG-sized frame), and nodes
+  living in different parents.
+- `await flb.text(content, {parent, x, y, size, font, fills})` loads the font
+  before writing characters — the step whose absence reads as a font error.
+  `fills: "#ffcc00"` becomes a paint through `figma.util.solidPaint`.
+- The write helpers refuse a target **outside the declared scope**, and a node
+  on **another page** (the scope guard indexes one page), *before* writing: a
+  call that would be rolled back at the end fails at the line that caused it.
+
+An atlas, end to end, in one call:
+
+```js
+const sheet = flb.one({ name: "Atlas" });
+const sprites = flb.find({ type: "INSTANCE", match: "^sym_" }).map((s) => flb.flatten(s).root);
+flb.clear(sheet);
+const placed = flb.grid(sprites, { parent: sheet, cell: 128, columns: 4, fit: true });
+return { cells: placed.cells, resized: placed.resized, notes: placed.notes };
+```
+
+## Exporting for a build or the web: atlas, 9-slice, states, handoff
+
+`figma_export_ui_atlas` takes the sheet you just built and returns ONE PNG plus a
+manifest of rects **in that PNG's own pixels**, written next to it
+(`.atlas.json`) and re-read from disk before the answer. Nothing is repacked: the
+frame's direct children are the sprites, in their document order. What the
+manifest refuses to hide:
+
+- `sheet.sizeMatches: false` — Figma produced something other than
+  `round(size × scale)`; the rects follow the FILE, and `exportWidth/Height` is
+  what they are measured against.
+- `overlaps`, `offSheet`, `bleed` — rects that overlap (an engine slicing by rect
+  cannot tell whose pixel it is), sprites outside the image, and drawing that
+  reaches past its own box (a shadow or a stroke the neighbouring cell cuts off).
+- repeated names: keys become `coin#1`, `coin#2`; a child with no bounds at all
+  lands in `skipped` with a reason instead of quietly missing.
+- `basis: "nodeBox"` — the frame has a stroke, so the image is the frame's own
+  box and the rects are measured from the node's top-left. Which box the image is
+  is decided by the exported size, not assumed.
+
+So the order is: build the sheet (`flb.grid`), read `verification` and
+`warnings`, and only then wire the engine up — the rects in the reply are what
+the engine needs; the JSON on disk is what a build pipeline reads.
+
+`figma_export_9slice` returns insets in the file's pixels, the stretchable
+middle, and CSS values ready for `border-image` (`borderImageSlice` in image
+pixels, `borderImageWidth` in design pixels — the pair a `@2x` image needs).
+Insets come from `insets` or from a child layer named exactly `9slice`; insets
+that leave no middle are refused with the numbers that caused them.
+
+`figma_export_ui_states` writes one file per state. A `COMPONENT_SET` names them
+by its variant property — the only one it declares, or the one passed as
+`property`; several properties without `property` is a refusal that lists them,
+because `State=hover` and `Size=L` are both plausible names and one would be a
+lie. A frame names states by layer name. States with **identical bytes** are
+reported: a hover that draws exactly like normal is usually a variant that is not
+what its name says, and this is the cheapest place to find that out.
+
+`figma_export_web_handoff` writes the folder a web developer opens:
+`preview.png` (1x) plus `preview@Nx.png`, `spec.json` (flat, document order —
+every layer's box relative to the frame, text, paints, effects and layout
+fields), `tokens.json`/`tokens.css` (solid colours named by their paint styles
+when one value has one style, fonts, text classes, spacing) and a `README.md`
+that says what the bundle is **not**: production HTML, responsive layout,
+image fills as separate files, gradient tokens, embedded fonts, masks and
+effects applied by the CSS, paragraph spacing or vertical alignment. A colour
+bound to several styles, a gradient, an
+image fill or a mixed text layer is never averaged into an invented value: it
+is named as missing, or carried as stops/segments. `handoff.json` keeps the
+hashes and counts, every file is re-read from disk, and one call owns one
+folder — it refuses to reuse it for another node. Above 2,500 nodes, 24 MP per
+preview or 8 MiB per PNG it refuses rather than truncating; lower the scale or
+pick a smaller frame. The 24 MP preflight runs before the rasteriser: a preview
+that would take minutes is named, with the largest scale that fits
+(`pass scale: 1 (6.4 MP)`), instead of burning the bridge's timeout. A font that the document uses but the machine cannot load is listed in
+the README; it is not assumed present. That check is time-boxed (2 s per
+style, 12 s in total), because loading a font this machine does not have is a
+network round trip that can take minutes: a style that does not answer in time
+is listed separately as **unchecked** — whether the machine can render it is
+unknown, and the bundle says so instead of implying either way. The reply
+divides the time by phase — `walkMs` reading the tree, `checkMs` the check
+above, `exportMs` rasterising — so a call that took minutes names the phase
+that took them; a cold font service lands in `exportMs` even when the check
+already called the style unchecked.
+
+All four are reads of the document (usable with `FIGMA_BRIDGE_WRITE=0`), and
+their files go to `outDir`, a temp directory by default.
+
+## Reading
+
+- `figma_get_metadata` is the cheap way to find ids; `figma_inspect` gives the
+  structure and a semantic fingerprint; `figma_get_layout_tree` returns
+  absolute geometry for a whole subtree in one call.
+- `figma_download_assets` writes bytes to disk and returns paths — prefer it
+  over moving base64 through the conversation.
+- `figma_get_selection` is answered from memory (the plugin pushes selection
+  changes), so it costs no round trip. `figma_set_selection` also pans the
+  viewport, which is the only way to move the user's cursor.
+- `figma_compare` checks a render against a PNG on disk (a mockup, an earlier
+  export, another node written out with `figma_download_assets`) and reports
+  **where** it differs, not just whether: differing area, bounding box (in the
+  reference's own pixels), largest clusters, plus a heatmap. It is how a rebuild
+  is proven to have landed instead of eyeballed — and a size mismatch is a
+  finding, while a clean 2×/3×/4× ratio means you passed the wrong `scale`.
+
+## Iterating on a subtree with a baseline
+
+`figma_review` is the loop tool: save a baseline, edit, compare, repeat. It is
+read-only for the document; the baseline and heatmap are local files.
+
+- `save` renders the node, audits it with the requested rules, and records the
+  semantic fingerprint alongside the PNG and the full audit report:
+  `{ action: "save", nodeId, name?, rules?, suggest?, scale? }`. The reply has
+  the review `id`, paths and the audit counts. Save **before** the edit.
+- `compare` re-renders, re-audits and re-inspects the live node and diffs it
+  against the baseline: `{ action: "compare", id? }`. With no `id` it uses the
+  newest baseline for the file. It reports `visual` (bbox, clusters, heatmap),
+  `structure.fingerprintEqual`, `audit.new` / `resolved` / `changed`, severity
+  `delta`, `regressions`, `improvements` and `next`.
+- Read `status` before anything else: `regressed` means a new error/warning
+  finding or a render-size change; `improved` means a previous problem is
+  gone; `changed` is a neutral pixel/structural/finding change; `unchanged`
+  permits walking away. Never describe a neutral `changed` as an improvement.
+- The baseline's rules, `includeHidden` and `suggest` are reused by `compare`
+  (and its scale unless you override it), so a delta is not caused by different
+  audit settings. To ask a different audit question, save a new baseline.
+- If `audit.complete` is false, the new/resolved lists may be incomplete even
+  though the severity counts are complete; raise `maxFindings` and redo the
+  baseline. A new error/warning may be a previously truncated finding.
+- A capture that sees different `rev` values for image, audit and structure is
+  refused: the three would not describe one state. Retry when the file is
+  quiet.
+- Accept a step by saving a new baseline (the id changes). Keep the old one if
+  you may need to compare against it; `list` shows them and `drop` removes the
+  PNG, JSON and heatmap. `latest` is the default.
+- A rebuilt node has a new id: pass `nodeId` to `compare`. If the id is gone,
+  the plugin says so; this is not a visual regression.
+- This is not `figma_checkpoint`: a review baseline cannot restore a subtree.
+  Use `figma_checkpoint` before a risky rebuild, then `figma_review` to judge
+  the result. Use `figma_compare` when the reference is a mockup rather than an
+  earlier iteration.
+
+A safe loop:
+
+1. `figma_review { action:"save", nodeId }`.
+2. Apply one guarded edit (`figma_build` / `figma_patch` / `figma_batch_edit`).
+3. `figma_review { action:"compare" }`; read `status`, `regressions`, `next`.
+4. If `regressed`, fix the named new finding or restore the checkpoint; then
+   compare again. If accepted, save a fresh baseline and continue.
+
+## A call that timed out, and the write nobody is waiting for
+
+Writes are chained in the plugin: a write waits behind the write ahead of it.
+Its caller does not wait that long — and when the caller gives up, the queued
+write still runs. That is the one case where an edit lands after everyone has
+stopped watching, so it has its own two tools.
+
+- `figma_ops` answers "what is still going to write?": per file, the call that
+  is `running`, the writes `queued` behind it, and what finished `recently` —
+  plus, for this session, the calls it is still waiting for and the ones it gave
+  up on. A timeout error names its `opId`: pass that to `figma_ops` to get the
+  operation's state and the answer recorded for it. That settles a call that
+  timed out — "it finished at rev 412 with this result" — instead of leaving
+  "may or may not have been applied" standing.
+- `figma_cancel` stops a call whose state is `queued`: nothing of it has run, its
+  caller is answered at once with OP_CANCELLED, and the revision does not move
+  because the document did not. A `running` call is refused with OP_RUNNING —
+  Figma runs plugin code to the end and nothing can interrupt it from inside the
+  plugin. OP_DONE means it already ran, and the message names the revision.
+- Both are read-only and work in a read-only bridge: cancelling only ever
+  prevents a write, never causes one.
+- When the process that timed out is gone — or the plugin was reloaded, taking
+  its opId cache with it — `figma_journal` is the part of the trail that
+  survives: a local append-only file with every call this bridge sent, its
+  `send`/`ok`/`failed`/`timeout`/`retry`/`dropped`/`late` lines, the revision
+  and the target. `unsettled: true` shows only the calls that did not end
+  cleanly. It never records code, text or images — method names, target ids,
+  revisions and outcomes only — so `figma_use`'s `description` is the one place
+  a human note enters it. Edits a human makes in Figma are not in the file, and
+  neither is a call refused before sending: nothing was sent, nothing changed.
+
+## Checkpoints — the substitute for an undo stack
+
+Figma's undo barrier is global and one step deep, so "put it back" cannot be a
+saved undo step. `figma_checkpoint` is a description plus a rebuild:
+
+- `action: "save"` records a subtree as data (`nodeId`; a page is refused) into
+  one JSON file per file key. The reply carries a `summary` and the
+  `limitations` a rebuild cannot carry — an INSTANCE's interior structure
+  beyond its direct overrides, component identity, and the identity and existing
+  instances of a component set. Read them before telling
+  anyone the subtree will come back exactly.
+- `action: "show"` diffs the live subtree against the file field by field and
+  reports the semantic fingerprint next to it. That is how "has this drifted
+  already?" gets answered before a rebuild is chosen.
+- `action: "restore"` replaces the target's children from the checkpoint in ONE
+  transaction. It is a **dry run by default** and names what would be deleted
+  and created; a real rebuild needs `dryRun: false`, `allowDestructive: true`
+  and a bridge started with `FIGMA_BRIDGE_DESTRUCTIVE=1`.
+- An INSTANCE's direct per-layer overrides travel in
+  `state.instance.overrides`: a structural path built from the main component's
+  layer names, the fields Figma reports as overridden, a snapshot of the layer
+  and its style/variable links. Restore recreates the instance from its main
+  component, re-applies component properties, then replays each override field
+  by field. A path that no longer matches the main component is named in
+  `overridesMissing` and skipped — never applied to whatever now sits at that
+  index. `overridesRestored` counts the ones that landed, and a field this
+  version cannot rebuild is named in `overridesUnsupported` instead of being
+  dropped. A direct override that changed per-run text styling is replayed
+  range by range: every run font is loaded before the character setter, then
+  sizes, fills, text/fill style links, variable bindings, case, decoration,
+  line height, letter spacing and hyperlinks go back through the range setters.
+  When the override touched range styling, the snapshot is treated as the
+  final state: inherited per-run text/fill style links and range variable
+  bindings are cleared before the snapshot is replayed, so a link or binding
+  the override removed does not survive from the main component. A clear the
+  file refuses is named in `notes`. The interior's structure itself is still
+  the main component's current structure.
+- STAR and POLYGON are rebuilt natively: `pointCount` (and STAR's `innerRadius`)
+  are applied before the final size, and a direct override of those fields is
+  replayed too. A `BOOLEAN_OPERATION` tree is rebuilt from its children with the
+  recorded operation (`union` / `subtract` / `intersect` / `exclude`), including
+  nested operations; fewer than two rebuildable children is named and skipped.
+  A `SLICE` comes back with its geometry and `exportSettings`. A `COMPONENT_SET`
+  is rebuilt from its variant `COMPONENT`s with `figma.combineAsVariants`;
+  non-variant component properties are added back by type and default value,
+  their `SLOT` description/preferred values/slot settings and `INSTANCE_SWAP`
+  preferred values are restored, and a definition-level `defaultValue` variable
+  binding on `BOOLEAN`/`TEXT`/`INSTANCE_SWAP` is re-linked when the variable
+  exists. Layer-level `componentPropertyReferences` are remapped to the new
+  names. Variant options come from the variant names, but component and property
+  ids, component keys and existing instances do not come back. The `#id` suffix
+  is assigned by Figma, so verification compares definitions and layer
+  references by display name. A metadata edit or binding the file refuses is
+  named in `propertiesFailed` / `bindingsMissing`; the property and its literal
+  default stay.
+- Style ids, node-level variable bindings and explicit variable modes travel in
+  `meta`; per-run text bindings and style ids travel inside the runs. Restore
+  re-links a style, variable, collection or mode when it still exists and
+  reports every one that does not: `stylesMissing`, `bindingsMissing` and
+  `modesMissing`. The recorded value is written either way, so a missing link
+  leaves a correct-looking but unlinked node instead of a missing colour or size.
+- Paint-level variable bindings travel with the paint. They survive when their
+  variable exists; when it does not, the paint returns by value and
+  `bindingsDropped` names it.
+- Per-run text and fill style ids and text variable bindings travel inside the
+  runs and are re-linked by id when the style or variable still exists; a
+  missing one is reported with the run's path, and the recorded literal value
+  remains. The text style's font is loaded before the range link is applied.
+- A whole-text hyperlink is saved and restored by value. Mixed per-run links
+  travel inside the runs, so `null` on a run clears it for that range. A NODE
+  link stays file-local.
+- Afterwards the server dumps the subtree **again** and diffs it against the
+  checkpoint: `verification.verified: true` means no field differs. When it is
+  false, `verification.diff` names every field with both values and
+  `verification.notes` says which differences checkpoint-v1 knows it causes
+  (HUG sizing, text-run values). Say so — never call a rebuild "restored" when
+  it is not.
+- Refused with a reason: a truncated dump (restoring it would delete whatever
+  the dump never reached), a `GROUP` / `INSTANCE` / page target, and node types
+  checkpoint-v1 cannot rebuild — unless `allowPartial: true`, which rebuilds the
+  rest and lists every skipped node.
+- Recording is cheap: take a checkpoint before a risky rebuild of a subtree,
+  then `show` or `compare` to judge the result, and keep its `id` so a restore
+  is one call away.
+
+## The panel
+
+The plugin panel is decoration plus status: the mascot's mood, the status line
+and the chips (`page`, selection, MCP sessions, call count) restate the same
+facts in different ways. No task should depend on interpreting the mascot.

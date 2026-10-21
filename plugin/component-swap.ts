@@ -454,7 +454,13 @@ async function loadTargets(ctx: any, nodeIds: string[]): Promise<{ items: any[];
     }
     let main: any = null;
     try {
-      main = typeof node.getMainComponentAsync === "function" ? await node.getMainComponentAsync() : node.mainComponent;
+      // dynamic-page: the synchronous `mainComponent` getter throws. Never
+      // fall back to it — an absent async getter means this is not an
+      // INSTANCE-shaped Plugin API, not that the old accessor is safe.
+      if (typeof node.getMainComponentAsync !== "function") {
+        throw new Error("getMainComponentAsync is missing on this INSTANCE");
+      }
+      main = await node.getMainComponentAsync();
     } catch (e) {
       items.push({ id, error: `target ${id}: cannot read its main component (${errMsg(e)})` });
       continue;
@@ -511,8 +517,9 @@ const RISK_KINDS = new Set([
 ]);
 
 async function mainOf(node: any): Promise<any> {
+  if (!node || typeof node.getMainComponentAsync !== "function") return null;
   try {
-    return typeof node.getMainComponentAsync === "function" ? await node.getMainComponentAsync() : node.mainComponent;
+    return await node.getMainComponentAsync();
   } catch {
     return null;
   }
@@ -616,18 +623,11 @@ async function remapOverrides(
       details.push({ kind: "override-unsupported", path: at, layer: pathLabel(rec.path), fields: rec.unsupported });
     }
     if (rec.state?.instance && newRes.node.type === "INSTANCE") {
-      let oldNestedMain: any = null;
-      let newNestedMain: any = null;
-      try {
-        oldNestedMain = typeof oldRes.node.getMainComponentAsync === "function"
-          ? await oldRes.node.getMainComponentAsync()
-          : oldRes.node.mainComponent;
-      } catch { /* named below */ }
-      try {
-        newNestedMain = typeof newRes.node.getMainComponentAsync === "function"
-          ? await newRes.node.getMainComponentAsync()
-          : newRes.node.mainComponent;
-      } catch { /* named below */ }
+      // Resolve both through the async getter. Under dynamic-page the sync
+      // getter throws (and logs) even inside a try/catch, so a fallback is
+      // never harmless.
+      const oldNestedMain = await mainOf(oldRes.node);
+      const newNestedMain = await mainOf(newRes.node);
       const sameNested = oldNestedMain && newNestedMain &&
         (oldNestedMain.id === newNestedMain.id || (oldNestedMain.key && oldNestedMain.key === newNestedMain.key));
       if (sameNested) {

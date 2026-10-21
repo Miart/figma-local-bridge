@@ -10,7 +10,7 @@
 
 Сейчас плагин спаривается ровно с одним сокетом: второе окно Figma получает
 `4409 already paired` («another Figma window holds the plugin slot»). Любая работа,
-где файлов два — атлас в одном и лобби/логика в другом, сравнение двух файлов,
+где файлов два — ассеты в одном и макеты в другом, сравнение двух файлов,
 параллельные агенты по разным файлам — требует закрыть панель в первом.
 
 gethopp показывает, что ограничение снимается без потери инвариантов: один
@@ -65,7 +65,7 @@ this.plugins.set(fileKey, { ws: socket, name, saved: fileKey.startsWith("unsaved
 
 ```json
 { "id": null, "event": "files",
-  "files": [{ "fileKey": "abc123", "name": "Project", "saved": true }] }
+  "files": [{ "fileKey": "abc123", "name": "Example File", "saved": true }] }
 ```
 
 `event: "link"` сохраняется, но теперь означает «есть хотя бы один файл» —

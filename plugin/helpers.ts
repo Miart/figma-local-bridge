@@ -5,9 +5,10 @@
  * each one fails in a way that looks like something else:
  *
  *   - this manifest declares `"documentAccess": "dynamic-page"`, where
- *     `figma.getNodeById` THROWS (the typings say so). Code recalled from older
- *     examples dies on line one, and the error points at the API, not at the
- *     mode the file is opened in;
+ *     `figma.getNodeById` THROWS and an INSTANCE's synchronous
+ *     `node.mainComponent` getter throws too (the typings say so). Code
+ *     recalled from older examples dies on line one, and the error points at
+ *     the API, not at the mode the file is opened in;
  *   - writing characters into a TEXT node needs `figma.loadFontAsync` first, and
  *     the failure arrives as a font error even though the font exists;
  *   - `node.x` is parent-relative while `absoluteBoundingBox` is absolute, and
@@ -178,6 +179,28 @@ export function makeHelpers(api: HelperApi, options: HelperOptions = {}) {
       );
     }
     return node;
+  };
+
+  /**
+   * The main component of an INSTANCE, through the ONLY getter that works in
+   * this manifest.
+   *
+   * `node.mainComponent` throws under `documentAccess: "dynamic-page"` (and
+   * Figma writes the error to its console even when the caller catches it).
+   * `flb.find({type: "INSTANCE"}).map(n => n.mainComponent)` is therefore not a
+   * shortcut, it is an error per instance. Use this helper, or await
+   * `node.getMainComponentAsync()` directly. A detached instance returns null.
+   */
+  const main = async (node: any): Promise<any | null> => {
+    if (!node || node.type !== "INSTANCE") {
+      throw new Error(`flb.main: ${describe(node)} is not an INSTANCE — only an instance has a main component.`);
+    }
+    if (typeof node.getMainComponentAsync !== "function") {
+      throw new Error(
+        `flb.main: ${describe(node)} has no getMainComponentAsync(); this Plugin API cannot resolve its main component safely.`,
+      );
+    }
+    return await node.getMainComponentAsync();
   };
 
   /**
@@ -599,7 +622,7 @@ export function makeHelpers(api: HelperApi, options: HelperOptions = {}) {
     return [api.util.solidPaint(fills)];
   }
 
-  return { byId, find, one, bbox, clear, flatten, grid, text };
+  return { byId, main, find, one, bbox, clear, flatten, grid, text };
 }
 
 export type Flab = ReturnType<typeof makeHelpers>;

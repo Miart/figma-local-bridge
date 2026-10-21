@@ -3,7 +3,7 @@
  *
  * The tool schemas say what the arguments are; they cannot say which file a
  * call lands in, what `rev` and `replayed` mean, or which failure may be
- * retried. That doctrine lives in `skills/figma-local-bridge/SKILL.md` at the
+ * retried. That doctrine lives in `skills/figma-local-bridge/GUIDE.md` at the
  * repository root — a file people can read and edit — and is served twice on
  * purpose:
  *
@@ -76,11 +76,12 @@ Prefer figma_inspect (compareWith) and
 figma_replace_repeated_with_component (dryRun first) over figma_use, which is
 raw Plugin API behind allowDestructive + scopeNodeId, rolls back anything
 outside the scope, and needs allowGlobalChanges for variables and styles.
-Snippets get a third argument, flb (plugin/helpers.ts): byId/find/one, bbox,
-clear, flatten, grid and text, which handle this manifest's traps —
-getNodeById throws in dynamic-page mode, writing characters needs a loaded
-font, and node.x is parent-relative while bbox() is absolute. Its write
-helpers refuse an out-of-scope or other-page target before writing.
+Snippets get a third argument, flb (plugin/helpers.ts): byId/find/one, main,
+bbox, clear, flatten, grid and text, which handle this manifest's traps —
+getNodeById and the synchronous mainComponent getter both throw in dynamic-page
+mode (use flb.byId and flb.main), writing characters needs a loaded font, and
+node.x is parent-relative while bbox() is absolute. Its write helpers refuse an
+out-of-scope or other-page target before writing.
 
 Exports for a build or the web: figma_export_ui_atlas (one PNG plus rects in
 that file's pixels, with overlaps/off-sheet/bleed/duplicate names named, and
@@ -100,7 +101,7 @@ so they work with writes off.
 
 function readGuide(): string {
   try {
-    return readFileSync(join(HERE, "../../skills/figma-local-bridge/SKILL.md"), "utf8");
+    return readFileSync(join(HERE, "../../skills/figma-local-bridge/GUIDE.md"), "utf8");
   } catch {
     return FALLBACK;
   }

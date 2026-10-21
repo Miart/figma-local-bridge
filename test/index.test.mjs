@@ -84,6 +84,28 @@ test("index can include hidden layers, text and a depth limit", async () => {
   assert.equal(visible.nodes.find((n) => n.name === "Score").text, "Score 42");
 });
 
+test("index and search never read the synchronous mainComponent getter", async () => {
+  const { ctx, page } = fixture();
+  const component = node({ type: "COMPONENT", name: "Button", parent: page });
+  const instance = node({ type: "INSTANCE", name: "Button", parent: page });
+  instance.getMainComponentAsync = async () => component;
+  let syncReads = 0;
+  Object.defineProperty(instance, "mainComponent", {
+    configurable: true,
+    get() {
+      syncReads++;
+      throw new Error("Cannot call with documentAccess: dynamic-page. Use node.getMainComponentAsync instead.");
+    },
+  });
+  page.children.push(component, instance);
+
+  const report = await runIndex(ctx, {});
+  const found = await runSearch(ctx, { query: "Button" });
+  assert.equal(syncReads, 0, "the index/search path must not touch the dynamic-page getter");
+  assert.equal(report.nodes.find((n) => n.id === instance.id).component, undefined, "component metadata is not part of a cheap index");
+  assert.equal(found.matches.find((m) => m.id === instance.id).component, undefined);
+});
+
 test("index truncates at maxNodes and says so", async () => {
   const { ctx } = fixture();
   const report = await runIndex(ctx, { maxNodes: 2 });

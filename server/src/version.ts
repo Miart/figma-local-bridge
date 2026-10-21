@@ -6,4 +6,4 @@
  * of the two claiming the previous version.
  */
 export const SERVER_NAME = "figma-local-bridge";
-export const SERVER_VERSION = "0.34.0";
+export const SERVER_VERSION = "0.34.1";
