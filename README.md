@@ -12,7 +12,7 @@ It is a practical alternative when the official Figma MCP server is unavailable,
 
 | Fact | Value |
 |---|---|
-| Version / source | `0.30.0` · [github.com/Miart/figma-local-bridge](https://github.com/Miart/figma-local-bridge) |
+| Version / source | `0.31.0` · [github.com/Miart/figma-local-bridge](https://github.com/Miart/figma-local-bridge) |
 | What it is | Local stdio MCP server + Figma Desktop plugin + one WebSocket daemon |
 | Client support | Any MCP stdio client; examples: Claude Code, OpenCode, Cursor, and ChatGPT/Gemini clients with local MCP support |
 | Figma requirement | Figma Desktop app with the included development plugin; no Dev Mode seat |
@@ -23,6 +23,22 @@ It is a practical alternative when the official Figma MCP server is unavailable,
 | Verification | `figma_audit`, `figma_compare`, `figma_review`, `figma_checkpoint`, `figma_design_system`, `figma_tokens`, journal/ops |
 | Runtime | Node.js 20+ |
 | License | MIT |
+
+### Local by design
+
+The bridge is deliberately local-only. `figma_ping` returns a `capabilities` object with the effective mode (`read-only`, `write`, or `write+destructive`) and an explicit cloud boundary:
+
+```json
+{
+  "local": { "plugin": "Figma Desktop", "mode": "write" },
+  "cloud": {
+    "available": false,
+    "features": ["create_new_file", "generate_figma_design", "generate_image", "weave_run_model", "…"]
+  }
+}
+```
+
+`cloud.available` is always `false`: Figma's hosted file creation, AI generation, generative plugins, shaders and Weave are not proxied and are never simulated. Use the official remote Figma MCP or the Figma UI for those. Tools the official server marks remote-only — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — have local counterparts here, answered from the open file rather than the cloud.
 
 ### Common tasks
 
@@ -227,7 +243,7 @@ The server also ships an **operating guide** — `fileKey` routing, what `rev` a
 
 | Tool | What it does |
 |---|---|
-| `figma_ping` | Health check: verifies the plugin is paired, reports the active page, and lists the connected files (`fileKey` + name) |
+| `figma_ping` | Health check and capability report: verifies the plugin is paired, reports the active page and connected files (`fileKey` + name), and returns the local mode plus the cloud-only features this server does not proxy |
 | `figma_get_selection` | Current selection, answered from memory — the plugin pushes selection changes, so this costs no round trip |
 | `figma_get_layout_tree` | Absolute geometry of a whole subtree in one call: per node `absoluteTransform` (2×3 matrix), absolute layout and render bounds, clip flag. Document-absolute space — the one a PNG export uses — so a rebuild (atlas, sprite sheet) can be checked against a capture without one `get_node` per layer. Geometry and screenshot stay separate calls (`atomicWithScreenshot: false`): snapshot, then capture, then compare `rev` — and `figma_compare` for the pixels themselves |
 | `figma_inspect` | Compact structure + semantic fingerprint; `compareWith` returns `EQUIVALENT` / `DIFFERENT` / `INCONCLUSIVE` *before* you mutate |
@@ -254,7 +270,7 @@ The server also ships an **operating guide** — `fileKey` routing, what `rev` a
 | `figma_export_ui_states` | The states of a button/component as one file per state, plus a manifest naming them. A `COMPONENT_SET` names its variants by property — the only one it declares, or the one you pass — and a frame names them by layer name; a set with several properties is refused until you say which one names the states. States whose **bytes are identical** are called out (a hover that draws exactly like normal is usually a variant that is not what its name says), and every file is re-read from disk: its size checked against the node, its hash recorded |
 | `figma_export_web_handoff` | One folder for a web developer: `preview.png` (1x) plus `preview@Nx.png`, `spec.json` (flat, document order — every layer's box relative to the frame, text, paints, effects and layout fields), `tokens.json` and `tokens.css` (solid colours named by their paint styles when one value has one style, fonts, text classes, spacing), a `README.md` stating what the bundle is **not**, and `handoff.json` with hashes, counts and warnings. A colour bound to several styles, a gradient, an image fill or a mixed text layer is never averaged into an invented value: it is named as missing, or carried as segments/stops. One call writes one folder, refuses to reuse it for another node, and re-reads every file from disk. Read-only — it works with writes off; above 2,500 nodes, 24 MP per preview or 8 MiB per PNG it refuses instead of truncating. Font availability is checked within a time budget: a font the check could not confirm in time is reported as **unchecked**, not assumed present, and the reply splits where the time went — `walkMs` reading the tree, `checkMs` pinging fonts, `exportMs` rasterising |
 
-Not available through a plugin (cloud-only in the official server): `create_new_file`, `generate_figma_design`, `generate_diagram`, `export_video`, shaders, Weave, cloud Code Connect sync.
+Cloud-only in the official server, and not produced by this bridge: `create_new_file`, `generate_figma_design`, `generate_diagram`, `generate_image`, `html_to_figma`, `send_code_to_figma`, generative plugins, shaders, and Weave. They depend on Figma-hosted services; the bridge reports them as unavailable instead of simulating them. The official server also marks some read tools as remote-only — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — but those are answered here from the open file's Plugin API and are not cloud features.
 
 ## Safety model
 
@@ -298,7 +314,7 @@ npm test           # rebuilds artifacts, then unit + e2e with --test-concurrency
 
 `npm test` rebuilds `server/dist` and `plugin/*.mjs` first because the tests import the built modules — a test running against a stale artifact passes on code Figma will never execute. The suites run serially (`--test-concurrency=1`): e2e tests spin up real daemons on real ports and share one token file, and parallel runs make them flaky by construction.
 
-Current suites: **605 unit checks** — 321 `node:test` cases plus 284 harness checks (commands, fingerprint, scope, use-figma gate, checkpoint and checkpoint-store) — and **211 e2e checks** across daemon, link state, MCP, multifile, tools, checkpoint, exports, journal and the build/patch/batch/swap/variant-set/audit/review/index/search/design-system/tokens/spec-export chain. The full `npm test` run prints **495 PASS**.
+Current suites: **606 unit checks** — 322 `node:test` cases plus 284 harness checks (commands, fingerprint, scope, use-figma gate, checkpoint and checkpoint-store) — and **212 e2e checks** across daemon, link state, MCP, multifile, tools, checkpoint, exports, journal and the build/patch/batch/swap/variant-set/audit/review/capability/index/search/design-system/tokens/spec-export chain. The full `npm test` run prints **496 PASS**.
 
 ## Troubleshooting
 
@@ -341,6 +357,7 @@ Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the
 
 | Version | What it carries |
 |---|---|
+| `0.31.0` | `figma_ping` becomes a capability report as well as a health check. It returns the server version, the effective local mode (`read-only`, `write`, `write+destructive`) and a `cloud` object whose `available` is always `false`, listing the Figma-hosted features (file creation, AI generation, generative plugins, shaders, Weave) that this local bridge does not proxy or simulate. The local tools that the official server marks remote-only — assets, libraries, account identity, design-system search — remain real Plugin API reads. No new tool; no document writes. |
 | `0.30.0` | `figma_review` is the iteration harness. `save` records a local baseline as a PNG, the full `audit-v2` report and the semantic fingerprint; `compare` re-renders, re-audits and re-inspects the node, diffs the pixels, and reports new/resolved/changed findings, severity deltas, size and fingerprint changes, the heatmap and a verdict (`unchanged`, `changed`, `improved`, `regressed`). A new error/warning or a size change is a regression; resolved problems are an improvement; a visual/structural change without either is neutral. The baseline reuses its audit rules, hidden-layer setting and scale, a capture that spans revisions is refused, and a truncated audit is named. `list`, `drop` and `latest` manage local files; no document writes. |
 | `0.29.0` | `figma_audit` becomes `audit-v2`: with `suggest:true` (default) every hardcoded fill/stroke also carries **exact** local paint-style and colour-variable candidates (a variable candidate names the matching modes and whether all modes match), unstyled text carries exact local text-style candidates, and spacing/radius findings name the nearest on-scale value and delta. Suggestions are read-only candidates, never bindings, and a failed style/variable API is a warning rather than a failed audit. Two opt-in rules join the surface: `empty-text` (visible text with no characters) and `hardcoded-effect` (visible effects without an effect style). The audit schema is `audit-v2`; all existing rules and findings keep their meaning. |
 | `0.28.0` | `figma_tokens` adds design-token export, diff and guarded variable import. `export` writes the native `figma-tokens/v1` document (collections, modes, values, descriptions and aliases); `diff` compares a document with the live file; `import` creates missing collections/modes/variables and updates values/descriptions in one undo transaction. A plain DTCG tree is accepted with `collection`/`mode` for `color`, `number`, `dimension`, `string`, `boolean`, `fontFamily` and `fontWeight`; unsupported types are blocking. The dry run fingerprints the live variable state, and the server hashes the file bytes plus options into a `planId`; apply requires both, so a changed file or a changed document cannot slip through. Variables are read back mode by mode after writing and the import rolls back on a mismatch, naming `ROLLBACK FAILED` if the undo itself fails. `prune` is opt-in, needs `allowDestructive:true`, only touches the named collections, and refuses to delete a variable another variable still aliases. Modes not named by the document are preserved on existing variables and filled from the default managed mode on new ones, with that fact in the plan. |

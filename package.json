@@ -1,6 +1,6 @@
 {
   "name": "figma-local-bridge",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "type": "module",
   "description": "Local MCP bridge for Figma Desktop: read and edit the open file from Claude, OpenCode, Cursor and any MCP client (including ChatGPT and Gemini clients with local MCP support), without Dev Mode or a cloud API.",
   "license": "MIT",

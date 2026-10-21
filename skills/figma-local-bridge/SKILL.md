@@ -19,6 +19,23 @@ Every tool takes an optional `fileKey`.
 - An unroutable request is answered immediately. A timeout therefore means the
   plugin is connected but slow, not that the wrong file was addressed.
 
+## Local capabilities, and what is not local
+
+`figma_ping` is also the capability report. It returns `capabilities.local.mode`
+(`read-only`, `write`, or `write+destructive`) and `capabilities.cloud`:
+
+- `cloud.available` is always `false`. This bridge drives the Figma Desktop
+  Plugin API on localhost; it does not proxy or simulate Figma-hosted file
+  creation, AI design/image/diagram generation, generative plugins, shaders, or
+  Weave. If a user asks for one of those, say it is not available here and point
+  to the official remote Figma MCP or the Figma UI — do not try to imitate it
+  with a local workaround and call the result the same thing.
+- Tools the official server marks remote-only but that the open file can answer
+  — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — are
+  real local reads here, not cloud calls.
+- The cloud boundary is part of the answer, not an error: a missing hosted
+  capability is a deliberate limit of a local, credential-free bridge.
+
 ## rev, replayed, and what may be retried
 
 Every answer that came from the plugin carries two facts on its envelope:

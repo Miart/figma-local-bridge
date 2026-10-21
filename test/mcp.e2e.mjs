@@ -226,6 +226,10 @@ try {
   check("figma_ping round-trip reaches the plugin",
     ping && ping.connected === true && ping.editor === "figma",
     calls.includes("ping") ? `nodesOnPage=${ping && ping.nodesOnPage}` : "no plugin call");
+  check("figma_ping also reports the local/cloud boundary",
+    ping?.capabilities?.local?.mode && ping?.capabilities?.cloud?.available === false &&
+      ping.capabilities.cloud.features.includes("generate_figma_design"),
+    JSON.stringify(ping?.capabilities?.cloud || null).slice(0, 120));
 
   const sel = toolText(await rpc("tools/call", { name: "figma_get_selection", arguments: {} }));
   check("figma_get_selection", sel && sel.selection && sel.selection[0].id === "1:2",

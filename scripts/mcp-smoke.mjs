@@ -115,8 +115,18 @@ try {
   // figma_ping is the one tool that must NOT fail: it is how an agent learns the
   // bridge is down, so it answers connected:false instead of an error.
   let pingOk = false;
-  try { pingOk = JSON.parse(ping).connected === false; } catch { /* stays false */ }
+  let pingCapabilities = null;
+  try {
+    const parsed = JSON.parse(ping);
+    pingOk = parsed.connected === false;
+    pingCapabilities = parsed.capabilities || null;
+  } catch { /* stays false */ }
   check("offline figma_ping says connected:false", pingOk, ping.slice(0, 60));
+  check("figma_ping reports local-only capabilities",
+    (pingCapabilities?.local?.mode === "write" || pingCapabilities?.local?.mode === "write+destructive") &&
+      pingCapabilities?.cloud?.available === false &&
+      pingCapabilities.cloud.features.includes("create_new_file"),
+    JSON.stringify(pingCapabilities).slice(0, 120));
 
   const t1 = Date.now();
   const insp = text(await rpc("tools/call", { name: "figma_inspect", arguments: { nodeId: "1:2" } }));

@@ -30,9 +30,12 @@ export const GUIDE_MIME = "text/markdown";
 
 const FALLBACK = `# figma-local-bridge
 
-Call figma_ping first when you do not know what is open. Every tool takes an
-optional fileKey: with one file connected it may be omitted, with several a
-call without it is refused before it is sent — pass the key, never guess.
+Call figma_ping first when you do not know what is open. It also returns the
+local mode and a cloud boundary: cloud.available is false, and Figma-hosted file
+creation, AI generation, generative plugins, shaders and Weave are not proxied
+or simulated. Every tool takes an optional fileKey: with one file connected it
+may be omitted, with several a call without it is refused before it is sent —
+pass the key, never guess.
 
 Replies carry rev (the document revision; it advances on failed writes too) and
 replayed (the answer came from the opId cache, so the method did not run again;

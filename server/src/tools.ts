@@ -20,6 +20,7 @@ import { registerIndexTools } from "./index-tools.js";
 import { registerDesignSystemTools } from "./design-system-tools.js";
 import { registerTokenTools } from "./token-tools.js";
 import { registerSpecTools } from "./spec-tools.js";
+import { capabilitiesReport } from "./capabilities.js";
 
 export interface Capabilities {
   read: boolean;
@@ -45,14 +46,15 @@ const content = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON
  * funnelled through one command that validates, snapshots, mutates and verifies.
  */
 export function registerTools(server: McpServer, client: FigmaClient, caps: Capabilities) {
+  const capabilities = capabilitiesReport(caps);
   server.tool(
     "figma_ping",
-    "Health check. Verifies the plugin is paired, reports the active page, and lists the connected files (fileKey + name) so calls can be routed when several are open.",
+    "Health check and capability report. Verifies the plugin is paired, reports the active page and connected files (fileKey + name), and states what this local server can do: read/write/destructive mode and the cloud-only features it does not proxy. Call it first when you do not know what is open or whether an operation is available.",
     { fileKey: fileKeyParam },
     async (a) =>
       guard(async () => {
         const files = client.files;
-        if (!client.connected) return content({ connected: false, files });
+        if (!client.connected) return content({ connected: false, files, capabilities });
         // With several files open this tool must NOT fail the way every other
         // file-scoped tool does — it is exactly the tool an agent calls to
         // learn which fileKey to pass, so it answers with the list instead.
@@ -60,11 +62,12 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
           return content({
             connected: true,
             files,
+            capabilities,
             note: "more than one file is connected — pass fileKey to the tool you are about to call",
           });
         }
         const res = await client.call<Record<string, unknown>>("ping", { fileKey: a.fileKey });
-        return content({ connected: true, files, ...res });
+        return content({ connected: true, files, ...res, capabilities });
       }),
   );
 

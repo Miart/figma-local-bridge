@@ -18,6 +18,7 @@ import { BridgeOffline } from "./websocket.js";
 import { FigmaClient } from "./figma.js";
 import { registerTools, type Capabilities } from "./tools.js";
 import { GUIDE, registerGuide } from "./guide.js";
+import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 const INFO_FILE =
   process.env.FIGMA_BRIDGE_INFO_FILE ||
@@ -43,7 +44,7 @@ async function main() {
   // The version clients print for this server. Keep it in step with
   // package.json: the two numbers had already drifted apart once.
   const server = new McpServer(
-    { name: "figma-local-bridge", version: "0.30.0" },
+    { name: SERVER_NAME, version: SERVER_VERSION },
     { capabilities: { tools: {} }, instructions: GUIDE },
   );
   registerGuide(server);

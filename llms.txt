@@ -2,7 +2,7 @@
 
 > Local, open-source MCP (Model Context Protocol) server for Figma Desktop. It lets an AI client read and edit the open Figma file through a bundled plugin and a localhost WebSocket — no Figma Dev/Full seat, no cloud API, no API key, no telemetry.
 
-- Version: 0.30.0
+- Version: 0.31.0
 - License: MIT
 - Repository: https://github.com/Miart/figma-local-bridge
 - Canonical README: https://github.com/Miart/figma-local-bridge#readme
@@ -17,6 +17,7 @@ Use it when the official Figma MCP server is unavailable, when the design file i
 ## Capabilities
 
 - Inspect and screenshot the open file; read metadata, layout, variables and selection.
+- Ask `figma_ping` for a capability report: local mode and the cloud boundary.
 - Build/patch keyed UI trees and batch-edit many nodes in one undo transaction.
 - Author component variants and swap component instances with explicit loss reporting.
 - Audit the design system (`audit-v2`) with exact local style/variable candidates.
@@ -44,7 +45,8 @@ Build the plugin and server, run `npm run daemon`, import the plugin in Figma, p
 
 - It is not the official Figma MCP server and is not affiliated with Figma, Inc.
 - It uses the desktop plugin API, not the Figma cloud REST API; it cannot open a file that is not open in Figma.
-- Cloud-only official tools (`create_new_file`, `generate_figma_design`, `generate_diagram`, `export_video`, shaders, Weave, cloud Code Connect sync) are not available.
+- It is local-only: `figma_ping` reports `capabilities.cloud.available: false`. Figma-hosted file creation, AI generation, generative plugins, shaders and Weave are not proxied or simulated; use the official remote Figma MCP or the Figma UI for those.
+- Some tools the official server marks remote-only (`download_assets`, `get_libraries`, `whoami`, `search_design_system`) are implemented locally against the open file and are real.
 - `figma_review` baselines are local files, not restorable checkpoints; use `figma_checkpoint` for restoration.
 - `figma_tokens` manages variables, not paint/text/effect/grid styles.
 
