@@ -137,6 +137,24 @@ npm run daemon        # keep it running; log: /tmp/figma-bridge-daemon.log
 }
 ```
 
+Clients that use the common `mcpServers` shape (Claude Code/Desktop, Cursor, Gemini CLI and other local-MCP clients) can use the same server command:
+
+```json
+{
+  "mcpServers": {
+    "figma-local-bridge": {
+      "command": "node",
+      "args": ["/path/to/figma-local-bridge/server/dist/index.js"],
+      "env": {
+        "FIGMA_BRIDGE_PORT": "8787",
+        "FIGMA_BRIDGE_WRITE": "1",
+        "FIGMA_BRIDGE_DESTRUCTIVE": "0"
+      }
+    }
+  }
+}
+```
+
 Without the plugin running, the MCP server still starts and every tool answers `FIGMA_BRIDGE_OFFLINE` — fast, with a precise reason, instead of hanging for 30–115 seconds.
 
 ### Configuration
