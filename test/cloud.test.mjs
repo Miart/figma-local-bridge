@@ -55,6 +55,7 @@ test("cloud config is explicit, credential-safe and validates the transport", ()
   assert.equal(pat.enabled, true);
   assert.equal(pat.tokenKind, "pat");
   assert.equal(pat.token, "pat-token");
+  assert.equal(pat.allowLocalHttp, false);
 
   const oauth = readCloudConfig({ FIGMA_CLOUD: "1", FIGMA_CLOUD_OAUTH_TOKEN: "oauth-token" });
   assert.equal(oauth.enabled, true);
@@ -88,6 +89,7 @@ test("cloud config is explicit, credential-safe and validates the transport", ()
   });
   assert.equal(local.enabled, true);
   assert.equal(local.apiBase, "http://127.0.0.1:9876");
+  assert.equal(local.allowLocalHttp, true);
 
   const badTimeout = readCloudConfig({
     FIGMA_CLOUD: "1",
@@ -229,6 +231,96 @@ test("cloud client maps rate limits, oversized bodies, timeouts and non-JSON rep
     const impatient = new CloudClient({ ...config, timeoutMs: 100 });
     await assert.rejects(
       () => impatient.getFile({ fileKey: "slow", maxBytes: 100_000 }),
+      (err) => err instanceof CloudError && err.code === "CLOUD_TIMEOUT",
+    );
+  } finally {
+    await mock.stop();
+  }
+});
+
+
+test("cloud image download is token-free, https-only and capped while streaming", async () => {
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+  const mock = await start((req, res) => {
+    if (req.url === "/asset.png") {
+      res.writeHead(200, {
+        "content-type": "image/png",
+        "content-length": png.length,
+        "x-amz-request-id": "img-1",
+      });
+      return res.end(png);
+    }
+    if (req.url === "/redirect.png") {
+      res.writeHead(302, { location: "/asset.png" });
+      return res.end();
+    }
+    if (req.url === "/missing.png") {
+      res.writeHead(404, { "content-type": "text/plain" });
+      return res.end("not found");
+    }
+    if (req.url === "/big.png") {
+      const body = Buffer.alloc(2_000, 1);
+      res.writeHead(200, { "content-type": "image/png", "content-length": body.length });
+      return res.end(body);
+    }
+    if (req.url === "/chunked.png") {
+      res.writeHead(200, { "content-type": "image/png" });
+      res.write(Buffer.alloc(700, 1));
+      res.write(Buffer.alloc(700, 1));
+      return res.end();
+    }
+    if (req.url === "/slow.png") {
+      setTimeout(() => {
+        if (res.destroyed) return;
+        try { res.writeHead(200, { "content-type": "image/png" }); res.end(png); } catch { /* gone */ }
+      }, 500);
+      return;
+    }
+    res.writeHead(500, { "content-type": "text/plain" });
+    res.end("unexpected");
+  });
+  try {
+    const config = readCloudConfig({
+      FIGMA_CLOUD: "1",
+      FIGMA_CLOUD_TOKEN: "super-secret",
+      FIGMA_CLOUD_API_BASE: mock.base,
+      FIGMA_CLOUD_INSECURE: "1",
+    });
+    const client = new CloudClient(config);
+    const downloaded = await client.downloadImage(`${mock.base}/asset.png`, 1_000);
+    assert.equal(downloaded.bytes, png.length);
+    assert.deepEqual(downloaded.data, png);
+    assert.equal(downloaded.contentType, "image/png");
+    assert.equal(downloaded.requestId, "img-1");
+    const assetCall = mock.calls.find((c) => c.url === "/asset.png");
+    assert.ok(assetCall);
+    assert.equal(assetCall.headers["x-figma-token"], undefined);
+    assert.equal(assetCall.headers.authorization, undefined);
+    assert.match(assetCall.headers["user-agent"], /^figma-local-bridge\//);
+
+    await assert.rejects(
+      () => client.downloadImage("http://example.com/asset.png", 1_000),
+      (err) => err instanceof CloudError && err.code === "CLOUD_DOWNLOAD_BLOCKED",
+    );
+    await assert.rejects(
+      () => client.downloadImage(`${mock.base}/redirect.png`, 1_000),
+      (err) => err instanceof CloudError && err.code === "CLOUD_DOWNLOAD_BLOCKED",
+    );
+    await assert.rejects(
+      () => client.downloadImage(`${mock.base}/missing.png`, 1_000),
+      (err) => err instanceof CloudError && err.code === "CLOUD_NOT_FOUND" && err.status === 404,
+    );
+    await assert.rejects(
+      () => client.downloadImage(`${mock.base}/big.png`, 1_000),
+      (err) => err instanceof CloudError && err.code === "CLOUD_RESPONSE_TOO_LARGE" && err.maxBytes === 1_000,
+    );
+    await assert.rejects(
+      () => client.downloadImage(`${mock.base}/chunked.png`, 1_000),
+      (err) => err instanceof CloudError && err.code === "CLOUD_RESPONSE_TOO_LARGE" && err.maxBytes === 1_000,
+    );
+    const impatient = new CloudClient({ ...config, timeoutMs: 100 });
+    await assert.rejects(
+      () => impatient.downloadImage(`${mock.base}/slow.png`, 1_000),
       (err) => err instanceof CloudError && err.code === "CLOUD_TIMEOUT",
     );
   } finally {

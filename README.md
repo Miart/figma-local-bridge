@@ -12,14 +12,14 @@ It is a practical alternative when the official Figma MCP server is unavailable,
 
 | Fact | Value |
 |---|---|
-| Version / source | `0.32.0` · [github.com/Miart/figma-local-bridge](https://github.com/Miart/figma-local-bridge) |
+| Version / source | `0.33.0` · [github.com/Miart/figma-local-bridge](https://github.com/Miart/figma-local-bridge) |
 | What it is | Local stdio MCP server + Figma Desktop plugin + one WebSocket daemon |
 | Client support | Any MCP stdio client; examples: Claude Code, OpenCode, Cursor, and ChatGPT/Gemini clients with local MCP support |
-| Figma requirement | Local mode: Figma Desktop with the included development plugin (no Dev Mode seat). Optional cloud reads: a Figma PAT/OAuth token with file access |
+| Figma requirement | Local mode: Figma Desktop with the included development plugin (no Dev Mode seat). Optional cloud tools: a Figma PAT/OAuth token with file access |
 | Transport | `127.0.0.1` WebSocket; no telemetry. Figma REST only when explicitly opted in |
 | Files at once | Up to 16 open Figma files, routed by `fileKey` |
-| Tool surface | 17 parity + 26 local = **43 tools**; +4 optional cloud reads = **47 when enabled** |
-| Writes | Local writes guarded: dry run, `planId`, fingerprints, stable keys, one undo transaction, rollback, verification. Cloud adapter is read-only |
+| Tool surface | 17 parity + 26 local = **43 tools**; +5 optional cloud tools = **48 when enabled** |
+| Writes | Local writes guarded: dry run, `planId`, fingerprints, stable keys, one undo transaction, rollback, verification. The cloud adapter never edits Figma; `figma_cloud_download_image` writes local image files only |
 | Verification | `figma_audit`, `figma_compare`, `figma_review`, `figma_checkpoint`, `figma_design_system`, `figma_tokens`, journal/ops |
 | Runtime | Node.js 20+ |
 | License | MIT |
@@ -48,7 +48,7 @@ FIGMA_CLOUD_TOKEN=...          # personal access token
 # or: FIGMA_CLOUD_OAUTH_TOKEN=...   # OAuth access token
 ```
 
-Then `figma_ping` reports `available: true`, `mode: "read-only"`, the four tools and the reads they support (`file`, `nodes`, `images`). The adapter calls only documented GET endpoints — `/v1/me`, `/v1/files/:key`, `/v1/files/:key/nodes`, `/v1/images/:key` — and never edits a file. A token alone does not enable it: this avoids surprising cloud traffic when an editor already has a Figma token in its environment.
+Then `figma_ping` reports `available: true`, `mode: "read-only"`, the five tools and the reads they support (`file`, `nodes`, `images`). The adapter calls only documented GET endpoints — `/v1/me`, `/v1/files/:key`, `/v1/files/:key/nodes`, `/v1/images/:key` — and never edits a file. A token alone does not enable it: this avoids surprising cloud traffic when an editor already has a Figma token in its environment.
 
 Figma-hosted file creation, AI generation, generative plugins, shaders and Weave remain unavailable in both modes. They are not proxied and are never simulated; use the official remote Figma MCP or the Figma UI for those. Tools the official server marks remote-only — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — have local counterparts here, answered from the open file rather than the cloud.
 
@@ -73,6 +73,7 @@ Figma-hosted file creation, AI generation, generative plugins, shaders and Weave
 | "A write timed out — did it run?" | `figma_ops`, `figma_cancel`, `figma_journal` |
 | "Read a file that is not open in Figma." | `figma_cloud_get_file`, `figma_cloud_get_nodes` (opt-in) |
 | "Give me render URLs for a remote Figma node." | `figma_cloud_get_image` (opt-in) |
+| "Download remote Figma renders to disk." | `figma_cloud_download_image` (opt-in) |
 | "Check whether my Figma REST token works." | `figma_cloud_ping` (opt-in) |
 
 ### Example requests
@@ -88,11 +89,11 @@ Build a 4x4 sprite atlas from the selected frame and verify the manifest rects a
 
 **Does Figma Local Bridge need a Figma Dev or Full seat?** No. It uses a custom plugin with `editorType: ["figma", "figjam"]`, not the `devid` manifest used by Dev Mode.
 
-**Does it use the Figma cloud API?** Only if you enable the optional read-only adapter. Local mode is a plugin → daemon on `127.0.0.1` → stdio MCP server, with no cloud calls. `FIGMA_CLOUD=1` plus a PAT/OAuth token adds four GET tools for files that are not open; it never writes and never proxies Figma's hosted AI.
+**Does it use the Figma cloud API?** Only if you enable the optional read-only adapter. Local mode is a plugin → daemon on `127.0.0.1` → stdio MCP server, with no cloud calls. `FIGMA_CLOUD=1` plus a PAT/OAuth token adds five tools for files that are not open; it never writes to Figma and never proxies Figma's hosted AI.
 
 **Can Claude, ChatGPT, or Gemini use it?** Any client that can launch a local stdio MCP server can. The repository includes an OpenCode-style config; Claude Code and Cursor use the same `command` + `args`. ChatGPT/Gemini clients need local MCP support and the same server command.
 
-**Is it the official Figma MCP server?** No. It is an independent MIT project and is not affiliated with Figma, Inc. It mirrors 17 official tools, adds 26 local ones, and has four optional read-only REST tools.
+**Is it the official Figma MCP server?** No. It is an independent MIT project and is not affiliated with Figma, Inc. It mirrors 17 official tools, adds 26 local ones, and has five optional cloud tools (Figma read-only).
 
 **Can the agent edit the file?** Yes, through guarded tools. Every mutating family supports a dry run and a `planId`/fingerprint boundary; `figma_use` is the raw escape hatch and needs explicit destructive access plus a scope.
 
@@ -202,7 +203,7 @@ Without the plugin running, the MCP server still starts and every tool answers `
 | `FIGMA_BRIDGE_REVIEWS_DIR` | `~/.local/share/opencode/figma-bridge-reviews` | Where `figma_review` keeps iteration baselines (PNG + JSON), one directory per `fileKey` |
 | `FIGMA_BRIDGE_JOURNAL_DIR` | `~/.local/share/opencode/figma-bridge-journal` | Where the journal keeps `ops.jsonl` (plus two rotated segments) |
 | `FIGMA_BRIDGE_JOURNAL` | `1` | `0` — stop recording new journal lines; what is already on disk stays readable |
-| `FIGMA_CLOUD` | unset | `1` — enable the four optional read-only REST tools; `0`/unset leaves them out |
+| `FIGMA_CLOUD` | unset | `1` — enable the five optional cloud tools; `0`/unset leaves them out |
 | `FIGMA_CLOUD_TOKEN` / `FIGMA_CLOUD_OAUTH_TOKEN` | unset | PAT (`X-Figma-Token`) or OAuth (`Authorization: Bearer`); set exactly one. Also requires `FIGMA_CLOUD=1` |
 
 Don't run a second bridge instance: the port is fixed, so the second daemon exits with `EADDRINUSE` (see Troubleshooting).
@@ -230,7 +231,7 @@ Run the plugin in each Figma file you want to drive — every panel connects to 
 
 ## Tools
 
-17 tools mirroring Figma's official server, plus 26 local ones — 43 in total. An optional read-only REST adapter adds four more when `FIGMA_CLOUD=1` and a token are set, for a surface of 47.
+17 tools mirroring Figma's official server, plus 26 local ones — 43 in total. An optional read-only REST adapter adds five more when `FIGMA_CLOUD=1` and a token are set, for a surface of 48.
 
 Every local tool also accepts an optional `fileKey` to choose among several open Figma files; with one file it can be omitted, with several a call that omits it is refused and lists the connected files (`figma_ping` shows the same list). Cloud tools instead take a required `fileKey` naming the REST file to read.
 
@@ -287,7 +288,7 @@ The server also ships an **operating guide** — `fileKey` routing, what `rev` a
 | `figma_export_ui_states` | The states of a button/component as one file per state, plus a manifest naming them. A `COMPONENT_SET` names its variants by property — the only one it declares, or the one you pass — and a frame names them by layer name; a set with several properties is refused until you say which one names the states. States whose **bytes are identical** are called out (a hover that draws exactly like normal is usually a variant that is not what its name says), and every file is re-read from disk: its size checked against the node, its hash recorded |
 | `figma_export_web_handoff` | One folder for a web developer: `preview.png` (1x) plus `preview@Nx.png`, `spec.json` (flat, document order — every layer's box relative to the frame, text, paints, effects and layout fields), `tokens.json` and `tokens.css` (solid colours named by their paint styles when one value has one style, fonts, text classes, spacing), a `README.md` stating what the bundle is **not**, and `handoff.json` with hashes, counts and warnings. A colour bound to several styles, a gradient, an image fill or a mixed text layer is never averaged into an invented value: it is named as missing, or carried as segments/stops. One call writes one folder, refuses to reuse it for another node, and re-reads every file from disk. Read-only — it works with writes off; above 2,500 nodes, 24 MP per preview or 8 MiB per PNG it refuses instead of truncating. Font availability is checked within a time budget: a font the check could not confirm in time is reported as **unchecked**, not assumed present, and the reply splits where the time went — `walkMs` reading the tree, `checkMs` pinging fonts, `exportMs` rasterising |
 
-**Optional cloud reads (enabled only by `FIGMA_CLOUD=1` plus a token):**
+**Optional cloud tools (enabled only by `FIGMA_CLOUD=1` plus a token):**
 
 | Tool | What it does |
 |---|---|
@@ -295,21 +296,22 @@ The server also ships an **operating guide** — `fileKey` routing, what `rev` a
 | `figma_cloud_get_file` | Read a file's JSON with optional `nodeIds`, `depth`, `version`, `geometry` and `pluginData`. Use ids/depth to keep it small; a reply over `maxBytes` is refused, never truncated |
 | `figma_cloud_get_nodes` | Read specific nodes from a file by `nodeIds` with the same depth/geometry/plugin-data controls |
 | `figma_cloud_get_image` | Get temporary render URLs for nodes (PNG/JPG/SVG/PDF) with scale and SVG options. It returns URLs, not downloaded bytes; Figma's URLs expire |
+| `figma_cloud_download_image` | Download nodes as PNG/JPG/SVG/PDF **files** to `outDir` (default: a temp directory) with `figma-<nodeId>.<ext>` names. One call calls `/v1/images`, then fetches each signed URL without the Figma token, verifies the file signature, caps each file and the total, and refuses to overwrite unless `overwrite:true`. The Figma document is untouched; this tool writes only local files |
 
 ### Cloud, when explicitly enabled
 
-The cloud adapter is a separate, read-only mode. It uses documented Figma REST `GET` endpoints only; there is no cloud write path and no attempt to reproduce Figma's hosted AI, file creation, shaders, generated plugins or Weave.
+The cloud adapter is a separate mode that is **read-only with respect to Figma**. It uses documented Figma REST `GET` endpoints only; there is no Figma write path and no attempt to reproduce Figma's hosted AI, file creation, shaders, generated plugins or Weave. `figma_cloud_download_image` writes rendered bytes to a local directory, never to the Figma document.
 
 | Setting | Meaning |
 |---|---|
-| `FIGMA_CLOUD=1` | Explicit opt-in. `0` or an unset value leaves the four cloud tools unregistered |
+| `FIGMA_CLOUD=1` | Explicit opt-in. `0` or an unset value leaves the five cloud tools unregistered |
 | `FIGMA_CLOUD_TOKEN` | Personal access token, sent as `X-Figma-Token`. Needs `file_content:read`; `figma_cloud_ping` also needs `current_user:read` |
 | `FIGMA_CLOUD_OAUTH_TOKEN` | OAuth access token, sent as `Authorization: Bearer`. Set only one credential |
 | `FIGMA_CLOUD_TIMEOUT_MS` | Request timeout, 1000–120000 ms (default 30000) |
 | `FIGMA_CLOUD_API_BASE` | Defaults to `https://api.figma.com`; a custom base must be HTTPS |
 | `FIGMA_CLOUD_INSECURE=1` | Allows plain HTTP **only** for `127.0.0.1`/`localhost` test servers; never use it with a real token |
 
-The adapter never puts a token in a URL, a log line or a tool reply. It follows no redirects (the credential cannot be forwarded to another host), refuses a response over `maxBytes` (default 8 MB) instead of serialising a huge document, and maps failures to `CLOUD_UNAUTHORIZED`, `CLOUD_FORBIDDEN`, `CLOUD_NOT_FOUND`, `CLOUD_BAD_REQUEST`, `CLOUD_RATE_LIMITED` (with `retryAfterSeconds`), `CLOUD_UPSTREAM`, `CLOUD_TIMEOUT`, `CLOUD_UNREACHABLE`, `CLOUD_RESPONSE_TOO_LARGE` and `CLOUD_BAD_RESPONSE`. It does not run an OAuth authorization flow or refresh an expired token, and it does not retry automatically; a 429 is the caller's decision. Cloud tools work without the local daemon and are registered in read-only mode too.
+The adapter never puts a token in a URL, a log line or a tool reply. It follows no redirects (the credential cannot be forwarded to another host), refuses a response over `maxBytes` (default 8 MB for JSON) instead of serialising a huge document, and maps failures to `CLOUD_UNAUTHORIZED`, `CLOUD_FORBIDDEN`, `CLOUD_NOT_FOUND`, `CLOUD_BAD_REQUEST`, `CLOUD_RATE_LIMITED` (with `retryAfterSeconds`), `CLOUD_UPSTREAM`, `CLOUD_TIMEOUT`, `CLOUD_UNREACHABLE`, `CLOUD_RESPONSE_TOO_LARGE` and `CLOUD_BAD_RESPONSE`. Image downloads add `CLOUD_DOWNLOAD_BLOCKED` (non-HTTPS URL, credentials in the URL, or a redirect), `CLOUD_BAD_IMAGE` (bytes do not match the requested format) and `CLOUD_DOWNLOAD_FAILED` (local path or write failure). The download tool caps each image (default 10 MB) and the whole call (default 50 MB), and never sends the Figma token to the image host. It does not run an OAuth authorization flow or refresh an expired token, and it does not retry automatically; a 429 is the caller's decision. Cloud tools work without the local daemon and are registered in read-only mode too.
 
 Cloud-only in the official server, and not produced by this bridge in either mode: `create_new_file`, `generate_figma_design`, `generate_diagram`, `generate_image`, `html_to_figma`, `send_code_to_figma`, generative plugins, shaders, and Weave. They depend on Figma-hosted services; the bridge reports them as unavailable instead of simulating them. The official server also marks some read tools as remote-only — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — but those are answered here from the open file's Plugin API and are not cloud features.
 
@@ -325,7 +327,7 @@ The bridge edits real design files with an agent at the wheel, so most of the en
 - **A token import is a plan, not a paste.** `figma_tokens` exports every variable mode as data, diffs the document against the live file, and imports through the same dry-run boundary as the other write tools. The dry run hashes the file bytes and options into the `planId`, and the file identity plus the live variable state into the fingerprint; apply needs both, and a different file or a changed variable refuses the call before the first write. A value is never guessed: an unsupported DTCG type, a missing alias target, an alias type mismatch, an alias cycle, a variable whose type would have to change, or a prune target another variable still aliases is a blocking finding. Apply is one undo transaction; every collection, mode, description, literal and alias is read back from a fresh state, and a mismatch rolls the import back — if Figma refuses the undo, the error says `ROLLBACK FAILED` rather than claiming success.
 - **An iteration is measured against a baseline.** `figma_review` saves the pixels, the audit findings and the semantic fingerprint *before* an edit, then re-captures all three after it. The delta is the review: new errors/warnings or a size change make the result `regressed`, resolved problems make it `improved`, and a pixel/structure change without either is a neutral `changed` — never a claim that the design is better. The baseline reuses its audit rules and scale, so an audit delta is not an artefact of different settings; a capture that straddles two revisions is refused, and a truncated audit says so. Review files are local; the document is never written.
 - **The audit cannot edit.** `figma_audit` only reads; its findings are claims about the file, not a cleanup that might have changed it. The same is true of `figma_index`, `figma_search` and `figma_design_system`.
-- **The cloud adapter can only read.** The optional REST tools are registered only after an explicit `FIGMA_CLOUD=1` plus a token, call documented `GET` endpoints, carry their credential in a header (never a URL or reply), refuse redirects, cap the response size before serialising it, and keep `401`/`403`/`404`/`429` as their own error codes. There is no cloud write path and no fallback that pretends a hosted AI or file-creation service is local.
+- **The cloud adapter can only read Figma.** The optional REST tools are registered only after an explicit `FIGMA_CLOUD=1` plus a token, call documented `GET` endpoints, carry their credential in a header (never a URL or reply), refuse redirects, cap the response size before serialising it, and keep `401`/`403`/`404`/`429` as their own error codes. There is no Figma write path and no fallback that pretends a hosted AI or file-creation service is local. `figma_cloud_download_image` is the one tool that writes locally; it verifies the signature and never sends the token to the image host.
 - **A design-system diff is by key, not by name.** `figma_design_system` compares two exports by Figma's stable style/variable/component keys, and drops only the volatile node `id` from the value comparison. A style that keeps its name but changes its colour is a change; a node recreated with a new id is not.
 - **Idempotent retries.** `opId` is minted once per logical call and reused by every attempt (`server/src/figma.ts`). The plugin keeps a bounded `opId → result` cache and, on a repeat, replays the recorded answer (`replayed: true`) without touching the document. A repeat arriving while the first attempt is still running **joins it** instead of running the snippet twice.
 - **A key names one call.** The cache stores a fingerprint of the method and arguments it answered (`plugin/dispatch.ts`), so a *different* call sent under a used `opId` is refused (`OPID_REUSED`) instead of being handed the first call's answer — the one path that could report a write that never happened. Key order does not change a call, so a retry re-encoded by another JSON writer still replays.
@@ -356,7 +358,7 @@ npm test           # rebuilds artifacts, then unit + e2e with --test-concurrency
 
 `npm test` rebuilds `server/dist` and `plugin/*.mjs` first because the tests import the built modules — a test running against a stale artifact passes on code Figma will never execute. The suites run serially (`--test-concurrency=1`): e2e tests spin up real daemons on real ports and share one token file, and parallel runs make them flaky by construction.
 
-Current suites: **610 unit checks** — 326 `node:test` cases plus 284 harness checks (commands, fingerprint, scope, use-figma gate, checkpoint and checkpoint-store) — and **228 e2e checks** across daemon, link state, MCP, multifile, tools, checkpoint, exports, journal, cloud and the build/patch/batch/swap/variant-set/audit/review/capability/index/search/design-system/tokens/spec-export chain. The full `npm test` run prints **512 PASS**.
+Current suites: **611 unit checks** — 327 `node:test` cases plus 284 harness checks (commands, fingerprint, scope, use-figma gate, checkpoint and checkpoint-store) — and **234 e2e checks** across daemon, link state, MCP, multifile, tools, checkpoint, exports, journal, cloud and the build/patch/batch/swap/variant-set/audit/review/capability/index/search/design-system/tokens/spec-export chain. The full `npm test` run prints **518 PASS**.
 
 ## Troubleshooting
 
@@ -371,6 +373,9 @@ Current suites: **610 unit checks** — 326 `node:test` cases plus 284 harness c
 | `CLOUD_RATE_LIMITED` | Figma returned `429`; read `retryAfterSeconds` and wait instead of retrying in a loop. The adapter does not retry for you |
 | `CLOUD_RESPONSE_TOO_LARGE` | The reply exceeded `maxBytes`; pass `nodeIds`/`depth`, or raise `maxBytes` deliberately. It is refused rather than truncated |
 | `CLOUD_TIMEOUT` / `CLOUD_UNREACHABLE` | The REST request failed before a reply; check network/proxy and `FIGMA_CLOUD_TIMEOUT_MS`. The local daemon is not involved |
+| `CLOUD_DOWNLOAD_BLOCKED` | The image URL was not HTTPS (except localhost with `FIGMA_CLOUD_INSECURE=1`), contained credentials, or redirected. The adapter does not follow it |
+| `CLOUD_BAD_IMAGE` | The downloaded bytes do not have the requested PNG/JPEG/SVG/PDF signature. Nothing is written; the URL probably returned an error page |
+| `CLOUD_DOWNLOAD_FAILED` | The target exists and `overwrite` is false, `outDir` could not be created, or a local write failed. The Figma request may have succeeded; no document was changed |
 | The daemon won't start | Port 8787 is busy — `lsof -nP -iTCP:8787 -sTCP:LISTEN` |
 | `4409 replaced by a newer socket` | Another panel took this file's slot (plugin reloaded, or the file is open in two windows). Press *reconnect* in the panel you want to keep |
 | `4413 too many files (max 16)` | The daemon already serves 16 files — close a panel |
@@ -385,7 +390,7 @@ Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the
 
 ## Limitations
 
-- The optional cloud adapter reads the public Figma REST API, not the open document. It is registered only with `FIGMA_CLOUD=1` and a PAT/OAuth token; the token's scopes decide what works (`file_content:read` for files/nodes/images, `current_user:read` for `figma_cloud_ping`). It exposes no writes, does not run an OAuth authorization flow, cannot refresh an expired OAuth token, and returns image URLs rather than downloaded files. A response over `maxBytes` is refused; use `nodeIds` and `depth` instead of raising the cap blindly. A custom `FIGMA_CLOUD_API_BASE` must be HTTPS, except for a localhost test server with `FIGMA_CLOUD_INSECURE=1`. It follows no redirects and does not retry a 429 automatically.
+- The optional cloud adapter reads the public Figma REST API, not the open document. It is registered only with `FIGMA_CLOUD=1` and a PAT/OAuth token; the token's scopes decide what works (`file_content:read` for files/nodes/images, `current_user:read` for `figma_cloud_ping`). It exposes no Figma writes, does not run an OAuth authorization flow, and cannot refresh an expired OAuth token. `figma_cloud_get_image` returns temporary URLs; `figma_cloud_download_image` is the explicit byte-downloading tool and writes only local files. A response over `maxBytes` is refused; use `nodeIds` and `depth` instead of raising the cap blindly. A custom `FIGMA_CLOUD_API_BASE` must be HTTPS, except for a localhost test server with `FIGMA_CLOUD_INSECURE=1`. It follows no redirects and does not retry a 429 automatically; image downloads also refuse redirects and never send the Figma token to the image host.
 - `indexTree` walks the whole page per call. On very large pages, split the work — the cache cannot be incremental because the user edits the file in parallel.
 - Figma caches screenshot exports; `rev` makes stale renders visible, but there is no way to force a redraw from the Plugin API.
 - `figma_use` hands you the full plugin API: it is a notice-and-rollback guard, not a sandbox. Code that runs after the call returns (fire-and-forget promises) escapes the diff; a timeout therefore does **not** roll back and says so.
@@ -405,6 +410,7 @@ Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the
 
 | Version | What it carries |
 |---|---|
+| `0.33.0` | `figma_cloud_download_image` adds the byte-downloading half of the cloud image path. It calls `GET /v1/images/:key`, then fetches each temporary URL without forwarding the Figma token, verifies the PNG/JPEG/SVG/PDF signature, writes `figma-<nodeId>.<ext>` to `outDir` (default: a temp directory), caps each image and the call total, and refuses to overwrite unless `overwrite:true`. Everything is downloaded and checked before the first write; an existing file, a bad signature, a redirect or a local write failure is named instead of silently producing a partial image. The Figma document is untouched. `figma_ping` now names five cloud tools. |
 | `0.32.0` | Optional read-only cloud access. With `FIGMA_CLOUD=1` and a PAT/OAuth token, four REST tools join the surface: `figma_cloud_ping` (`GET /v1/me`), `figma_cloud_get_file`, `figma_cloud_get_nodes` and `figma_cloud_get_image`. They work without the local daemon, never write, never return the token, follow no redirects, and refuse oversized responses rather than truncating. `figma_ping` reports `cloud.available`, `configured`, `mode`, `tokenType`, the registered tools and reads; the default remains off, and a token alone does not opt in. Errors keep their HTTP meaning (`CLOUD_UNAUTHORIZED`, `CLOUD_FORBIDDEN`, `CLOUD_RATE_LIMITED` with `retryAfterSeconds`, `CLOUD_RESPONSE_TOO_LARGE`, ...). Hosted file creation, AI generation, generative plugins, shaders and Weave remain unavailable. |
 | `0.31.0` | `figma_ping` becomes a capability report as well as a health check. It returns the server version, the effective local mode (`read-only`, `write`, `write+destructive`) and a `cloud` object; at that point `cloud.available` was false because no REST adapter existed yet, and the object listed the Figma-hosted features (file creation, AI generation, generative plugins, shaders, Weave) that this local bridge does not proxy or simulate. The local tools that the official server marks remote-only — assets, libraries, account identity, design-system search — remain real Plugin API reads. No new tool; no document writes. |
 | `0.30.0` | `figma_review` is the iteration harness. `save` records a local baseline as a PNG, the full `audit-v2` report and the semantic fingerprint; `compare` re-renders, re-audits and re-inspects the node, diffs the pixels, and reports new/resolved/changed findings, severity deltas, size and fingerprint changes, the heatmap and a verdict (`unchanged`, `changed`, `improved`, `regressed`). A new error/warning or a size change is a regression; resolved problems are an improvement; a visual/structural change without either is neutral. The baseline reuses its audit rules, hidden-layer setting and scale, a capture that spans revisions is refused, and a truncated audit is named. `list`, `drop` and `latest` manage local files; no document writes. |

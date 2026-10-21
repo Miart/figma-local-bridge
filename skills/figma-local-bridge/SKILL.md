@@ -20,7 +20,7 @@ Every local tool takes an optional `fileKey`; the cloud tools take a required
 - An unroutable request is answered immediately. A timeout therefore means the
   plugin is connected but slow, not that the wrong file was addressed.
 
-## Local capabilities, optional cloud reads, and what is not available
+## Local capabilities, optional cloud tools, and what is not available
 
 `figma_ping` is also the capability report. It returns `capabilities.local.mode`
 (`read-only`, `write`, or `write+destructive`) and `capabilities.cloud`:
@@ -28,24 +28,35 @@ Every local tool takes an optional `fileKey`; the cloud tools take a required
 - The cloud adapter is **off by default**. `cloud.available` is false unless the
   MCP process has `FIGMA_CLOUD=1` and exactly one of `FIGMA_CLOUD_TOKEN` (PAT) or
   `FIGMA_CLOUD_OAUTH_TOKEN` (OAuth). A token alone is not consent to cloud calls.
-- When `cloud.available` is true, the four registered tools are
-  `figma_cloud_ping`, `figma_cloud_get_file`, `figma_cloud_get_nodes` and
-  `figma_cloud_get_image`. They read documented Figma REST `GET` endpoints and
-  work without the local daemon. Use them for a file that is not open; use the
-  local tools for the open document.
-- Cloud is read-only. It cannot create a file, edit anything, generate a design
-  or image, run a shader, a generative plugin or Weave. If a user asks for one
-  of those, say it is not available here and point to the official remote Figma
-  MCP or the Figma UI. Never imitate it with a local workaround and call the
-  result the same thing.
-- `figma_cloud_ping` requires `current_user:read`; file/node/image reads need
-  `file_content:read`. `401`/`403` are `CLOUD_UNAUTHORIZED`/`CLOUD_FORBIDDEN`,
-  not a reason to retry. A `429` carries `retryAfterSeconds` and is not retried
-  automatically. `CLOUD_RESPONSE_TOO_LARGE` means narrow `nodeIds`/`depth` or
-  raise `maxBytes` deliberately; the reply is refused, never truncated.
-- `figma_cloud_get_image` returns temporary URLs, not downloaded files. It does
-  not write them to disk. The adapter does not run an OAuth authorization flow
-  or refresh an expired token; the caller supplies a valid access token.
+- When `cloud.available` is true, the five registered tools are
+  `figma_cloud_ping`, `figma_cloud_get_file`, `figma_cloud_get_nodes`,
+  `figma_cloud_get_image` and `figma_cloud_download_image`. They read
+  documented Figma REST `GET` endpoints and work without the local daemon. Use
+  them for a file that is not open; use the local tools for the open document.
+- Cloud is read-only **with respect to Figma**. It cannot create or edit a
+  file, generate a design or image, run a shader, a generative plugin or Weave.
+  If a user asks for one of those, say it is not available here and point to the
+  official remote Figma MCP or the Figma UI. Never imitate it with a local
+  workaround and call the result the same thing. The one local write is
+  `figma_cloud_download_image`, which saves rendered bytes to `outDir`; the
+  Figma document is untouched.
+- `figma_cloud_ping` requires `current_user:read`; file/node/image reads and
+  downloads need `file_content:read`. `401`/`403` are
+  `CLOUD_UNAUTHORIZED`/`CLOUD_FORBIDDEN`, not a reason to retry. A `429` carries
+  `retryAfterSeconds` and is not retried automatically.
+  `CLOUD_RESPONSE_TOO_LARGE` means narrow `nodeIds`/`depth`, lower the render
+  scale, or raise `maxBytes`/`maxTotalBytes` deliberately; the reply or file is
+  refused, never truncated.
+- `figma_cloud_get_image` returns temporary URLs, not downloaded files.
+  `figma_cloud_download_image` is the explicit byte path: it calls the image
+  endpoint, fetches each signed URL **without the Figma token**, verifies the
+  PNG/JPEG/SVG/PDF signature, caps each image and the call total, writes
+  `figma-<nodeId>.<ext>` under `outDir`, and refuses to overwrite unless
+  `overwrite:true`. A non-HTTPS URL, a redirect, a bad signature or a local
+  write failure is `CLOUD_DOWNLOAD_BLOCKED`, `CLOUD_BAD_IMAGE` or
+  `CLOUD_DOWNLOAD_FAILED`; it never claims a partial set was complete.
+- The adapter does not run an OAuth authorization flow or refresh an expired
+  token; the caller supplies a valid access token.
 - Tools the official server marks remote-only but that the open file can answer
   — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — are
   real local reads here, not cloud calls.

@@ -33,10 +33,13 @@ const FALLBACK = `# figma-local-bridge
 Call figma_ping first when you do not know what is open. It returns the local
 mode and capabilities.cloud: the optional Figma REST adapter is off unless the
 process has FIGMA_CLOUD=1 and a PAT/OAuth token. When on, figma_cloud_ping,
-figma_cloud_get_file, figma_cloud_get_nodes and figma_cloud_get_image read
-files/nodes/images over documented GET endpoints, without the local daemon and
-without any write. Figma-hosted file creation, AI generation, generative
-plugins, shaders and Weave are never proxied or simulated. Every local tool
+figma_cloud_get_file, figma_cloud_get_nodes, figma_cloud_get_image and
+figma_cloud_download_image read files/nodes/images over documented GET
+endpoints, without the local daemon and without any Figma write.
+figma_cloud_download_image writes rendered bytes to a local outDir (caps,
+signature checks, no overwrite by default); the Figma document is untouched.
+Figma-hosted file creation, AI generation, generative plugins, shaders and
+Weave are never proxied or simulated. Every local tool
 takes an optional fileKey: with one file connected it may be omitted, with
 several a call without it is refused before it is sent — pass the key, never
 guess.

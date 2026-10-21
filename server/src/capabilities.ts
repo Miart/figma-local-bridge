@@ -3,7 +3,8 @@
  *
  * Local mode drives the Figma Desktop Plugin API through a localhost WebSocket.
  * An optional, explicitly opted-in adapter can read Figma files over the public
- * REST API; it is read-only and has its own credential and transport limits.
+ * REST API; it is read-only with respect to Figma and has its own credential
+ * and transport limits. Its image-download tool writes only local files.
  * Figma's hosted AI, file-creation, shader, generative plugin and Weave services
  * are not proxied and must not be presented as if they were. `figma_ping`
  * returns this report so an agent can choose the right tool without trying a

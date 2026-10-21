@@ -10,8 +10,10 @@
  *
  *   - it only exposes documented GET endpoints, so it cannot claim to create a
  *     file, generate a design or run Weave;
- *   - every failure keeps its HTTP meaning (401, 403, 429, ...) and the token
- *     is never put in a URL, an error message or a tool reply.
+ *   - every Figma failure keeps its HTTP meaning (401, 403, 429, ...) and the
+ *     token is never put in a URL, an error message or a tool reply;
+ *   - the one local write is an explicitly requested image download, and it
+ *     never touches the Figma document.
  */
 import { SERVER_VERSION } from "./version.js";
 
@@ -20,6 +22,7 @@ export const CLOUD_TOOL_NAMES = [
   "figma_cloud_get_file",
   "figma_cloud_get_nodes",
   "figma_cloud_get_image",
+  "figma_cloud_download_image",
 ] as const;
 
 export const CLOUD_READ_AREAS = ["file", "nodes", "images"] as const;
@@ -27,6 +30,9 @@ export const CLOUD_READ_AREAS = ["file", "nodes", "images"] as const;
 export const CLOUD_DEFAULT_BASE = "https://api.figma.com";
 export const CLOUD_DEFAULT_TIMEOUT_MS = 30_000;
 export const CLOUD_DEFAULT_MAX_BYTES = 8_000_000;
+export const CLOUD_DEFAULT_IMAGE_MAX_BYTES = 10_000_000;
+export const CLOUD_DEFAULT_DOWNLOAD_TOTAL_BYTES = 50_000_000;
+export const CLOUD_MAX_DOWNLOAD_NODES = 20;
 
 export type CloudTokenKind = "pat" | "oauth";
 
@@ -40,6 +46,8 @@ export interface CloudConfig {
   token: string | null;
   apiBase: string;
   timeoutMs: number;
+  /** True only with FIGMA_CLOUD_INSECURE=1; allows localhost image downloads over HTTP. */
+  allowLocalHttp: boolean;
   reason: string;
 }
 
@@ -130,7 +138,8 @@ export function readCloudConfig(env: NodeJS.ProcessEnv = process.env): CloudConf
     token,
     apiBase,
     timeoutMs,
-    reason: enabled ? "Read-only Figma REST adapter enabled; no writes are exposed." : reason,
+    allowLocalHttp: env.FIGMA_CLOUD_INSECURE === "1",
+    reason: enabled ? "Read-only Figma REST adapter enabled; no Figma writes are exposed." : reason,
   };
 }
 
@@ -145,7 +154,10 @@ export type CloudErrorCode =
   | "CLOUD_TIMEOUT"
   | "CLOUD_UNREACHABLE"
   | "CLOUD_RESPONSE_TOO_LARGE"
-  | "CLOUD_BAD_RESPONSE";
+  | "CLOUD_BAD_RESPONSE"
+  | "CLOUD_DOWNLOAD_BLOCKED"
+  | "CLOUD_BAD_IMAGE"
+  | "CLOUD_DOWNLOAD_FAILED";
 
 export interface CloudErrorInfo {
   code: CloudErrorCode;
@@ -227,6 +239,16 @@ export interface CloudResponse<T = unknown> {
   requestId?: string;
 }
 
+export interface CloudDownload {
+  /** The signed URL Figma returned; kept internal and never serialised in full. */
+  url: string;
+  data: Buffer;
+  bytes: number;
+  contentType?: string;
+  status: number;
+  requestId?: string;
+}
+
 type QueryValue = string | number | undefined;
 
 function redact(text: string, token: string | null): string {
@@ -285,6 +307,109 @@ export class CloudClient {
     );
   }
 
+  /**
+   * Download the bytes behind a URL returned by getImage().
+   *
+   * The Figma token is never sent here: the URL is a signed object-store URL,
+   * not the REST API. Only https is accepted, except for a localhost mock when
+   * FIGMA_CLOUD_INSECURE=1. Redirects are refused rather than followed, and the
+   * body is capped while it is read.
+   */
+  async downloadImage(rawUrl: string, maxBytes: number): Promise<CloudDownload> {
+    const url = this.parseImageUrl(rawUrl);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    try {
+      const res = await this.fetchImpl(url, {
+        method: "GET",
+        headers: {
+          Accept: "image/*,application/pdf;q=0.9",
+          "User-Agent": `figma-local-bridge/${SERVER_VERSION}`,
+        },
+        signal: controller.signal,
+        redirect: "manual",
+      });
+
+      const requestId =
+        res.headers.get("x-amz-request-id") ||
+        res.headers.get("x-request-id") ||
+        undefined;
+
+      if (res.status >= 300 && res.status < 400) {
+        await res.body?.cancel().catch(() => {});
+        const location = res.headers.get("location");
+        throw new CloudError(
+          "CLOUD_DOWNLOAD_BLOCKED",
+          `Image download redirected${location ? ` to ${urlHost(location)}` : ""}; redirects are not followed.`,
+          { status: res.status, requestId },
+        );
+      }
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {});
+        throw new CloudError(
+          statusCode(res.status),
+          `Image download ${res.status}${res.statusText ? ` ${res.statusText}` : ""}.`,
+          { status: res.status, requestId },
+        );
+      }
+
+      const declared = Number(res.headers.get("content-length") || 0);
+      if (Number.isFinite(declared) && declared > maxBytes) {
+        await res.body?.cancel().catch(() => {});
+        throw new CloudError(
+          "CLOUD_RESPONSE_TOO_LARGE",
+          `Image download is ${declared} bytes, over the ${maxBytes}-byte limit; lower the scale or raise maxBytes.`,
+          { maxBytes, bytes: declared, requestId },
+        );
+      }
+
+      const reader = res.body?.getReader();
+      const chunks: Buffer[] = [];
+      let received = 0;
+      if (reader) {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          received += value.byteLength;
+          if (received > maxBytes) {
+            await reader.cancel().catch(() => {});
+            throw new CloudError(
+              "CLOUD_RESPONSE_TOO_LARGE",
+              `Image download exceeded ${maxBytes} bytes; lower the scale or raise maxBytes.`,
+              { maxBytes, bytes: received, requestId },
+            );
+          }
+          chunks.push(Buffer.from(value));
+        }
+      }
+      const buffer = Buffer.concat(chunks, received);
+      return {
+        url: url.toString(),
+        data: buffer,
+        bytes: buffer.byteLength,
+        contentType: res.headers.get("content-type") || undefined,
+        status: res.status,
+        requestId,
+      };
+    } catch (err) {
+      if (err instanceof CloudError) throw err;
+      if (controller.signal.aborted) {
+        throw new CloudError(
+          "CLOUD_TIMEOUT",
+          `Image download timed out after ${this.config.timeoutMs}ms.`,
+        );
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      throw new CloudError(
+        "CLOUD_UNREACHABLE",
+        `Image download failed: ${redact(message.slice(0, 500), this.config.token)}`,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   getImage(req: CloudImageRequest): Promise<CloudResponse> {
     const query: Record<string, QueryValue> = {
       ids: req.nodeIds.join(","),
@@ -299,6 +424,27 @@ export class CloudClient {
       use_absolute_bounds: bool(req.useAbsoluteBounds),
     };
     return this.request(`/v1/images/${encodeURIComponent(req.fileKey)}`, query, req.maxBytes);
+  }
+
+  private parseImageUrl(raw: string): URL {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw new CloudError("CLOUD_BAD_RESPONSE", "Figma returned an invalid image URL.");
+    }
+    if (url.username || url.password) {
+      throw new CloudError("CLOUD_DOWNLOAD_BLOCKED", "Image URL contains credentials; refusing to use it.");
+    }
+    const localHttp =
+      this.config.allowLocalHttp && LOCAL_HTTP_HOSTS.has(url.hostname);
+    if (url.protocol !== "https:" && !localHttp) {
+      throw new CloudError(
+        "CLOUD_DOWNLOAD_BLOCKED",
+        "Image URL must use https (plain http is allowed only for localhost with FIGMA_CLOUD_INSECURE=1).",
+      );
+    }
+    return url;
   }
 
   private fileQuery(req: CloudFileRequest): Record<string, QueryValue> {
@@ -428,4 +574,12 @@ export class CloudClient {
 
 function bool(value: boolean | undefined): "true" | "false" | undefined {
   return value === undefined ? undefined : value ? "true" : "false";
+}
+
+function urlHost(raw: string): string {
+  try {
+    return new URL(raw).host;
+  } catch {
+    return "an invalid URL";
+  }
 }

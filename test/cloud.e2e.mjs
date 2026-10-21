@@ -5,7 +5,7 @@
 // query construction and error mapping without sending a credential anywhere.
 import { spawn } from "node:child_process";
 import http from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -47,7 +47,29 @@ const mock = http.createServer((req, res) => {
     return json(res, { nodes: { "1:2": { document: { id: "1:2", name: "Card" } } } });
   }
   if (url.pathname === "/v1/images/abc123") {
-    return json(res, { images: { "1:2": "https://cdn.example/card.png" } });
+    return json(res, { images: { "1:2": `http://${req.headers.host}/image.png` } });
+  }
+  if (url.pathname === "/v1/images/badfile") {
+    return json(res, { images: { "1:2": `http://${req.headers.host}/not-image` } });
+  }
+  if (url.pathname === "/v1/images/multi") {
+    const image = `http://${req.headers.host}/image-big.png`;
+    return json(res, { images: { "1:2": image, "3:4": image } });
+  }
+  if (url.pathname === "/image.png") {
+    const body = Buffer.from("89504e470d0a1a0a", "hex");
+    res.writeHead(200, { "content-type": "image/png", "content-length": body.length });
+    return res.end(body);
+  }
+  if (url.pathname === "/image-big.png") {
+    const body = Buffer.alloc(40_000, 1);
+    Buffer.from("89504e470d0a1a0a", "hex").copy(body);
+    res.writeHead(200, { "content-type": "image/png", "content-length": body.length });
+    return res.end(body);
+  }
+  if (url.pathname === "/not-image") {
+    res.writeHead(200, { "content-type": "text/html" });
+    return res.end("<html>not an image</html>");
   }
   if (url.pathname === "/v1/files/forbidden") {
     return json(res, { status: 403, err: "Forbidden" }, 403);
@@ -126,7 +148,7 @@ try {
 
   const list = await rpc("tools/list", {});
   const names = (list.result?.tools || []).map((t) => t.name);
-  for (const wanted of ["figma_cloud_ping", "figma_cloud_get_file", "figma_cloud_get_nodes", "figma_cloud_get_image"]) {
+  for (const wanted of ["figma_cloud_ping", "figma_cloud_get_file", "figma_cloud_get_nodes", "figma_cloud_get_image", "figma_cloud_download_image"]) {
     check(`${wanted} is registered only with the cloud opt-in`, names.includes(wanted));
   }
   check("cloud opt-in leaves the local surface in place", names.includes("figma_ping") && names.includes("figma_inspect"));
@@ -136,8 +158,8 @@ try {
     ping?.connected === false && ping?.capabilities?.cloud?.available === true &&
       ping.capabilities.cloud.configured === true && ping.capabilities.cloud.mode === "read-only",
     JSON.stringify(ping?.capabilities?.cloud || null).slice(0, 160));
-  check("figma_ping names the four cloud tools",
-    ["figma_cloud_ping", "figma_cloud_get_file", "figma_cloud_get_nodes", "figma_cloud_get_image"]
+  check("figma_ping names the five cloud tools",
+    ["figma_cloud_ping", "figma_cloud_get_file", "figma_cloud_get_nodes", "figma_cloud_get_image", "figma_cloud_download_image"]
       .every((n) => ping?.capabilities?.cloud?.tools?.includes(n)),
     JSON.stringify(ping?.capabilities?.cloud?.tools || []).slice(0, 160));
 
@@ -171,13 +193,66 @@ try {
     arguments: { fileKey: "abc123", nodeIds: ["1:2"], format: "png", scale: 2 },
   }));
   check("figma_cloud_get_image returns a temporary URL", image?.ok === true &&
-    image?.data?.images?.["1:2"] === "https://cdn.example/card.png" &&
+    String(image?.data?.images?.["1:2"] || "").endsWith("/image.png") &&
     /temporary/.test(image?.note || ""), JSON.stringify(image).slice(0, 160));
   const imageCall = calls.find((c) => c.url.startsWith("/v1/images/abc123?"));
   const imageUrl = imageCall ? new URL(imageCall.url, apiBase) : null;
   check("cloud image request carries format and scale",
     imageUrl?.searchParams.get("format") === "png" && imageUrl?.searchParams.get("scale") === "2",
     imageCall ? imageCall.url : "no request");
+
+  const downloadDir = join(scratch, "downloads");
+  const downloaded = parse(await rpc("tools/call", {
+    name: "figma_cloud_download_image",
+    arguments: { fileKey: "abc123", nodeIds: ["1:2"], format: "png", outDir: downloadDir },
+  }));
+  const downloadedPath = join(downloadDir, "figma-1_2.png");
+  check("figma_cloud_download_image writes the rendered bytes",
+    downloaded?.ok === true && downloaded?.files?.[0]?.bytes === 8 &&
+      downloaded?.files?.[0]?.path === downloadedPath && existsSync(downloadedPath),
+    JSON.stringify(downloaded).slice(0, 200));
+  const downloadedBytes = existsSync(downloadedPath) ? readFileSync(downloadedPath) : Buffer.alloc(0);
+  check("the downloaded file is a real PNG and the asset request carries no Figma token",
+    downloadedBytes.subarray(0, 8).toString("hex") === "89504e470d0a1a0a" &&
+      !calls.find((c) => c.url === "/image.png")?.headers["x-figma-token"] &&
+      !calls.find((c) => c.url === "/image.png")?.headers.authorization,
+    downloadedBytes.subarray(0, 8).toString("hex"));
+  const overwriteRes = await rpc("tools/call", {
+    name: "figma_cloud_download_image",
+    arguments: { fileKey: "abc123", nodeIds: ["1:2"], format: "png", outDir: downloadDir },
+  });
+  const overwrite = parse(overwriteRes);
+  check("the download tool refuses to overwrite by default",
+    overwriteRes?.result?.isError === true && overwrite?.error?.code === "CLOUD_DOWNLOAD_FAILED",
+    JSON.stringify(overwrite).slice(0, 180));
+
+  const badRes = await rpc("tools/call", {
+    name: "figma_cloud_download_image",
+    arguments: { fileKey: "badfile", nodeIds: ["1:2"], format: "png", outDir: join(scratch, "bad") },
+  });
+  const bad = parse(badRes);
+  check("the download tool rejects bytes that are not the requested image format",
+    badRes?.result?.isError === true && bad?.error?.code === "CLOUD_BAD_IMAGE" &&
+      !existsSync(join(scratch, "bad", "figma-1_2.png")),
+    JSON.stringify(bad).slice(0, 180));
+
+  const totalDir = join(scratch, "total");
+  const totalRes = await rpc("tools/call", {
+    name: "figma_cloud_download_image",
+    arguments: {
+      fileKey: "multi",
+      nodeIds: ["1:2", "3:4"],
+      format: "png",
+      outDir: totalDir,
+      maxBytes: 64_000,
+      maxTotalBytes: 64_000,
+    },
+  });
+  const total = parse(totalRes);
+  check("the download tool enforces the whole-call byte cap before writing",
+    totalRes?.result?.isError === true && total?.error?.code === "CLOUD_RESPONSE_TOO_LARGE" &&
+      total?.error?.maxBytes === 64_000 && !existsSync(join(totalDir, "figma-1_2.png")),
+    JSON.stringify(total).slice(0, 180));
 
   const forbiddenRes = await rpc("tools/call", {
     name: "figma_cloud_get_file",
@@ -188,7 +263,10 @@ try {
     forbidden?.error?.code === "CLOUD_FORBIDDEN" && forbidden?.error?.status === 403,
     JSON.stringify(forbidden).slice(0, 160));
   check("the cloud token never appears in a tool reply or stderr",
-    !text(forbiddenRes).includes(TOKEN) && !stderr.includes(TOKEN) && !JSON.stringify(ping).includes(TOKEN),
+    !text(forbiddenRes).includes(TOKEN) && !stderr.includes(TOKEN) &&
+      !JSON.stringify(ping).includes(TOKEN) && !text(downloaded).includes(TOKEN) &&
+      !text(overwriteRes).includes(TOKEN) && !text(badRes).includes(TOKEN) &&
+      !text(totalRes).includes(TOKEN),
     "token leaked");
 } catch (err) {
   fail++;
