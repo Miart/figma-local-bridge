@@ -276,7 +276,7 @@ try {
         });
       case "audit":
         return ok({
-          schema: "audit-v1",
+          schema: "audit-v2",
           scope: { id: env.params.rootNodeId || "0:1", name: "Card", type: "FRAME" },
           rules: [{ id: "contrast", description: "text contrast", severity: "error" }],
           nodesScanned: 4,
@@ -685,12 +685,12 @@ try {
   const auditSeenBefore = seen.length;
   const audit = c.text(await c.rpc("tools/call", {
     name: "figma_audit",
-    arguments: { rootNodeId: "1:2", rules: ["contrast"] },
+    arguments: { rootNodeId: "1:2", rules: ["contrast"], suggest: false },
   }));
   const auditReq = seen[auditSeenBefore];
   check("figma_audit sends the subtree and the selected rules, and carries findings through",
-    auditReq.method === "audit" && auditReq.params.rootNodeId === "1:2" &&
-      audit.schema === "audit-v1" && audit.findings[0].rule === "contrast" && audit.counts.error === 1,
+    auditReq.method === "audit" && auditReq.params.rootNodeId === "1:2" && auditReq.params.suggest === false &&
+      audit.schema === "audit-v2" && audit.findings[0].rule === "contrast" && audit.counts.error === 1,
     JSON.stringify(audit).slice(0, 200));
 
   const indexSeenBefore = seen.length;

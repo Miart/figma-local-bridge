@@ -297,9 +297,13 @@ incomplete and must not be built as-is.
   built tree, literal fills/strokes that are neither a paint style nor a
   variable, text without a text style, placeholder copy, detached instances,
   WCAG AA contrast against the effective background, default names, and
-  opt-in off-scale spacing/radius. A contrast finding is exact for solid text
-  on a solid effective background; gradients/images are reported as unknown,
-  not guessed.
+  opt-in off-scale spacing/radius, empty text and literal effects. A contrast
+  finding is exact for solid text on a solid effective background;
+  gradients/images are reported as unknown, not guessed. With `suggest:true`
+  (default) a hardcoded colour names exact local paint-style and colour-variable
+  candidates, unstyled text names exact local text-style candidates, and
+  spacing/radius names the nearest on-scale value. These are candidates, not
+  bindings: check the mode and apply the token deliberately.
 - `figma_design_system` snapshots styles, variables (with modes and values) and
   components. `inventory` returns it, `export` writes a JSON file with a
   sha256, and `diff` compares that file to the live file by stable key. It is

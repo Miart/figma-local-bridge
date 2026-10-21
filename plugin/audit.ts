@@ -22,7 +22,7 @@
 
 import { KEY_DATA, BUILD_DATA, PROTECTED_DATA } from "./ui-build";
 
-export const AUDIT_SCHEMA = "audit-v1";
+export const AUDIT_SCHEMA = "audit-v2";
 
 type Json = any;
 
@@ -48,6 +48,8 @@ const RULES: Record<string, { description: string; severity: string }> = {
   "detached-instance": { description: "an instance has no reachable main component", severity: "warning" },
   contrast: { description: "text contrast is below WCAG AA against its effective background", severity: "error" },
   "default-name": { description: "a layer still has a default Figma name", severity: "info" },
+  "empty-text": { description: "a visible text layer has no characters", severity: "warning" },
+  "hardcoded-effect": { description: "a visible effect is a literal, not an effect style", severity: "warning" },
   spacing: { description: "auto-layout spacing is off the chosen scale", severity: "info" },
   radius: { description: "corner radius is off the chosen scale", severity: "info" },
 };
@@ -200,6 +202,171 @@ function offScale(value: number, scale: number[] | null, multiple: number): bool
   return Math.abs(value / multiple - Math.round(value / multiple)) > 0.001;
 }
 
+interface PaintStyleCandidate {
+  id: string;
+  name: string;
+  hex: string;
+  color: { r: number; g: number; b: number };
+}
+
+interface TextStyleCandidate {
+  id: string;
+  name: string;
+  fontName: { family: string; style: string };
+  fontSize: number;
+}
+
+interface ColorVariableCandidate {
+  id: string;
+  name: string;
+  collection: string;
+  modes: string[];
+  values: Array<{ mode: string; color: { r: number; g: number; b: number } }>;
+}
+
+function validRgb(v: any): v is { r: number; g: number; b: number } {
+  if (!v || typeof v !== "object") return false;
+  return [v.r, v.g, v.b].every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1);
+}
+
+function rgbEqual(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }): boolean {
+  // Exact at 8-bit resolution is the only colour match the audit calls safe.
+  const epsilon = 1 / 255 + 1e-6;
+  return Math.abs(a.r - b.r) <= epsilon && Math.abs(a.g - b.g) <= epsilon && Math.abs(a.b - b.b) <= epsilon;
+}
+
+async function loadPaintStyles(ctx: any, warnings: string[]): Promise<PaintStyleCandidate[]> {
+  if (!ctx || typeof ctx.getLocalPaintStylesAsync !== "function") return [];
+  let styles: any[] = [];
+  try {
+    styles = await ctx.getLocalPaintStylesAsync();
+  } catch (e) {
+    warnings.push(`paint-style suggestions unavailable: ${errMsg(e)}`);
+    return [];
+  }
+  const out: PaintStyleCandidate[] = [];
+  for (const style of styles || []) {
+    if (!style || typeof style.id !== "string" || !style.id) continue;
+    const visible = (Array.isArray(style.paints) ? style.paints : []).filter((p: any) => p && p.visible !== false);
+    if (visible.length !== 1) continue;
+    const paint = visible[0];
+    if (paint.type !== "SOLID" || !validRgb(paint.color)) continue;
+    if (paint.blendMode && paint.blendMode !== "NORMAL") continue;
+    const opacity = paint.opacity === undefined ? 1 : Number(paint.opacity);
+    if (!Number.isFinite(opacity) || Math.abs(opacity - 1) > 1e-6) continue;
+    out.push({
+      id: style.id,
+      name: String(style.name || style.id),
+      hex: cssColor(paint.color),
+      color: { r: paint.color.r, g: paint.color.g, b: paint.color.b },
+    });
+  }
+  return out;
+}
+
+async function loadTextStyles(ctx: any, warnings: string[]): Promise<TextStyleCandidate[]> {
+  if (!ctx || typeof ctx.getLocalTextStylesAsync !== "function") return [];
+  let styles: any[] = [];
+  try {
+    styles = await ctx.getLocalTextStylesAsync();
+  } catch (e) {
+    warnings.push(`text-style suggestions unavailable: ${errMsg(e)}`);
+    return [];
+  }
+  const out: TextStyleCandidate[] = [];
+  for (const style of styles || []) {
+    if (!style || typeof style.id !== "string" || !style.id) continue;
+    const fontName = style.fontName;
+    const fontSize = Number(style.fontSize);
+    if (!fontName || typeof fontName !== "object" || typeof fontName.family !== "string" || typeof fontName.style !== "string") continue;
+    if (!Number.isFinite(fontSize) || fontSize <= 0) continue;
+    out.push({
+      id: style.id,
+      name: String(style.name || style.id),
+      fontName: { family: fontName.family, style: fontName.style },
+      fontSize,
+    });
+  }
+  return out;
+}
+
+async function loadColorVariables(ctx: any, warnings: string[]): Promise<ColorVariableCandidate[]> {
+  const api = ctx && ctx.variables;
+  if (!api || typeof api.getLocalVariableCollectionsAsync !== "function" || typeof api.getLocalVariablesAsync !== "function") {
+    return [];
+  }
+  try {
+    const [collections, variables] = await Promise.all([
+      api.getLocalVariableCollectionsAsync(),
+      api.getLocalVariablesAsync("COLOR"),
+    ]);
+    const byId = new Map<string, any>((collections || []).map((c: any) => [c.id, c]));
+    const out: ColorVariableCandidate[] = [];
+    for (const variable of variables || []) {
+      if (!variable || variable.resolvedType !== "COLOR") continue;
+      const collection = byId.get(variable.variableCollectionId);
+      if (!collection) continue;
+      const modes = Array.isArray(collection.modes) ? collection.modes : [];
+      const values: Array<{ mode: string; color: { r: number; g: number; b: number } }> = [];
+      for (const mode of modes) {
+        const raw = variable.valuesByMode ? variable.valuesByMode[mode.modeId] : undefined;
+        if (validRgb(raw)) values.push({ mode: String(mode.name), color: { r: raw.r, g: raw.g, b: raw.b } });
+      }
+      if (!values.length) continue;
+      out.push({
+        id: String(variable.id),
+        name: String(variable.name || variable.id),
+        collection: String(collection.name || collection.id),
+        modes: modes.map((m: any) => String(m.name)),
+        values,
+      });
+    }
+    return out;
+  } catch (e) {
+    warnings.push(`colour-variable suggestions unavailable: ${errMsg(e)}`);
+    return [];
+  }
+}
+
+function paintSuggestions(color: { r: number; g: number; b: number }, styles: PaintStyleCandidate[]) {
+  return styles.filter((style) => rgbEqual(style.color, color)).slice(0, 3);
+}
+
+function variableSuggestions(color: { r: number; g: number; b: number }, variables: ColorVariableCandidate[]) {
+  return variables
+    .map((variable) => {
+      const modes = variable.values.filter((v) => rgbEqual(v.color, color)).map((v) => v.mode);
+      if (!modes.length) return null;
+      return {
+        id: variable.id,
+        name: variable.name,
+        collection: variable.collection,
+        modes,
+        allModes: modes.length === variable.modes.length,
+      };
+    })
+    .filter((v): v is NonNullable<typeof v> => !!v)
+    .sort((a, b) => Number(b.allModes) - Number(a.allModes) || a.name.localeCompare(b.name) || a.collection.localeCompare(b.collection))
+    .slice(0, 3);
+}
+
+function textStyleSuggestions(node: any, styles: TextStyleCandidate[]): TextStyleCandidate[] {
+  const fontName = node && node.fontName;
+  const fontSize = Number(node && node.fontSize);
+  if (!fontName || typeof fontName !== "object" || typeof fontName.family !== "string" || typeof fontName.style !== "string") return [];
+  if (!Number.isFinite(fontSize)) return [];
+  return styles
+    .filter((style) => style.fontName.family === fontName.family && style.fontName.style === fontName.style && Math.abs(style.fontSize - fontSize) < 0.01)
+    .slice(0, 3);
+}
+
+function nearestOnScale(value: number, scale: number[] | null, multiple: number): number {
+  if (scale && scale.length) {
+    return scale.reduce((best, candidate) => (Math.abs(candidate - value) < Math.abs(best - value) ? candidate : best), scale[0]);
+  }
+  return multiple * Math.round(value / multiple);
+}
+
 export async function runAudit(ctx: any, params: Json = {}): Promise<Json> {
   const t0 = Date.now();
   const root: any = params.rootNodeId
@@ -215,6 +382,13 @@ export async function runAudit(ctx: any, params: Json = {}): Promise<Json> {
     if (!RULES[rule]) throw new Error(`unknown audit rule "${rule}". Available: ${Object.keys(RULES).join(", ")}`);
   }
   const ruleSet = new Set(active);
+  const warnings: string[] = [];
+  const suggestionsEnabled = params.suggest !== false;
+  const needsPaintSuggestions = suggestionsEnabled && (ruleSet.has("hardcoded-fill") || ruleSet.has("hardcoded-stroke"));
+  const paintStyles = needsPaintSuggestions ? await loadPaintStyles(ctx, warnings) : [];
+  const colorVariables = needsPaintSuggestions ? await loadColorVariables(ctx, warnings) : [];
+  const textStyles = suggestionsEnabled && ruleSet.has("unstyled-text") ? await loadTextStyles(ctx, warnings) : [];
+  const suggestionCounts = { paintStyles: 0, colorVariables: 0, textStyles: 0 };
   const spacingScale = normalizeScale(params.spacingScale, "spacingScale");
   const radiusScale = normalizeScale(params.radiusScale, "radiusScale");
   const spacingMultiple = params.spacingMultiple === undefined ? 4 : Number(params.spacingMultiple);
@@ -287,7 +461,18 @@ export async function runAudit(ctx: any, params: Json = {}): Promise<Json> {
       const varBound = node.fills.some((p: any) => p && p.boundVariables && p.boundVariables.color);
       if (!styleBound && !varBound) {
         const solid = visibleSolid(node.fills, ctx, node.opacity);
-        if (solid && solid.opacity > 0.001) add("hardcoded-fill", node, `fill ${solid.hex} is a literal, not a paint style or variable`, { value: solid.hex });
+        if (solid && solid.opacity > 0.001) {
+          const paintMatches = solid.opacity >= 0.999 ? paintSuggestions(solid.color, paintStyles) : [];
+          const variableMatches = variableSuggestions(solid.color, colorVariables);
+          if (paintMatches.length) suggestionCounts.paintStyles++;
+          if (variableMatches.length) suggestionCounts.colorVariables++;
+          add("hardcoded-fill", node, `fill ${solid.hex} is a literal, not a paint style or variable`, {
+            value: solid.hex,
+            ...(paintMatches.length || variableMatches.length
+              ? { suggestions: { ...(paintMatches.length ? { paintStyles: paintMatches } : {}), ...(variableMatches.length ? { colorVariables: variableMatches } : {}) } }
+              : {}),
+          });
+        }
       }
     }
     if (ruleSet.has("hardcoded-stroke") && Array.isArray(node.strokes) && node.strokes.length) {
@@ -296,15 +481,33 @@ export async function runAudit(ctx: any, params: Json = {}): Promise<Json> {
       const varBound = node.strokes.some((p: any) => p && p.boundVariables && p.boundVariables.color);
       if (!styleBound && !varBound) {
         const solid = visibleSolid(node.strokes, ctx, node.opacity);
-        if (solid && solid.opacity > 0.001) add("hardcoded-stroke", node, `stroke ${solid.hex} is a literal, not a paint style or variable`, { value: solid.hex });
+        if (solid && solid.opacity > 0.001) {
+          const paintMatches = solid.opacity >= 0.999 ? paintSuggestions(solid.color, paintStyles) : [];
+          const variableMatches = variableSuggestions(solid.color, colorVariables);
+          if (paintMatches.length) suggestionCounts.paintStyles++;
+          if (variableMatches.length) suggestionCounts.colorVariables++;
+          add("hardcoded-stroke", node, `stroke ${solid.hex} is a literal, not a paint style or variable`, {
+            value: solid.hex,
+            ...(paintMatches.length || variableMatches.length
+              ? { suggestions: { ...(paintMatches.length ? { paintStyles: paintMatches } : {}), ...(variableMatches.length ? { colorVariables: variableMatches } : {}) } }
+              : {}),
+          });
+        }
       }
     }
     if (node.type === "TEXT") {
       if (ruleSet.has("unstyled-text")) {
         const styleId = node.textStyleId;
         if (!(typeof styleId === "string" && styleId.length > 0)) {
-          add("unstyled-text", node, "text has no local text style");
+          const textMatches = textStyleSuggestions(node, textStyles);
+          if (textMatches.length) suggestionCounts.textStyles++;
+          add("unstyled-text", node, "text has no local text style", {
+            ...(textMatches.length ? { suggestions: { textStyles: textMatches } } : {}),
+          });
         }
+      }
+      if (ruleSet.has("empty-text") && typeof node.characters === "string" && node.characters.trim() === "") {
+        add("empty-text", node, "visible text layer has no characters");
       }
       if (ruleSet.has("placeholder-text") && typeof node.characters === "string" && PLACEHOLDER.test(node.characters)) {
         add("placeholder-text", node, `copy looks like placeholder: "${node.characters.slice(0, 80)}"`);
@@ -350,6 +553,16 @@ export async function runAudit(ctx: any, params: Json = {}): Promise<Json> {
         add("detached-instance", node, `main component is unreachable: ${errMsg(e)}`);
       }
     }
+    if (ruleSet.has("hardcoded-effect") && Array.isArray(node.effects) && node.effects.length) {
+      const styleId = node.effectStyleId;
+      const styleBound = typeof styleId === "string" && styleId.length > 0;
+      const effects = node.effects.filter((e: any) => e && e.visible !== false && e.type !== "NONE");
+      if (!styleBound && effects.length) {
+        add("hardcoded-effect", node, `${effects.length} visible effect(s) are literals, not an effect style`, {
+          effects: effects.map((e: any) => String(e.type)),
+        });
+      }
+    }
     if (ruleSet.has("spacing") && node.layoutMode && node.layoutMode !== "NONE") {
       const values: Array<[string, any]> = [
         ["itemSpacing", node.itemSpacing],
@@ -362,13 +575,25 @@ export async function runAudit(ctx: any, params: Json = {}): Promise<Json> {
       for (const [name, value] of values) {
         if (value === null || value === undefined || isMixed(value, ctx)) continue;
         if (offScale(Number(value), spacingScale, spacingMultiple)) {
-          add("spacing", node, `${name} ${value} is off the spacing scale`, { property: name, value: Number(value) });
+          const numeric = Number(value);
+          const nearest = nearestOnScale(numeric, spacingScale, spacingMultiple);
+          add("spacing", node, `${name} ${value} is off the spacing scale`, {
+            property: name,
+            value: numeric,
+            nearest,
+            delta: round(nearest - numeric),
+          });
         }
       }
     }
     if (ruleSet.has("radius") && node.cornerRadius !== undefined && !isMixed(node.cornerRadius, ctx) && typeof node.cornerRadius === "number") {
       if (offScale(node.cornerRadius, radiusScale, radiusMultiple)) {
-        add("radius", node, `cornerRadius ${node.cornerRadius} is off the radius scale`, { value: node.cornerRadius });
+        const nearest = nearestOnScale(node.cornerRadius, radiusScale, radiusMultiple);
+        add("radius", node, `cornerRadius ${node.cornerRadius} is off the radius scale`, {
+          value: node.cornerRadius,
+          nearest,
+          delta: round(nearest - node.cornerRadius),
+        });
       }
     }
     for (const child of node.children || []) await visit(child, activeBuild);
@@ -388,6 +613,9 @@ export async function runAudit(ctx: any, params: Json = {}): Promise<Json> {
     }
   }
 
+  if (truncated) warnings.push(`node limit ${maxNodes} reached; the report covers the first ${maxNodes} visible nodes`);
+  if (findingsTruncated) warnings.push(`${findingsTruncated} more findings were counted but not listed (maxFindings ${maxFindings})`);
+
   return {
     schema: AUDIT_SCHEMA,
     scope: { id: root.id, name: root.name, type: root.type },
@@ -399,10 +627,8 @@ export async function runAudit(ctx: any, params: Json = {}): Promise<Json> {
     byRule,
     findings,
     findingsTruncated,
-    warnings: [
-      ...(truncated ? [`node limit ${maxNodes} reached; the report covers the first ${maxNodes} visible nodes`] : []),
-      ...(findingsTruncated ? [`${findingsTruncated} more findings were counted but not listed (maxFindings ${maxFindings})`] : []),
-    ],
+    suggestions: { enabled: suggestionsEnabled, ...suggestionCounts },
+    warnings,
     ms: { audit: Date.now() - t0 },
   };
 }

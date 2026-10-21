@@ -38,6 +38,8 @@ function node(opts = {}) {
     strokeStyleId: opts.strokeStyleId || "",
     textStyleId: opts.textStyleId || "",
     cornerRadius: opts.cornerRadius === undefined ? 0 : opts.cornerRadius,
+    effects: opts.effects || [],
+    effectStyleId: opts.effectStyleId || "",
     layoutMode: opts.layoutMode || "NONE",
     itemSpacing: opts.itemSpacing === undefined ? 0 : opts.itemSpacing,
     counterAxisSpacing: opts.counterAxisSpacing === undefined ? null : opts.counterAxisSpacing,
@@ -116,7 +118,7 @@ test("contrast ratio matches WCAG extremes", () => {
 test("default audit finds keys, literals, text styles, placeholders, detached instances and contrast", async () => {
   const { ctx, title } = fixture();
   const report = await runAudit(ctx, {});
-  assert.equal(report.schema, "audit-v1");
+  assert.equal(report.schema, "audit-v2");
   assert.equal(report.scope.type, "PAGE");
   assert.ok(report.nodesScanned >= 8);
   const rules = new Set(report.findings.map((f) => f.rule));
@@ -157,7 +159,11 @@ test("spacing and radius are opt-in and point at the property", async () => {
   const spacing = report.findings.filter((f) => f.rule === "spacing");
   assert.ok(spacing.some((f) => f.property === "itemSpacing" && f.value === 7));
   assert.ok(spacing.some((f) => f.property === "paddingTop" && f.value === 10));
-  assert.ok(report.findings.some((f) => f.rule === "radius" && f.value === 5));
+  const item = spacing.find((f) => f.property === "itemSpacing" && f.value === 7);
+  assert.ok(item);
+  assert.equal(item.nearest, 8);
+  assert.equal(item.delta, 1);
+  assert.ok(report.findings.some((f) => f.rule === "radius" && f.value === 5 && f.nearest === 4));
 });
 
 test("hidden layers are skipped unless includeHidden is true", async () => {
@@ -219,6 +225,81 @@ test("contrast composites a translucent text fill before measuring it", async ()
   assert.equal(finding.foreground, "#4d4d4d");
   assert.equal(finding.foregroundOpacity, 0.3);
   assert.equal(finding.ratio, 2.46);
+});
+
+test("audit v2 suggests exact local paint styles and colour variables", async () => {
+  const { ctx, hud } = fixture();
+  ctx.getLocalPaintStylesAsync = async () => [
+    { id: "S:brand", name: "Brand/White", paints: [solid(1, 1, 1)] },
+  ];
+  const collection = {
+    id: "C:1",
+    name: "Theme",
+    modes: [{ modeId: "M:1", name: "Light" }, { modeId: "M:2", name: "Dark" }],
+  };
+  ctx.variables = {
+    async getLocalVariableCollectionsAsync() { return [collection]; },
+    async getLocalVariablesAsync() {
+      return [{
+        id: "V:1",
+        name: "surface",
+        resolvedType: "COLOR",
+        variableCollectionId: "C:1",
+        valuesByMode: {
+          "M:1": { r: 1, g: 1, b: 1 },
+          "M:2": { r: 0, g: 0, b: 0 },
+        },
+      }];
+    },
+  };
+  const report = await runAudit(ctx, { rules: ["hardcoded-fill"] });
+  const finding = report.findings.find((f) => f.nodeId === hud.id);
+  assert.ok(finding);
+  assert.equal(finding.suggestions.paintStyles[0].name, "Brand/White");
+  assert.equal(finding.suggestions.colorVariables[0].name, "surface");
+  assert.deepEqual(finding.suggestions.colorVariables[0].modes, ["Light"]);
+  assert.equal(finding.suggestions.colorVariables[0].allModes, false);
+  assert.ok(report.suggestions.paintStyles > 0);
+  assert.ok(report.suggestions.colorVariables > 0);
+});
+
+test("audit v2 suggests an exact local text style", async () => {
+  const { ctx, loose } = fixture();
+  ctx.getLocalTextStylesAsync = async () => [
+    { id: "T:body", name: "Body/16", fontName: { family: "Inter", style: "Regular" }, fontSize: 16 },
+  ];
+  const report = await runAudit(ctx, { rules: ["unstyled-text"] });
+  const finding = report.findings.find((f) => f.nodeId === loose.id);
+  assert.ok(finding);
+  assert.equal(finding.suggestions.textStyles[0].name, "Body/16");
+  assert.equal(report.suggestions.textStyles > 0, true);
+});
+
+test("empty text and hardcoded effects are opt-in findings", async () => {
+  const { ctx, hud } = fixture();
+  const empty = node({ type: "TEXT", name: "Empty", parent: hud, characters: "   " });
+  const shadow = node({
+    type: "FRAME", name: "Shadow", parent: hud,
+    effects: [{ type: "DROP_SHADOW", visible: true, color: { r: 0, g: 0, b: 0 }, opacity: 0.2 }],
+  });
+  const styledShadow = node({
+    type: "FRAME", name: "Styled shadow", parent: hud,
+    effectStyleId: "E:1",
+    effects: [{ type: "DROP_SHADOW", visible: true, color: { r: 0, g: 0, b: 0 }, opacity: 0.2 }],
+  });
+  hud.children.push(empty, shadow, styledShadow);
+  const report = await runAudit(ctx, { rules: ["empty-text", "hardcoded-effect"] });
+  assert.ok(report.findings.some((f) => f.rule === "empty-text" && f.nodeId === empty.id));
+  assert.ok(report.findings.some((f) => f.rule === "hardcoded-effect" && f.nodeId === shadow.id));
+  assert.ok(!report.findings.some((f) => f.nodeId === styledShadow.id));
+});
+
+test("suggest:false skips loading local styles", async () => {
+  const { ctx } = fixture();
+  let calls = 0;
+  ctx.getLocalPaintStylesAsync = async () => { calls++; return []; };
+  await runAudit(ctx, { rules: ["hardcoded-fill"], suggest: false });
+  assert.equal(calls, 0);
 });
 
 test("an unknown rule is a refusal with the list of rules", async () => {

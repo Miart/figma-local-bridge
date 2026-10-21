@@ -43,7 +43,7 @@ async function main() {
   // The version clients print for this server. Keep it in step with
   // package.json: the two numbers had already drifted apart once.
   const server = new McpServer(
-    { name: "figma-local-bridge", version: "0.28.0" },
+    { name: "figma-local-bridge", version: "0.29.0" },
     { capabilities: { tools: {} }, instructions: GUIDE },
   );
   registerGuide(server);

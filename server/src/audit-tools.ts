@@ -28,6 +28,8 @@ const RULE_IDS = [
   "detached-instance",
   "contrast",
   "default-name",
+  "empty-text",
+  "hardcoded-effect",
   "spacing",
   "radius",
 ] as const;
@@ -35,8 +37,8 @@ const RULE_IDS = [
 export function registerAuditTools(server: McpServer, client: FigmaClient) {
   server.tool(
     "figma_audit",
-    "Read-only design-system audit of a page or subtree. Reports stable-key problems (duplicate keys, nodes added to a built tree without a key), literal fills/strokes that are neither a paint style nor a variable, text without a text style, placeholder copy, detached instances, WCAG AA contrast against the effective background, default layer names, and (opt-in) off-scale spacing/radius. " +
-      "Every finding carries nodeId, stable key, name, type, path, rule, severity and the value that caused it. It never edits the document.",
+    "Read-only design-system audit of a page or subtree. Reports stable-key problems (duplicate keys, nodes added to a built tree without a key), literal fills/strokes that are neither a style nor a variable, text without a text style, placeholder copy, detached instances, WCAG AA contrast against the effective background, default layer names, and (opt-in) empty text, literal effects, off-scale spacing and off-scale radius. " +
+      "Every finding carries nodeId, stable key, name, type, path, rule, severity and the value that caused it. With suggest:true (default) a hardcoded colour also carries exact local paint-style and colour-variable candidates, and unstyled text carries exact local text-style candidates; spacing/radius findings name the nearest on-scale value. It never edits the document.",
     {
       rootNodeId: figmaNodeId("rootNodeId")
         .optional()
@@ -46,9 +48,13 @@ export function registerAuditTools(server: McpServer, client: FigmaClient) {
         .min(1)
         .optional()
         .describe(
-          "Rules to run. Defaults to duplicate-key, unkeyed-node, hardcoded-fill, hardcoded-stroke, unstyled-text, placeholder-text, detached-instance, contrast, default-name. Add spacing/radius explicitly.",
+          "Rules to run. Defaults to duplicate-key, unkeyed-node, hardcoded-fill, hardcoded-stroke, unstyled-text, placeholder-text, detached-instance, contrast, default-name. Add spacing, radius, empty-text or hardcoded-effect explicitly.",
         ),
       includeHidden: z.boolean().default(false).describe("Audit hidden layers too"),
+      suggest: z
+        .boolean()
+        .default(true)
+        .describe("Attach exact local paint-style, colour-variable and text-style candidates to findings; never applies them"),
       maxNodes: z.number().int().min(1).max(10000).default(2000).describe("Stop after this many visible nodes"),
       maxFindings: z.number().int().min(1).max(5000).default(200).describe("List at most this many findings; counts are still complete"),
       spacingScale: z
