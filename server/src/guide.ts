@@ -62,6 +62,13 @@ It writes only local files, not the document; a truncated audit makes its delta
 incomplete. The last one turns a live subtree back into a figma_build spec; read
 its unsupported/warnings, and never build a result marked truncated.
 
+Figma Motion is Beta: figma_motion_styles and figma_motion_inspect read it,
+figma_motion_apply_style / remove_style, figma_motion_set_keyframes /
+remove_keyframes and figma_motion_set_duration write it through the same
+dry-run planId and readback contract. A build without figma.motion or the
+node-level methods fails with MOTION_UNAVAILABLE; never imitate Motion with
+pluginData or a local animation, and do not promise a GIF/MP4/WebM export.
+
 Writes are serialized, so a call can wait behind another write for longer than
 its caller waits. When one times out, figma_ops (opId from the error) says
 whether it is still queued, running, or already finished and what it returned;

@@ -20,6 +20,7 @@ import { registerIndexTools } from "./index-tools.js";
 import { registerDesignSystemTools } from "./design-system-tools.js";
 import { registerTokenTools } from "./token-tools.js";
 import { registerSpecTools } from "./spec-tools.js";
+import { registerMotionTools } from "./motion-tools.js";
 import { capabilitiesReport } from "./capabilities.js";
 import { registerCloudTools } from "./cloud-tools.js";
 import type { CloudConfig } from "./cloud.js";
@@ -51,7 +52,7 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   const capabilities = capabilitiesReport(caps, cloud);
   server.tool(
     "figma_ping",
-    "Health check and capability report. Verifies the plugin is paired, reports the active page and connected files (fileKey + name), and states what this process can do: local read/write/destructive mode, whether the optional read-only Figma REST adapter is enabled, and the Figma-hosted features even that adapter does not proxy. Call it first when you do not know what is open or whether an operation is available.",
+    "Health check and capability report. Verifies the plugin is paired, reports the active page and connected files (fileKey + name), and states what this process can do: local read/write/destructive mode, Motion (Beta) availability and playhead, whether the optional read-only Figma REST adapter is enabled, and the Figma-hosted features even that adapter does not proxy. Call it first when you do not know what is open or whether an operation is available.",
     { fileKey: fileKeyParam },
     async (a) =>
       guard(async () => {
@@ -137,6 +138,10 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   registerTokenTools(server, client, caps);
   // The reverse of build is a read of the document; it belongs in both modes.
   registerSpecTools(server, client);
+  // Motion is a read/plan/write split like build: the dry run and inspection
+  // belong in both modes; an apply checks caps.write at call time. A build
+  // without the Beta API answers MOTION_UNAVAILABLE from the plugin.
+  registerMotionTools(server, client, caps);
   // Cloud is opt-in and read-only; it is registered in both local modes and
   // works even when the local daemon is absent. The config gate lives in
   // readCloudConfig(), not in an agent's guess.

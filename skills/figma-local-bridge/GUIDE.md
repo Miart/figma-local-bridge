@@ -7,13 +7,13 @@ authoritative about arguments.
 
 ## Connecting a new install
 
-macOS 0.34.1 ships a self-contained release: unzip it and double-click
+macOS 0.35.0 ships a self-contained release: unzip it and double-click
 `Install.command`. It installs a per-user LaunchAgent, backs up and configures
 the MCP clients it detects, and copies the token to the clipboard without
 printing it. Figma has no API for registering a development plugin, so the
 user must still choose **Plugins → Development → Import plugin from
 manifest…** on `~/Library/Application Support/Figma Local Bridge/app/plugin/manifest.json`,
-run the plugin, and paste the token. The installer is unsigned in 0.34.1;
+run the plugin, and paste the token. The installer is unsigned in 0.35.0;
 Gatekeeper may require right-click → Open. `Uninstall.command` removes the app,
 LaunchAgent and this bridge's entries. From a source checkout, `npm run setup`
 does the same after `npm run build`.
@@ -37,6 +37,11 @@ Every local tool takes an optional `fileKey`; the cloud tools take a required
 
 `figma_ping` is also the capability report. It returns `capabilities.local.mode`
 (`read-only`, `write`, or `write+destructive`) and `capabilities.cloud`:
+
+- `figma_ping` also returns a `motion` object: whether `figma.motion` is
+  present, the current playhead (or null), and whether local custom animation
+  styles can be listed. Node-level methods are checked per node by
+  `figma_motion_inspect`; a missing Beta API is `MOTION_UNAVAILABLE`.
 
 - The cloud adapter is **off by default**. `cloud.available` is false unless the
   MCP process has `FIGMA_CLOUD=1` and exactly one of `FIGMA_CLOUD_TOKEN` (PAT) or
@@ -448,6 +453,48 @@ effect styles from token names; those still go through `figma_build`,
   preserved, while a new or different remote binding is refused instead of
   being rebound by name. Colours are 8-bit hex; matching is by name inside a
   collection, so a rename is a delete plus a create, not a preserved identity.
+
+## Motion (Beta)
+
+Motion is the Figma timeline API, not an animation engine inside this bridge.
+Every command probes `figma.motion` and the target node's methods at call time.
+On a build where they are missing, the answer is `MOTION_UNAVAILABLE` — never an
+empty style list, a `pluginData` imitation, or a locally interpolated animation.
+`figma_ping` reports whether `figma.motion` is present; `figma_motion_inspect`
+reports which node-level methods this particular node exposes.
+
+- `figma_motion_styles` lists `figma.motion.figmaAnimationStyles()` and local
+  custom animation styles, plus the current playhead. Use the returned
+  `styleId` (Figma style) or `id` (custom style) with
+  `figma_motion_apply_style`.
+- `figma_motion_inspect` returns `animationStyles`, `manualKeyframeTracks`,
+  `animations` and `timelines` for one node. This is where to find the applied
+  style instance id, timeline id and current track before writing.
+- Writes are `figma_motion_apply_style`, `figma_motion_remove_style`,
+  `figma_motion_set_keyframes`, `figma_motion_remove_keyframes` and
+  `figma_motion_set_duration`. Each defaults to `dryRun:true`, returns a
+  `planId` built from the operation and the node's live Motion-state
+  fingerprint, and refuses apply with any other plan.
+- Apply is one undo transaction. The plugin reads the style/keyframes/timeline
+  back after writing; a missing style, a changed duration/offset, a changed
+  keyframe position/value/easing or a track that did not disappear makes the
+  call fail and roll back. Removing something that is already absent is a
+  verified no-op.
+- A Figma style accepts `duration`, `timelineOffset` and `props`. A custom
+  style accepts **only** `timelineOffset`; `duration` and `props` are refused
+  rather than silently dropped.
+- A keyframe track is `{ baseValue?, keyframes:[{ id?, timelinePosition,
+  easing?, value }] }`. Positions are seconds, unique, and every value in one
+  track must share a type (`FLOAT`, `COLOR`, `VECTOR`, `BOOL`, …). A field is
+  either `{type:"PROPERTY",name:"OPACITY"}` or an indexed paint/stroke/effect
+  descriptor, for example
+  `{type:"INDEXED_ITEM",collection:"effects",index:0,field:"RADIUS"}`.
+  `figma_motion_inspect` shows the exact field names and existing ids.
+- `figma_motion_set_duration` needs a `timelineId` from the node's `timelines`;
+  the plugin verifies that the same id still lists the new duration.
+- There is no Motion GIF/MP4/WebM export in the Plugin API used here. Render or
+  record in Figma if a movie file is required; do not expect a file from these
+  tools.
 
 ## The snippet standard library (`flb`)
 

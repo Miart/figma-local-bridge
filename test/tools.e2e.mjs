@@ -87,9 +87,12 @@ try {
     "figma_download_assets", "figma_get_code_connect_map", "figma_use", "figma_upload_assets", "figma_add_code_connect_map",
     "figma_compare", "figma_checkpoint", "figma_ops", "figma_cancel",
     "figma_build", "figma_patch", "figma_batch_edit", "figma_swap_component", "figma_variant_set",
-    "figma_audit", "figma_index", "figma_search", "figma_design_system", "figma_tokens", "figma_export_build_spec", "figma_review"];
+    "figma_audit", "figma_index", "figma_search", "figma_design_system", "figma_tokens", "figma_export_build_spec", "figma_review",
+    "figma_motion_styles", "figma_motion_inspect", "figma_motion_apply_style", "figma_motion_remove_style",
+    "figma_motion_set_keyframes", "figma_motion_remove_keyframes", "figma_motion_set_duration"];
   const missing = expected.filter((n) => !tools.includes(n));
   check("all parity tools are registered", missing.length === 0, "missing: " + missing.join(","));
+  check("the local tool surface is 50 tools", tools.length === 50, `${tools.length} tools`);
 
   const plugin = await connect(info.ws.replace("127.0.0.1", "localhost") + "&role=plugin");
   plugin.on("message", (raw) => {
@@ -231,6 +234,46 @@ try {
           ...(env.params.dryRun === false ? { verification: { ok: true, problems: [] } } : {}),
           ms: { plan: 2, ...(env.params.dryRun === false ? { apply: 1 } : {}) },
         });
+      case "motion_styles":
+        return ok({
+          schema: "motion-styles-v1",
+          available: true,
+          playheadPosition: 0.5,
+          figmaStyles: [{ styleId: "S:anim", name: "Fade in", description: "opacity" }],
+          customStyles: [{ styleId: "C:anim", id: "C:anim", key: "custom-key", name: "My fade", entries: [] }],
+          counts: { figma: 1, custom: 1 },
+          warnings: [],
+        });
+      case "motion_inspect":
+        return ok({
+          schema: "motion-inspect-v1",
+          node: { id: env.params.nodeId || "1:2", name: "Card", type: "FRAME" },
+          playheadPosition: 0.5,
+          animationStyles: [{ id: "A:1", styleId: "S:anim", name: "Fade in", type: "FIGMA", duration: 0.6 }],
+          manualKeyframeTracks: {
+            OPACITY: { id: "T:1", baseValue: { type: "FLOAT", value: 1 }, keyframes: [{ id: "K:1", timelinePosition: 0, value: { type: "FLOAT", value: 0 } }] },
+          },
+          animations: {},
+          timelines: [{ id: "TL:1", duration: 1.2 }],
+          capabilities: { animationStyles: true, applyAnimationStyle: true, removeAnimationStyle: true, manualKeyframes: true, timelineDuration: true },
+        });
+      case "motion_apply_style":
+      case "motion_remove_style":
+      case "motion_set_keyframes":
+      case "motion_remove_keyframes":
+      case "motion_set_duration": {
+        const dry = env.params.dryRun !== false;
+        const planId = env.params.planId || "motion-plan-test";
+        return ok({
+          schema: "motion-plan-v1",
+          status: dry ? "dry_run" : "applied",
+          dryRun: dry,
+          planId,
+          ...(dry
+            ? { plan: { op: env.method, target: { id: env.params.nodeId || "1:2" }, state: "state-test" }, note: "No document write." }
+            : { mutated: true, verified: true }),
+        });
+      }
       case "design_system":
         return ok({
           schema: "design-system-v1",
@@ -886,6 +929,70 @@ try {
       specReq.params.svgFallback === false &&
       spec.schema === "build-spec-export/v1" && spec.spec.key === "card" && spec.counts.nodes === 1,
     JSON.stringify(spec).slice(0, 200));
+
+  // figma_motion_*: Motion is a plan/apply split too, but the plan fingerprint
+  // is computed by the plugin from the node's live Motion state (the server
+  // cannot see animationStyles or keyframes). The edge still defaults to a dry
+  // run and refuses an apply without write access.
+  const motionStyles = c.text(await c.rpc("tools/call", { name: "figma_motion_styles", arguments: {} }));
+  check("figma_motion_styles returns Figma and custom styles",
+    motionStyles.counts.figma === 1 && motionStyles.counts.custom === 1 && motionStyles.customStyles[0].id === "C:anim",
+    JSON.stringify(motionStyles).slice(0, 160));
+
+  const motionInspect = c.text(await c.rpc("tools/call", { name: "figma_motion_inspect", arguments: { nodeId: "1:2" } }));
+  check("figma_motion_inspect returns applied styles, manual tracks and timelines",
+    motionInspect.animationStyles[0].id === "A:1" && motionInspect.manualKeyframeTracks.OPACITY.keyframes[0].timelinePosition === 0 &&
+      motionInspect.timelines[0].id === "TL:1",
+    JSON.stringify(motionInspect).slice(0, 180));
+
+  const motionSeenBefore = seen.length;
+  const motionDry = c.text(await c.rpc("tools/call", {
+    name: "figma_motion_apply_style",
+    arguments: { nodeId: "1:2", styleId: "S:anim", duration: 0.6 },
+  }));
+  const motionDryReq = seen[motionSeenBefore];
+  check("figma_motion_apply_style defaults to a dry run and sends no planId",
+    motionDry.status === "dry_run" && motionDryReq.method === "motion_apply_style" &&
+      motionDryReq.params.dryRun === true && motionDryReq.params.planId === undefined,
+    JSON.stringify({ status: motionDry.status, params: motionDryReq.params }).slice(0, 220));
+
+  const motionApplied = c.text(await c.rpc("tools/call", {
+    name: "figma_motion_apply_style",
+    arguments: { nodeId: "1:2", styleId: "S:anim", duration: 0.6, dryRun: false, planId: "motion-plan-test" },
+  }));
+  check("figma_motion_apply_style applies with the planId from the dry run",
+    motionApplied.status === "applied" && motionApplied.mutated === true && motionApplied.planId === "motion-plan-test",
+    JSON.stringify(motionApplied).slice(0, 180));
+
+  const keyframeSeenBefore = seen.length;
+  const keyframeDry = c.text(await c.rpc("tools/call", {
+    name: "figma_motion_set_keyframes",
+    arguments: {
+      nodeId: "1:2",
+      field: { type: "PROPERTY", name: "OPACITY" },
+      track: {
+        baseValue: { type: "FLOAT", value: 1 },
+        keyframes: [
+          { timelinePosition: 0, value: { type: "FLOAT", value: 0 } },
+          { timelinePosition: 0.6, value: { type: "FLOAT", value: 1 }, easing: { type: "EASE_OUT" } },
+        ],
+      },
+    },
+  }));
+  const keyframeReq = seen[keyframeSeenBefore];
+  check("figma_motion_set_keyframes keeps the field, track and dry-run default intact",
+    keyframeDry.status === "dry_run" && keyframeReq.params.field.name === "OPACITY" &&
+      keyframeReq.params.track.keyframes.length === 2 && keyframeReq.params.track.baseValue.value === 1 &&
+      keyframeReq.params.dryRun === true,
+    JSON.stringify(keyframeReq.params).slice(0, 260));
+
+  const durationDry = c.text(await c.rpc("tools/call", {
+    name: "figma_motion_set_duration",
+    arguments: { nodeId: "1:2", timelineId: "TL:1", duration: 2.5 },
+  }));
+  check("figma_motion_set_duration plans a timeline duration without writing",
+    durationDry.status === "dry_run" && durationDry.plan.op === "motion_set_duration",
+    JSON.stringify(durationDry).slice(0, 180));
 
   // figma_ops / figma_cancel: half the answer is the plugin's queue, half is what
   // THIS session is still waiting for. Both halves have to be in the reply, and

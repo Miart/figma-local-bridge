@@ -48,7 +48,7 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SOURCE_ROOT = dirname(HERE);
-const VERSION = appVersionFromPackage(SOURCE_ROOT) || "0.34.1";
+const VERSION = appVersionFromPackage(SOURCE_ROOT) || "0.35.0";
 const APP_ALLOWLIST = [
   "package.json",
   "package-lock.json",
@@ -86,7 +86,7 @@ function main() {
     return;
   }
   if (process.platform !== "darwin") {
-    throw installError("UNSUPPORTED_PLATFORM", "The 0.34 installer supports macOS only. Use the source checkout on other platforms.");
+    throw installError("UNSUPPORTED_PLATFORM", "The macOS installer supports macOS only. Use the source checkout on other platforms.");
   }
   if (!isSupportedNodeVersion(process.versions.node)) {
     throw installError("NODE_TOO_OLD", `Node.js ${process.versions.node} is too old; this installer needs Node.js 20 or newer.`);

@@ -2,7 +2,7 @@
 
 > Local-first, open-source MCP (Model Context Protocol) server for Figma Desktop. It lets an AI client read and edit the open Figma file through a bundled plugin and a localhost WebSocket — no Figma Dev/Full seat, no cloud API or API key in local mode, no telemetry. An optional, explicitly enabled adapter can read files over Figma's REST API.
 
-- Version: 0.34.1
+- Version: 0.35.0
 - License: MIT
 - Repository: https://github.com/Miart/figma-local-bridge
 - Canonical README: https://github.com/Miart/figma-local-bridge#readme
@@ -11,14 +11,14 @@
 
 ## What it is
 
-Figma Local Bridge connects any MCP stdio client (Claude Code, OpenCode, Cursor, and ChatGPT/Gemini clients with local MCP support) to the Figma desktop app. A Figma plugin holds one WebSocket per open file, one local daemon routes up to 16 files, and the MCP server exposes 43 local tools. Local mode runs entirely on the machine. With `FIGMA_CLOUD=1` and a token, five optional cloud tools join the surface (48 total); Figma remains read-only, while the download tool writes rendered bytes to a local directory.
+Figma Local Bridge connects any MCP stdio client (Claude Code, OpenCode, Cursor, and ChatGPT/Gemini clients with local MCP support) to the Figma desktop app. A Figma plugin holds one WebSocket per open file, one local daemon routes up to 16 files, and the MCP server exposes 50 local tools. Local mode runs entirely on the machine. With `FIGMA_CLOUD=1` and a token, five optional cloud tools join the surface (55 total); Figma remains read-only, while the download tool writes rendered bytes to a local directory.
 
 Use it when the official Figma MCP server is unavailable, when the design file is only open locally, or when an agent needs guarded writes, visual review, design-token sync, checkpoints, or game/web exports.
 
 ## Capabilities
 
 - Inspect and screenshot the open file; read metadata, layout, variables and selection.
-- Ask `figma_ping` for a capability report: local mode and whether the optional cloud read adapter is enabled.
+- Ask `figma_ping` for a capability report: local mode, Motion (Beta) availability and playhead, and whether the optional cloud read adapter is enabled.
 - With the cloud adapter enabled, read a file that is not open (`figma_cloud_get_file`, `figma_cloud_get_nodes`), get temporary render URLs (`figma_cloud_get_image`), or download rendered PNG/JPEG/SVG/PDF bytes to a local directory (`figma_cloud_download_image`).
 - Build/patch keyed UI trees and batch-edit many nodes in one undo transaction.
 - Author component variants and swap component instances with explicit loss reporting.
@@ -26,6 +26,7 @@ Use it when the official Figma MCP server is unavailable, when the design file i
 - Save an iteration baseline and compare pixels + audit findings + structure (`figma_review`).
 - Export, diff and import local Figma variables (`figma-tokens/v1` or DTCG).
 - Checkpoint and rebuild a subtree, with a second verification dump.
+- Read and write Figma Motion (Beta): animation styles, manual keyframe tracks and timeline duration, with a dry run and read-back verification.
 - Export sprite atlases, 9-slice sprites, UI states and a web handoff bundle.
 
 ## Safety model
@@ -41,7 +42,7 @@ Mutating families default to a dry run and require the dry run's `planId` plus f
 
 ## Install and connect
 
-macOS 0.34.1: build `npm run build:release` (or use a maintainer-provided release artifact), unzip and double-click `Install.command`. The self-contained release starts a per-user LaunchAgent, configures OpenCode, Claude Code, Claude Desktop and Cursor with backups, and copies the token to the clipboard without printing it. Figma has no API for installing a development plugin: import `~/Library/Application Support/Figma Local Bridge/app/plugin/manifest.json`, run the plugin, and paste the token once. The installer is unsigned in 0.34.1; Gatekeeper may need right-click → Open. `Uninstall.command` removes the app, LaunchAgent and this bridge's entries.
+macOS 0.35.0: build `npm run build:release` (or use a maintainer-provided release artifact), unzip and double-click `Install.command`. The self-contained release starts a per-user LaunchAgent, configures OpenCode, Claude Code, Claude Desktop and Cursor with backups, and copies the token to the clipboard without printing it. Figma has no API for installing a development plugin: import `~/Library/Application Support/Figma Local Bridge/app/plugin/manifest.json`, run the plugin, and paste the token once. The installer is unsigned in 0.35.0; Gatekeeper may need right-click → Open. `Uninstall.command` removes the app, LaunchAgent and this bridge's entries.
 
 From source: build the plugin and server, run `npm run daemon`, import the plugin in Figma, paste the daemon token once, then point the MCP client at `server/dist/index.js` over stdio. `npm run setup` runs the same installer from a built checkout.
 
@@ -57,6 +58,7 @@ Optional cloud tools: set `FIGMA_CLOUD=1` and one of `FIGMA_CLOUD_TOKEN` (PAT) o
 - `figma_cloud_get_image` returns temporary URLs; `figma_cloud_download_image` is the explicit byte-downloading tool and writes only local files. The Figma document is never edited. File/node responses over `maxBytes` are refused instead of truncated; each downloaded image and the call total are capped, and the Figma token is never sent to the image host. The adapter does not run an OAuth authorization flow or refresh expired tokens.
 - `figma_review` baselines are local files, not restorable checkpoints; use `figma_checkpoint` for restoration.
 - `figma_tokens` manages variables, not paint/text/effect/grid styles.
+- Motion support is Figma Motion (Beta). It requires `figma.motion` and the node-level Motion methods; when the running build does not expose them, every Motion tool fails with `MOTION_UNAVAILABLE` instead of simulating an animation. Motion writes use a dry-run `planId` and are read back after apply; there is no native Motion GIF/MP4/WebM exporter in this bridge.
 
 ## Keywords
 

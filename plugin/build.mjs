@@ -219,6 +219,18 @@ await build({
   logLevel: "warning",
 });
 
+// motion.ts is the Motion (Beta) dispatcher. Its dry run, plan fingerprint and
+// readback are the safety contract, so the tests drive this shipped bundle with
+// a Motion stub rather than a copy of the rules.
+await build({
+  entryPoints: [join(here, "motion.ts")],
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  outfile: join(here, "motion.mjs"),
+  logLevel: "warning",
+});
+
 // variant-sets.ts creates and edits COMPONENT_SETs. Its dry run validates the
 // whole property matrix before writing, so the tests drive the shipped module.
 await build({
@@ -242,4 +254,4 @@ await build({
 });
 
 console.log("plugin built ->", join(here, "code.js"));
-console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs, helpers.mjs, exports.mjs, ui-build.mjs, batch.mjs, audit.mjs, index.mjs, design-system.mjs, spec-export.mjs, component-swap.mjs, variant-sets.mjs, tokens.mjs");
+console.log("test artifacts regenerated from .ts: fingerprint.mjs, scope.mjs, commands.mjs, dispatch.mjs, session-key.mjs, checkpoint.mjs, helpers.mjs, exports.mjs, ui-build.mjs, batch.mjs, audit.mjs, index.mjs, design-system.mjs, spec-export.mjs, component-swap.mjs, motion.mjs, variant-sets.mjs, tokens.mjs");

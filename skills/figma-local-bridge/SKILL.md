@@ -1,6 +1,6 @@
 ---
 name: figma-local-bridge
-description: Drive the Figma Desktop file that is open locally through the figma-local-bridge MCP server. Use when a task mentions figma_ping, figma_inspect, figma_build, figma_patch, figma_batch_edit, figma_use, figma_index, figma_search, Figma Desktop automation, or a local Figma MCP bridge. Covers fileKey routing, guarded dry-run edits, dynamic-page API traps, flb helpers, review/checkpoint verification and the optional read-only cloud adapter.
+description: Drive the Figma Desktop file that is open locally through the figma-local-bridge MCP server. Use when a task mentions figma_ping, figma_inspect, figma_build, figma_patch, figma_batch_edit, figma_use, figma_index, figma_search, figma_motion_styles, Figma Motion, Figma Desktop automation, or a local Figma MCP bridge. Covers fileKey routing, guarded dry-run edits, dynamic-page API traps, flb helpers, review/checkpoint verification and the optional read-only cloud adapter.
 ---
 
 # Figma Local Bridge
@@ -48,6 +48,11 @@ hand-edited plan. One apply is one undo transaction.
 - Use `figma_swap_component` with its dry run; read every named loss before
   applying.
 - Use dedicated tools before `figma_use`.
+- Motion is Figma Motion (Beta), not a local animation layer. Use the
+  `figma_motion_*` tools only when `figma_ping` reports `motion.available`; a
+  missing API is `MOTION_UNAVAILABLE`, never a workaround. Read with
+  `figma_motion_inspect`, then apply with the dry-run `planId`. No Motion
+  movie export exists in this bridge.
 
 ### `figma_use` (raw Plugin API)
 

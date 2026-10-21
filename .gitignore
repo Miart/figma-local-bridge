@@ -23,6 +23,7 @@ plugin/index.mjs
 plugin/design-system.mjs
 plugin/spec-export.mjs
 plugin/component-swap.mjs
+plugin/motion.mjs
 plugin/variant-sets.mjs
 plugin/tokens.mjs
 

@@ -32,6 +32,7 @@ import { runIndex, runSearch } from "./index";
 import { runDesignSystem } from "./design-system";
 import { runTokens } from "./tokens";
 import { runExportSpec } from "./spec-export";
+import { runMotion } from "./motion";
 
 const NS = "figma-local-bridge";
 const MAX_NODES = 1500;
@@ -800,6 +801,11 @@ export const MUTATING_METHODS: ReadonlySet<string> = new Set([
   "swap_component",
   "variant_set",
   "tokens",
+  "motion_apply_style",
+  "motion_remove_style",
+  "motion_set_keyframes",
+  "motion_remove_keyframes",
+  "motion_set_duration",
 ]);
 
 export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
@@ -1770,6 +1776,36 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
   /** Design-token export, diff and guarded variable import. */
   async tokens(p: Json) {
     return runTokens(figma, p);
+  },
+
+  /** Motion (Beta): style catalogue and one node's Motion state. */
+  async motion_styles(p: Json) {
+    return runMotion(figma, "motion_styles", p, transact);
+  },
+
+  async motion_inspect(p: Json) {
+    return runMotion(figma, "motion_inspect", p, transact);
+  },
+
+  /** Apply/remove a style, set/remove a manual keyframe track, set a duration. */
+  async motion_apply_style(p: Json) {
+    return runMotion(figma, "motion_apply_style", p, transact);
+  },
+
+  async motion_remove_style(p: Json) {
+    return runMotion(figma, "motion_remove_style", p, transact);
+  },
+
+  async motion_set_keyframes(p: Json) {
+    return runMotion(figma, "motion_set_keyframes", p, transact);
+  },
+
+  async motion_remove_keyframes(p: Json) {
+    return runMotion(figma, "motion_remove_keyframes", p, transact);
+  },
+
+  async motion_set_duration(p: Json) {
+    return runMotion(figma, "motion_set_duration", p, transact);
   },
 
   /**

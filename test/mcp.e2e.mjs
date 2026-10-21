@@ -203,6 +203,13 @@ try {
   check("parity tools exposed", missingParity.length === 0,
     missingParity.length ? "missing: " + missingParity.join(",") : parity.join(","));
 
+  const motion = ["figma_motion_styles", "figma_motion_inspect", "figma_motion_apply_style",
+    "figma_motion_remove_style", "figma_motion_set_keyframes", "figma_motion_remove_keyframes",
+    "figma_motion_set_duration"];
+  const missingMotion = motion.filter((c) => !names.includes(c));
+  check("Motion (Beta) tools exposed", missingMotion.length === 0,
+    missingMotion.length ? "missing: " + missingMotion.join(",") : `${motion.length} tools`);
+
   // --- the guide: handshake instructions + a readable resource ---
   // Both carry the same text, and it must be the file on disk, not the inline
   // fallback: that is what fails if guide.ts ever loses the path.

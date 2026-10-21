@@ -209,12 +209,33 @@ const methods: Record<string, (p: Json) => Promise<Json>> = {
    * proves the main thread is alive without waiting for a tool call.
    */
   async ping() {
+    const motion: any = (figma as any).motion;
+    const motionAvailable = !!motion && typeof motion.figmaAnimationStyles === "function";
+    let playheadPosition: number | null = null;
+    if (motionAvailable) {
+      try {
+        const v = motion.playheadPosition;
+        playheadPosition = typeof v === "number" && Number.isFinite(v) ? v : null;
+      } catch {
+        /* the beta API is present but this session cannot read the playhead */
+      }
+    }
     return {
       ok: true,
       editor: figma.editorType,
       page: { id: figma.currentPage.id, name: figma.currentPage.name },
       writeEnabled: CAPS.write,
       nodesOnPage: figma.currentPage.children.length,
+      motion: {
+        available: motionAvailable,
+        playheadPosition,
+        figmaAnimationStyles: motionAvailable,
+        customAnimationStyles: typeof (figma as any).getLocalCustomAnimationStylesAsync === "function",
+        nodeApi: "probed per node by figma_motion_inspect",
+        note: motionAvailable
+          ? "Motion is Beta; node-level methods are still checked on the target."
+          : "This Figma build does not expose figma.motion; Motion tools fail with MOTION_UNAVAILABLE.",
+      },
     };
   },
 
