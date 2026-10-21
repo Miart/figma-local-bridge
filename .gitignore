@@ -26,6 +26,9 @@ plugin/component-swap.mjs
 plugin/variant-sets.mjs
 plugin/tokens.mjs
 
+# local release artifacts
+release/
+
 # logs and OS junk
 *.log
 .DS_Store

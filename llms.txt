@@ -2,7 +2,7 @@
 
 > Local-first, open-source MCP (Model Context Protocol) server for Figma Desktop. It lets an AI client read and edit the open Figma file through a bundled plugin and a localhost WebSocket — no Figma Dev/Full seat, no cloud API or API key in local mode, no telemetry. An optional, explicitly enabled adapter can read files over Figma's REST API.
 
-- Version: 0.33.0
+- Version: 0.34.0
 - License: MIT
 - Repository: https://github.com/Miart/figma-local-bridge
 - Canonical README: https://github.com/Miart/figma-local-bridge#readme
@@ -38,9 +38,11 @@ Mutating families default to a dry run and require the dry run's `planId` plus f
 - The bundled development plugin (`plugin/manifest.json`)
 - An MCP client that can launch a local stdio server
 
-## Connect
+## Install and connect
 
-Build the plugin and server, run `npm run daemon`, import the plugin in Figma, paste the daemon token once, then point the MCP client at `server/dist/index.js` over stdio.
+macOS 0.34.0: build `npm run build:release` (or use a maintainer-provided release artifact), unzip and double-click `Install.command`. The self-contained release starts a per-user LaunchAgent, configures OpenCode, Claude Code, Claude Desktop and Cursor with backups, and copies the token to the clipboard without printing it. Figma has no API for installing a development plugin: import `~/Library/Application Support/Figma Local Bridge/app/plugin/manifest.json`, run the plugin, and paste the token once. The installer is unsigned in 0.34.0; Gatekeeper may need right-click → Open. `Uninstall.command` removes the app, LaunchAgent and this bridge's entries.
+
+From source: build the plugin and server, run `npm run daemon`, import the plugin in Figma, paste the daemon token once, then point the MCP client at `server/dist/index.js` over stdio. `npm run setup` runs the same installer from a built checkout.
 
 Optional cloud tools: set `FIGMA_CLOUD=1` and one of `FIGMA_CLOUD_TOKEN` (PAT) or `FIGMA_CLOUD_OAUTH_TOKEN` (OAuth) in the MCP process environment, then restart it. No Figma writes are exposed; the image download tool writes local files only.
 

@@ -12,7 +12,7 @@ It is a practical alternative when the official Figma MCP server is unavailable,
 
 | Fact | Value |
 |---|---|
-| Version / source | `0.33.0` · [github.com/Miart/figma-local-bridge](https://github.com/Miart/figma-local-bridge) |
+| Version / source | `0.34.0` · [github.com/Miart/figma-local-bridge](https://github.com/Miart/figma-local-bridge) |
 | What it is | Local stdio MCP server + Figma Desktop plugin + one WebSocket daemon |
 | Client support | Any MCP stdio client; examples: Claude Code, OpenCode, Cursor, and ChatGPT/Gemini clients with local MCP support |
 | Figma requirement | Local mode: Figma Desktop with the included development plugin (no Dev Mode seat). Optional cloud tools: a Figma PAT/OAuth token with file access |
@@ -22,6 +22,7 @@ It is a practical alternative when the official Figma MCP server is unavailable,
 | Writes | Local writes guarded: dry run, `planId`, fingerprints, stable keys, one undo transaction, rollback, verification. The cloud adapter never edits Figma; `figma_cloud_download_image` writes local image files only |
 | Verification | `figma_audit`, `figma_compare`, `figma_review`, `figma_checkpoint`, `figma_design_system`, `figma_tokens`, journal/ops |
 | Runtime | Node.js 20+ |
+| Installer | macOS 0.34.0: double-click `Install.command` in the release zip; one Figma plugin import and one token paste remain manual |
 | License | MIT |
 
 ### Local by default, optional read-only cloud
@@ -133,6 +134,8 @@ The daemon exists for three concrete reasons:
 |---|---|
 | `server/src/` | stdio MCP server, daemon (WebSocket hub), link state, tool implementations |
 | `plugin/` | Figma plugin: `code.ts` bundled to `code.js` by esbuild, UI panel, dispatcher, scope guard |
+| `install/` | macOS installer, uninstaller, double-click wrappers and the pure config/plist helpers |
+| `scripts/build-release.mjs` | builds the self-contained macOS zip (`npm run build:release`) |
 | `skills/figma-local-bridge/SKILL.md` | the agent-facing operating guide, served both as MCP `instructions` and as a resource |
 | `scripts/mascot.py` | the ASCII octopus the panel ships: the art lives on the panel's own 21x10 grid, and its JS block is emitted from here, never hand-edited |
 | `scripts/mcp-smoke.mjs` | `npm run smoke`: build smoke test with no Figma and no daemon |
@@ -140,7 +143,21 @@ The daemon exists for three concrete reasons:
 | `test/` | unit tests (`node --test`) and e2e tests against a real daemon / WebSocket / MCP client |
 | `spike/` | the first prototype, kept for history |
 
-## Quick start
+## Easy install (macOS, 0.34.0)
+
+The release zip is self-contained: it already contains `server/dist`, `plugin/code.js` and the production `node_modules`, so the user does not run `npm install` or `npm run build`.
+
+1. Build the zip from a checkout with `npm run build:release` (or use a release artifact attached by the maintainer). The archive is `release/figma-local-bridge-<version>-macos.zip`.
+2. Unzip it and double-click **`Install.command`**. If macOS Gatekeeper blocks an unsigned download, use **right-click → Open** once. The installer is unsigned in `0.34.0`; signing and notarization are a later step.
+3. The installer checks Node.js 20+, copies the app to `~/Library/Application Support/Figma Local Bridge/app`, installs a per-user LaunchAgent (`com.miart.figma-local-bridge`), backs up and updates the MCP configs it finds for OpenCode, Claude Code, Claude Desktop and Cursor, and copies the daemon token to the clipboard. It never prints the token.
+4. In Figma, do the two things Figma exposes no API for: **Plugins → Development → Import plugin from manifest…** and choose `~/Library/Application Support/Figma Local Bridge/app/plugin/manifest.json`; then run **Figma Local Bridge** and paste the token once.
+5. Restart the MCP client. `figma_ping` should answer.
+
+The installer does not create a Figma account, install a Figma development plugin, or bypass Gatekeeper. To remove the app, LaunchAgent and this bridge's MCP entries, double-click **`Uninstall.command`** (config backups and daemon data are kept; add `--purge` from the command line to remove the token too).
+
+`npm run setup` runs the installer from a built source checkout. The lower-level manual setup remains below.
+
+## Quick start (from source)
 
 Requirements: **Node.js 20+** (developed on v25) and the **Figma Desktop app**. Developed on macOS; the Node side is cross-platform.
 
@@ -358,7 +375,7 @@ npm test           # rebuilds artifacts, then unit + e2e with --test-concurrency
 
 `npm test` rebuilds `server/dist` and `plugin/*.mjs` first because the tests import the built modules — a test running against a stale artifact passes on code Figma will never execute. The suites run serially (`--test-concurrency=1`): e2e tests spin up real daemons on real ports and share one token file, and parallel runs make them flaky by construction.
 
-Current suites: **611 unit checks** — 327 `node:test` cases plus 284 harness checks (commands, fingerprint, scope, use-figma gate, checkpoint and checkpoint-store) — and **234 e2e checks** across daemon, link state, MCP, multifile, tools, checkpoint, exports, journal, cloud and the build/patch/batch/swap/variant-set/audit/review/capability/index/search/design-system/tokens/spec-export chain. The full `npm test` run prints **518 PASS**.
+Current suites: **621 unit checks** — 337 `node:test` cases (including 10 installer/config-merge cases) plus 284 harness checks (commands, fingerprint, scope, use-figma gate, checkpoint and checkpoint-store) — and **234 e2e checks** across daemon, link state, MCP, multifile, tools, checkpoint, exports, journal, cloud and the build/patch/batch/swap/variant-set/audit/review/capability/index/search/design-system/tokens/spec-export chain. The full `npm test` run is green; the custom harness still prints **518 PASS**.
 
 ## Troubleshooting
 
@@ -390,6 +407,7 @@ Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the
 
 ## Limitations
 
+- The `0.34.0` installer is macOS-only and unsigned. Gatekeeper can require **right-click → Open** on the first launch; a signed/notarized `.pkg` or `.dmg` is not part of this release. The installer writes only its own MCP entry, backs up each config it changes, and skips a config it cannot parse instead of rewriting it. Figma exposes no API for installing a development plugin, so importing `plugin/manifest.json` and pasting the token remain manual.
 - The optional cloud adapter reads the public Figma REST API, not the open document. It is registered only with `FIGMA_CLOUD=1` and a PAT/OAuth token; the token's scopes decide what works (`file_content:read` for files/nodes/images, `current_user:read` for `figma_cloud_ping`). It exposes no Figma writes, does not run an OAuth authorization flow, and cannot refresh an expired OAuth token. `figma_cloud_get_image` returns temporary URLs; `figma_cloud_download_image` is the explicit byte-downloading tool and writes only local files. A response over `maxBytes` is refused; use `nodeIds` and `depth` instead of raising the cap blindly. A custom `FIGMA_CLOUD_API_BASE` must be HTTPS, except for a localhost test server with `FIGMA_CLOUD_INSECURE=1`. It follows no redirects and does not retry a 429 automatically; image downloads also refuse redirects and never send the Figma token to the image host.
 - `indexTree` walks the whole page per call. On very large pages, split the work — the cache cannot be incremental because the user edits the file in parallel.
 - Figma caches screenshot exports; `rev` makes stale renders visible, but there is no way to force a redraw from the Plugin API.
@@ -410,6 +428,7 @@ Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the
 
 | Version | What it carries |
 |---|---|
+| `0.34.0` | macOS double-click installer and release packaging. `npm run build:release` builds a self-contained zip with `server/dist`, `plugin/code.js`, `plugin/ui.html`, the plugin manifest, the installer and production `node_modules`; `Install.command` copies the app under `~/Library/Application Support/Figma Local Bridge`, writes a per-user `launchd` LaunchAgent with restart, backs up and configures OpenCode/Claude Code/Claude Desktop/Cursor MCP entries, copies the token to the clipboard without printing it, and opens the plugin manifest in Finder. `Uninstall.command` removes the app, LaunchAgent and this bridge's entries while keeping backups/data by default (`--purge` removes the token too). The installer refuses an occupied port owned by an unknown process, skips unparseable JSONC instead of corrupting it, and leaves the two Figma-manual steps explicit. No new MCP tools; the server and plugin surface stays 43 local + 5 optional cloud. |
 | `0.33.0` | `figma_cloud_download_image` adds the byte-downloading half of the cloud image path. It calls `GET /v1/images/:key`, then fetches each temporary URL without forwarding the Figma token, verifies the PNG/JPEG/SVG/PDF signature, writes `figma-<nodeId>.<ext>` to `outDir` (default: a temp directory), caps each image and the call total, and refuses to overwrite unless `overwrite:true`. Everything is downloaded and checked before the first write; an existing file, a bad signature, a redirect or a local write failure is named instead of silently producing a partial image. The Figma document is untouched. `figma_ping` now names five cloud tools. |
 | `0.32.0` | Optional read-only cloud access. With `FIGMA_CLOUD=1` and a PAT/OAuth token, four REST tools join the surface: `figma_cloud_ping` (`GET /v1/me`), `figma_cloud_get_file`, `figma_cloud_get_nodes` and `figma_cloud_get_image`. They work without the local daemon, never write, never return the token, follow no redirects, and refuse oversized responses rather than truncating. `figma_ping` reports `cloud.available`, `configured`, `mode`, `tokenType`, the registered tools and reads; the default remains off, and a token alone does not opt in. Errors keep their HTTP meaning (`CLOUD_UNAUTHORIZED`, `CLOUD_FORBIDDEN`, `CLOUD_RATE_LIMITED` with `retryAfterSeconds`, `CLOUD_RESPONSE_TOO_LARGE`, ...). Hosted file creation, AI generation, generative plugins, shaders and Weave remain unavailable. |
 | `0.31.0` | `figma_ping` becomes a capability report as well as a health check. It returns the server version, the effective local mode (`read-only`, `write`, `write+destructive`) and a `cloud` object; at that point `cloud.available` was false because no REST adapter existed yet, and the object listed the Figma-hosted features (file creation, AI generation, generative plugins, shaders, Weave) that this local bridge does not proxy or simulate. The local tools that the official server marks remote-only — assets, libraries, account identity, design-system search — remain real Plugin API reads. No new tool; no document writes. |
