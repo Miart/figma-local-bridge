@@ -24,7 +24,7 @@ Every tool takes an optional `fileKey`.
 `figma_ping` is also the capability report. It returns `capabilities.local.mode`
 (`read-only`, `write`, or `write+destructive`) and `capabilities.cloud`:
 
-- `cloud.available` is always `false`. This bridge drives the Figma Desktop
+- `cloud.available` is `false` in this build: no cloud transport or credentials are configured. This bridge drives the Figma Desktop
   Plugin API on localhost; it does not proxy or simulate Figma-hosted file
   creation, AI design/image/diagram generation, generative plugins, shaders, or
   Weave. If a user asks for one of those, say it is not available here and point

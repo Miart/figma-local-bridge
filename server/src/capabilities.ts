@@ -71,7 +71,7 @@ export function capabilitiesReport(caps: ModeCapabilities): CapabilityReport {
     cloud: {
       available: false,
       reason:
-        "Local Plugin API only: Figma-hosted AI, file creation, shaders, generative plugins and Weave are not proxied or simulated. Use the official remote Figma MCP or the Figma UI for those.",
+        "This build has no cloud adapter: Figma-hosted AI, file creation, shaders, generative plugins and Weave are not proxied or simulated. Use the official remote Figma MCP or the Figma UI for those.",
       features: [...CLOUD_FEATURES],
     },
   };

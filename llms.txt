@@ -45,7 +45,7 @@ Build the plugin and server, run `npm run daemon`, import the plugin in Figma, p
 
 - It is not the official Figma MCP server and is not affiliated with Figma, Inc.
 - It uses the desktop plugin API, not the Figma cloud REST API; it cannot open a file that is not open in Figma.
-- It is local-only: `figma_ping` reports `capabilities.cloud.available: false`. Figma-hosted file creation, AI generation, generative plugins, shaders and Weave are not proxied or simulated; use the official remote Figma MCP or the Figma UI for those.
+- It is local-only in this build: `figma_ping` reports `capabilities.cloud.available: false` (no cloud transport or credentials are configured). Figma-hosted file creation, AI generation, generative plugins, shaders and Weave are not proxied or simulated; use the official remote Figma MCP or the Figma UI for those.
 - Some tools the official server marks remote-only (`download_assets`, `get_libraries`, `whoami`, `search_design_system`) are implemented locally against the open file and are real.
 - `figma_review` baselines are local files, not restorable checkpoints; use `figma_checkpoint` for restoration.
 - `figma_tokens` manages variables, not paint/text/effect/grid styles.
