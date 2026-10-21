@@ -21,6 +21,8 @@ import { registerDesignSystemTools } from "./design-system-tools.js";
 import { registerTokenTools } from "./token-tools.js";
 import { registerSpecTools } from "./spec-tools.js";
 import { capabilitiesReport } from "./capabilities.js";
+import { registerCloudTools } from "./cloud-tools.js";
+import type { CloudConfig } from "./cloud.js";
 
 export interface Capabilities {
   read: boolean;
@@ -45,11 +47,11 @@ const content = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON
  * how an agent accidentally destroys a design file. Everything mutating is
  * funnelled through one command that validates, snapshots, mutates and verifies.
  */
-export function registerTools(server: McpServer, client: FigmaClient, caps: Capabilities) {
-  const capabilities = capabilitiesReport(caps);
+export function registerTools(server: McpServer, client: FigmaClient, caps: Capabilities, cloud?: CloudConfig) {
+  const capabilities = capabilitiesReport(caps, cloud);
   server.tool(
     "figma_ping",
-    "Health check and capability report. Verifies the plugin is paired, reports the active page and connected files (fileKey + name), and states what this local server can do: read/write/destructive mode and the cloud-only features it does not proxy. Call it first when you do not know what is open or whether an operation is available.",
+    "Health check and capability report. Verifies the plugin is paired, reports the active page and connected files (fileKey + name), and states what this process can do: local read/write/destructive mode, whether the optional read-only Figma REST adapter is enabled, and the Figma-hosted features even that adapter does not proxy. Call it first when you do not know what is open or whether an operation is available.",
     { fileKey: fileKeyParam },
     async (a) =>
       guard(async () => {
@@ -135,6 +137,10 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
   registerTokenTools(server, client, caps);
   // The reverse of build is a read of the document; it belongs in both modes.
   registerSpecTools(server, client);
+  // Cloud is opt-in and read-only; it is registered in both local modes and
+  // works even when the local daemon is absent. The config gate lives in
+  // readCloudConfig(), not in an agent's guess.
+  if (cloud?.enabled) registerCloudTools(server, cloud);
 
   if (!caps.write) {
     server.tool(

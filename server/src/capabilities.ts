@@ -1,13 +1,16 @@
 /**
  * What this server can honestly do in the current process.
  *
- * The bridge is local-only: it drives the Figma Desktop Plugin API through a
- * localhost WebSocket. Figma's hosted AI, file-creation, shader, generative
- * plugin and Weave services are not proxied and must not be presented as if
- * they were. `figma_ping` returns this report so an agent can choose the right
- * tool without trying a cloud-only one first.
+ * Local mode drives the Figma Desktop Plugin API through a localhost WebSocket.
+ * An optional, explicitly opted-in adapter can read Figma files over the public
+ * REST API; it is read-only and has its own credential and transport limits.
+ * Figma's hosted AI, file-creation, shader, generative plugin and Weave services
+ * are not proxied and must not be presented as if they were. `figma_ping`
+ * returns this report so an agent can choose the right tool without trying a
+ * cloud-only one first.
  */
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
+import { CLOUD_READ_AREAS, CLOUD_TOOL_NAMES, type CloudConfig } from "./cloud.js";
 
 /** Features the official remote Figma MCP can reach through Figma's cloud. */
 export const CLOUD_FEATURES = [
@@ -49,15 +52,24 @@ export interface CapabilityReport {
     destructive: boolean;
   };
   cloud: {
-    available: false;
+    /** True when the optional REST adapter is registered in this process. */
+    available: boolean;
+    /** Whether a credential is present, even if the adapter is switched off. */
+    configured: boolean;
+    mode: "read-only" | null;
+    tokenType: "pat" | "oauth" | null;
+    tools: string[];
+    reads: string[];
     reason: string;
+    /** Figma-hosted features that even this adapter does not proxy. */
     features: string[];
   };
 }
 
 /** Build the report from the environment flags that registered the tools. */
-export function capabilitiesReport(caps: ModeCapabilities): CapabilityReport {
+export function capabilitiesReport(caps: ModeCapabilities, cloud?: CloudConfig): CapabilityReport {
   const mode = !caps.write ? "read-only" : caps.destructive ? "write+destructive" : "write";
+  const cloudOn = Boolean(cloud?.enabled);
   return {
     server: { name: SERVER_NAME, version: SERVER_VERSION },
     local: {
@@ -69,9 +81,15 @@ export function capabilitiesReport(caps: ModeCapabilities): CapabilityReport {
       destructive: caps.destructive,
     },
     cloud: {
-      available: false,
+      available: cloudOn,
+      configured: Boolean(cloud?.configured),
+      mode: cloudOn ? "read-only" : null,
+      tokenType: cloud?.tokenKind ?? null,
+      tools: cloudOn ? [...CLOUD_TOOL_NAMES] : [],
+      reads: cloudOn ? [...CLOUD_READ_AREAS] : [],
       reason:
-        "This build has no cloud adapter: Figma-hosted AI, file creation, shaders, generative plugins and Weave are not proxied or simulated. Use the official remote Figma MCP or the Figma UI for those.",
+        cloud?.reason ??
+        "No cloud adapter is configured. Set FIGMA_CLOUD=1 and FIGMA_CLOUD_TOKEN (PAT) or FIGMA_CLOUD_OAUTH_TOKEN (OAuth) to enable read-only Figma REST access.",
       features: [...CLOUD_FEATURES],
     },
   };

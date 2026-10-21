@@ -17,6 +17,7 @@ import { DaemonLink, OfflineLink, readDaemonInfo } from "./link.js";
 import { BridgeOffline } from "./websocket.js";
 import { FigmaClient } from "./figma.js";
 import { registerTools, type Capabilities } from "./tools.js";
+import { readCloudConfig } from "./cloud.js";
 import { GUIDE, registerGuide } from "./guide.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
@@ -29,6 +30,10 @@ const caps: Capabilities = {
   write: process.env.FIGMA_BRIDGE_WRITE !== "0",
   destructive: process.env.FIGMA_BRIDGE_DESTRUCTIVE === "1",
 };
+
+// Opt-in, read-only, and independent of the local daemon. The token itself is
+// never logged or serialised; only the mode and the public API base are.
+const cloud = readCloudConfig();
 
 function log(...a: unknown[]) {
   process.stderr.write(a.join(" ") + "\n");
@@ -53,7 +58,7 @@ async function main() {
     // Still serve tools; they will report the daemon is missing. Failing here
     // would make the whole MCP server disappear from the editor, and the first
     // tool call is exactly where the mistake should surface.
-    registerTools(server, new FigmaClient(new OfflineLink()), caps);
+    registerTools(server, new FigmaClient(new OfflineLink()), caps, cloud);
     log("");
     log("Figma Local Bridge — daemon NOT running.");
     log("  start it with:  npm run daemon");
@@ -93,12 +98,13 @@ async function main() {
     });
   });
 
-  registerTools(server, figma, caps);
+  registerTools(server, figma, caps, cloud);
 
   log("");
   log("Figma Local Bridge — client attached");
   log("  daemon : pid " + info.pid + "  ws " + info.ws.replace(/token=.*/, "token=<...>"));
   log("  caps   : read=" + caps.read + " write=" + caps.write + " destructive=" + caps.destructive);
+  log("  cloud  : " + (cloud.enabled ? "read-only REST enabled" : "disabled"));
   log("");
 
   await server.connect(new StdioServerTransport());

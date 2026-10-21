@@ -9,7 +9,10 @@ test("capability report names the mode and refuses to promise cloud features", (
   assert.equal(readOnly.local.mode, "read-only");
   assert.equal(readOnly.local.write, false);
   assert.equal(readOnly.cloud.available, false);
-  assert.match(readOnly.cloud.reason, /not proxied or simulated/);
+  assert.equal(readOnly.cloud.configured, false);
+  assert.equal(readOnly.cloud.mode, null);
+  assert.deepEqual(readOnly.cloud.tools, []);
+  assert.match(readOnly.cloud.reason, /FIGMA_CLOUD=1/);
   assert.ok(readOnly.cloud.features.includes("create_new_file"));
   assert.ok(readOnly.cloud.features.includes("weave_run_model"));
 

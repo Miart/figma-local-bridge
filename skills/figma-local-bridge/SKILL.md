@@ -7,7 +7,8 @@ authoritative about arguments.
 
 ## Which file a call lands in
 
-Every tool takes an optional `fileKey`.
+Every local tool takes an optional `fileKey`; the cloud tools take a required
+`fileKey` naming the REST file to read.
 
 - Call `figma_ping` first when you do not know what is open: it reports the
   daemon, the active page and every connected file (`fileKey` + name).
@@ -19,22 +20,37 @@ Every tool takes an optional `fileKey`.
 - An unroutable request is answered immediately. A timeout therefore means the
   plugin is connected but slow, not that the wrong file was addressed.
 
-## Local capabilities, and what is not local
+## Local capabilities, optional cloud reads, and what is not available
 
 `figma_ping` is also the capability report. It returns `capabilities.local.mode`
 (`read-only`, `write`, or `write+destructive`) and `capabilities.cloud`:
 
-- `cloud.available` is `false` in this build: no cloud transport or credentials are configured. This bridge drives the Figma Desktop
-  Plugin API on localhost; it does not proxy or simulate Figma-hosted file
-  creation, AI design/image/diagram generation, generative plugins, shaders, or
-  Weave. If a user asks for one of those, say it is not available here and point
-  to the official remote Figma MCP or the Figma UI — do not try to imitate it
-  with a local workaround and call the result the same thing.
+- The cloud adapter is **off by default**. `cloud.available` is false unless the
+  MCP process has `FIGMA_CLOUD=1` and exactly one of `FIGMA_CLOUD_TOKEN` (PAT) or
+  `FIGMA_CLOUD_OAUTH_TOKEN` (OAuth). A token alone is not consent to cloud calls.
+- When `cloud.available` is true, the four registered tools are
+  `figma_cloud_ping`, `figma_cloud_get_file`, `figma_cloud_get_nodes` and
+  `figma_cloud_get_image`. They read documented Figma REST `GET` endpoints and
+  work without the local daemon. Use them for a file that is not open; use the
+  local tools for the open document.
+- Cloud is read-only. It cannot create a file, edit anything, generate a design
+  or image, run a shader, a generative plugin or Weave. If a user asks for one
+  of those, say it is not available here and point to the official remote Figma
+  MCP or the Figma UI. Never imitate it with a local workaround and call the
+  result the same thing.
+- `figma_cloud_ping` requires `current_user:read`; file/node/image reads need
+  `file_content:read`. `401`/`403` are `CLOUD_UNAUTHORIZED`/`CLOUD_FORBIDDEN`,
+  not a reason to retry. A `429` carries `retryAfterSeconds` and is not retried
+  automatically. `CLOUD_RESPONSE_TOO_LARGE` means narrow `nodeIds`/`depth` or
+  raise `maxBytes` deliberately; the reply is refused, never truncated.
+- `figma_cloud_get_image` returns temporary URLs, not downloaded files. It does
+  not write them to disk. The adapter does not run an OAuth authorization flow
+  or refresh an expired token; the caller supplies a valid access token.
 - Tools the official server marks remote-only but that the open file can answer
   — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — are
   real local reads here, not cloud calls.
 - The cloud boundary is part of the answer, not an error: a missing hosted
-  capability is a deliberate limit of a local, credential-free bridge.
+  capability is a deliberate limit, not something to paper over.
 
 ## rev, replayed, and what may be retried
 

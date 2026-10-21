@@ -56,6 +56,7 @@ function startClient() {
       FIGMA_BRIDGE_INFO_FILE: INFO,
       FIGMA_BRIDGE_DESTRUCTIVE: "1",
       FIGMA_BRIDGE_JOURNAL: "0",
+      FIGMA_CLOUD: "0",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });

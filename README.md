@@ -1,10 +1,10 @@
 # Figma Local Bridge
 
-**Local MCP server for Figma Desktop.** Read and edit the open Figma file from Claude Code, OpenCode, Cursor, or any MCP client — including ChatGPT and Gemini clients that support local MCP — **no Figma Dev/Full seat, no cloud API, no API keys, no telemetry.** Unofficial project, not affiliated with Figma, Inc.
+**Local MCP server for Figma Desktop.** Read and edit the open Figma file from Claude Code, OpenCode, Cursor, or any MCP client — including ChatGPT and Gemini clients that support local MCP — **no Figma Dev/Full seat, no API key in local mode, no telemetry.** Local mode stays on your machine; an optional, explicitly enabled read-only adapter can also read files over Figma's REST API. Unofficial project, not affiliated with Figma, Inc.
 
 ## What is it?
 
-Figma Local Bridge is an open-source **Model Context Protocol (MCP) server for Figma Desktop**. It connects an AI client to a small Figma plugin over a local WebSocket, so the model can inspect, screenshot, build, audit, compare, checkpoint, and edit the file that is open in the Figma desktop app — without Figma's cloud API, an API key, or a Dev/Full seat.
+Figma Local Bridge is an open-source **Model Context Protocol (MCP) server for Figma Desktop**. It connects an AI client to a small Figma plugin over a local WebSocket, so the model can inspect, screenshot, build, audit, compare, checkpoint, and edit the file that is open in the Figma desktop app — without a Dev/Full seat. Local mode needs no cloud API and no API key; an optional read-only REST adapter can be enabled for files that are not open.
 
 It is a practical alternative when the official Figma MCP server is unavailable, when the file is only open locally, or when an agent needs guarded writes, visual regression checks, design-token sync, or sprite/atlas export.
 
@@ -12,33 +12,45 @@ It is a practical alternative when the official Figma MCP server is unavailable,
 
 | Fact | Value |
 |---|---|
-| Version / source | `0.31.0` · [github.com/Miart/figma-local-bridge](https://github.com/Miart/figma-local-bridge) |
+| Version / source | `0.32.0` · [github.com/Miart/figma-local-bridge](https://github.com/Miart/figma-local-bridge) |
 | What it is | Local stdio MCP server + Figma Desktop plugin + one WebSocket daemon |
 | Client support | Any MCP stdio client; examples: Claude Code, OpenCode, Cursor, and ChatGPT/Gemini clients with local MCP support |
-| Figma requirement | Figma Desktop app with the included development plugin; no Dev Mode seat |
-| Transport | `127.0.0.1` WebSocket; no cloud, no telemetry, no API keys |
+| Figma requirement | Local mode: Figma Desktop with the included development plugin (no Dev Mode seat). Optional cloud reads: a Figma PAT/OAuth token with file access |
+| Transport | `127.0.0.1` WebSocket; no telemetry. Figma REST only when explicitly opted in |
 | Files at once | Up to 16 open Figma files, routed by `fileKey` |
-| Tool surface | 17 parity tools + 26 local tools = **43 MCP tools** |
-| Writes | Guarded: dry run, `planId`, fingerprints, stable keys, one undo transaction, rollback, verification |
+| Tool surface | 17 parity + 26 local = **43 tools**; +4 optional cloud reads = **47 when enabled** |
+| Writes | Local writes guarded: dry run, `planId`, fingerprints, stable keys, one undo transaction, rollback, verification. Cloud adapter is read-only |
 | Verification | `figma_audit`, `figma_compare`, `figma_review`, `figma_checkpoint`, `figma_design_system`, `figma_tokens`, journal/ops |
 | Runtime | Node.js 20+ |
 | License | MIT |
 
-### Local by design
+### Local by default, optional read-only cloud
 
-The bridge is deliberately local-only. `figma_ping` returns a `capabilities` object with the effective mode (`read-only`, `write`, or `write+destructive`) and an explicit cloud boundary:
+`figma_ping` returns a `capabilities` object with the effective local mode (`read-only`, `write`, or `write+destructive`) and an explicit cloud boundary. The default is off:
 
 ```json
 {
   "local": { "plugin": "Figma Desktop", "mode": "write" },
   "cloud": {
     "available": false,
-    "features": ["create_new_file", "generate_figma_design", "generate_image", "weave_run_model", "…"]
+    "configured": false,
+    "mode": null,
+    "tools": []
   }
 }
 ```
 
-`cloud.available` is `false` in this build: no cloud transport or credentials are configured. Figma's hosted file creation, AI generation, generative plugins, shaders and Weave are not proxied and are never simulated. Use the official remote Figma MCP or the Figma UI for those. Tools the official server marks remote-only — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — have local counterparts here, answered from the open file rather than the cloud.
+Set **both** an opt-in switch and one credential to enable the read-only REST adapter:
+
+```sh
+FIGMA_CLOUD=1
+FIGMA_CLOUD_TOKEN=...          # personal access token
+# or: FIGMA_CLOUD_OAUTH_TOKEN=...   # OAuth access token
+```
+
+Then `figma_ping` reports `available: true`, `mode: "read-only"`, the four tools and the reads they support (`file`, `nodes`, `images`). The adapter calls only documented GET endpoints — `/v1/me`, `/v1/files/:key`, `/v1/files/:key/nodes`, `/v1/images/:key` — and never edits a file. A token alone does not enable it: this avoids surprising cloud traffic when an editor already has a Figma token in its environment.
+
+Figma-hosted file creation, AI generation, generative plugins, shaders and Weave remain unavailable in both modes. They are not proxied and are never simulated; use the official remote Figma MCP or the Figma UI for those. Tools the official server marks remote-only — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — have local counterparts here, answered from the open file rather than the cloud.
 
 ### Common tasks
 
@@ -59,6 +71,9 @@ The bridge is deliberately local-only. `figma_ping` returns a `capabilities` obj
 | "Search the design system or file." | `figma_search`, `figma_search_design_system`, `figma_design_system` |
 | "Run a raw Plugin API snippet." | `figma_use` (destructive opt-in + scope) |
 | "A write timed out — did it run?" | `figma_ops`, `figma_cancel`, `figma_journal` |
+| "Read a file that is not open in Figma." | `figma_cloud_get_file`, `figma_cloud_get_nodes` (opt-in) |
+| "Give me render URLs for a remote Figma node." | `figma_cloud_get_image` (opt-in) |
+| "Check whether my Figma REST token works." | `figma_cloud_ping` (opt-in) |
 
 ### Example requests
 
@@ -73,11 +88,11 @@ Build a 4x4 sprite atlas from the selected frame and verify the manifest rects a
 
 **Does Figma Local Bridge need a Figma Dev or Full seat?** No. It uses a custom plugin with `editorType: ["figma", "figjam"]`, not the `devid` manifest used by Dev Mode.
 
-**Does it use the Figma cloud API?** No. The plugin talks to a daemon on `127.0.0.1`; the MCP server talks to the client over stdio. Nothing leaves the machine unless you export a file yourself.
+**Does it use the Figma cloud API?** Only if you enable the optional read-only adapter. Local mode is a plugin → daemon on `127.0.0.1` → stdio MCP server, with no cloud calls. `FIGMA_CLOUD=1` plus a PAT/OAuth token adds four GET tools for files that are not open; it never writes and never proxies Figma's hosted AI.
 
 **Can Claude, ChatGPT, or Gemini use it?** Any client that can launch a local stdio MCP server can. The repository includes an OpenCode-style config; Claude Code and Cursor use the same `command` + `args`. ChatGPT/Gemini clients need local MCP support and the same server command.
 
-**Is it the official Figma MCP server?** No. It is an independent MIT project and is not affiliated with Figma, Inc. It mirrors 17 official tools and adds 26 local ones.
+**Is it the official Figma MCP server?** No. It is an independent MIT project and is not affiliated with Figma, Inc. It mirrors 17 official tools, adds 26 local ones, and has four optional read-only REST tools.
 
 **Can the agent edit the file?** Yes, through guarded tools. Every mutating family supports a dry run and a `planId`/fingerprint boundary; `figma_use` is the raw escape hatch and needs explicit destructive access plus a scope.
 
@@ -87,7 +102,7 @@ Build a 4x4 sprite atlas from the selected frame and verify the manifest rects a
 
 ## Why this exists
 
-Figma's official MCP server (Dev Mode, `127.0.0.1:3845`) requires a Dev/Full seat on Professional+. This project ships its own Figma plugin instead: the manifest uses `editorType: ["figma", "figjam"]` rather than `devid`, so it runs in an ordinary editor window. Everything stays local — a WebSocket on `127.0.0.1`, no cloud, no API keys, no telemetry.
+Figma's official MCP server (Dev Mode, `127.0.0.1:3845`) requires a Dev/Full seat on Professional+. This project ships its own Figma plugin instead: the manifest uses `editorType: ["figma", "figjam"]` rather than `devid`, so it runs in an ordinary editor window. Local mode stays on the machine — a WebSocket on `127.0.0.1`, no telemetry, no API key. The optional REST adapter is off unless you set `FIGMA_CLOUD=1` and a token, and it is read-only.
 
 ## Architecture
 
@@ -187,6 +202,8 @@ Without the plugin running, the MCP server still starts and every tool answers `
 | `FIGMA_BRIDGE_REVIEWS_DIR` | `~/.local/share/opencode/figma-bridge-reviews` | Where `figma_review` keeps iteration baselines (PNG + JSON), one directory per `fileKey` |
 | `FIGMA_BRIDGE_JOURNAL_DIR` | `~/.local/share/opencode/figma-bridge-journal` | Where the journal keeps `ops.jsonl` (plus two rotated segments) |
 | `FIGMA_BRIDGE_JOURNAL` | `1` | `0` — stop recording new journal lines; what is already on disk stays readable |
+| `FIGMA_CLOUD` | unset | `1` — enable the four optional read-only REST tools; `0`/unset leaves them out |
+| `FIGMA_CLOUD_TOKEN` / `FIGMA_CLOUD_OAUTH_TOKEN` | unset | PAT (`X-Figma-Token`) or OAuth (`Authorization: Bearer`); set exactly one. Also requires `FIGMA_CLOUD=1` |
 
 Don't run a second bridge instance: the port is fixed, so the second daemon exits with `EADDRINUSE` (see Troubleshooting).
 
@@ -195,7 +212,7 @@ Don't run a second bridge instance: the port is fixed, so the second daemon exit
 Run the plugin in each Figma file you want to drive — every panel connects to the same daemon, which holds one socket per file, keyed by `fileKey` (a file that was never saved gets a session key like `unsaved-a1b2c3d4`, which it keeps for as long as the document is open, panel reloads included). Up to **16 files**; a panel beyond that is refused with `4413` and says so.
 
 - `figma_ping` lists the connected files (`fileKey` + name) — it is the tool to call when you do not know which files are open.
-- Every tool takes an optional `fileKey`. With **one** file connected it may be omitted; with **several**, a call without `fileKey` is **refused before anything is sent**, listing the candidates. Guessing here would edit the wrong file.
+- Every local tool takes an optional `fileKey`. With **one** file connected it may be omitted; with **several**, a call without `fileKey` is **refused before anything is sent**, listing the candidates. Guessing here would edit the wrong file. The optional cloud tools use a required `fileKey` naming the REST file to read.
 - The daemon routes by file and answers an unroutable request with an error immediately — never a timeout.
 - One file disconnecting fails only its own in-flight calls; the others keep working. Re-opening the plugin in the same file replaces its old socket (old panel gets `4409`).
 
@@ -213,9 +230,9 @@ Run the plugin in each Figma file you want to drive — every panel connects to 
 
 ## Tools
 
-17 tools mirroring Figma's official server, plus 26 local ones — 43 in total.
+17 tools mirroring Figma's official server, plus 26 local ones — 43 in total. An optional read-only REST adapter adds four more when `FIGMA_CLOUD=1` and a token are set, for a surface of 47.
 
-Every tool also accepts an optional `fileKey` to choose among several open Figma files; with one file it can be omitted, with several a call that omits it is refused and lists the connected files (`figma_ping` shows the same list).
+Every local tool also accepts an optional `fileKey` to choose among several open Figma files; with one file it can be omitted, with several a call that omits it is refused and lists the connected files (`figma_ping` shows the same list). Cloud tools instead take a required `fileKey` naming the REST file to read.
 
 The server also ships an **operating guide** — `fileKey` routing, what `rev` and `replayed` mean, which failure may be retried, what `figma_use` rolls back. It travels as `instructions` on the MCP handshake *and* as the resource `figma-local://guide/skill`, so a client that ignores handshake instructions can still fetch it. Both are read at startup from `skills/figma-local-bridge/SKILL.md`, which is the file to edit (a `server/dist` copied without the repo falls back to a short inline version).
 
@@ -243,7 +260,7 @@ The server also ships an **operating guide** — `fileKey` routing, what `rev` a
 
 | Tool | What it does |
 |---|---|
-| `figma_ping` | Health check and capability report: verifies the plugin is paired, reports the active page and connected files (`fileKey` + name), and returns the local mode plus the cloud-only features this server does not proxy |
+| `figma_ping` | Health check and capability report: verifies the plugin is paired, reports the active page and connected files (`fileKey` + name), and returns the local mode, whether the optional read-only REST adapter is enabled, and the Figma-hosted features even that adapter does not proxy |
 | `figma_get_selection` | Current selection, answered from memory — the plugin pushes selection changes, so this costs no round trip |
 | `figma_get_layout_tree` | Absolute geometry of a whole subtree in one call: per node `absoluteTransform` (2×3 matrix), absolute layout and render bounds, clip flag. Document-absolute space — the one a PNG export uses — so a rebuild (atlas, sprite sheet) can be checked against a capture without one `get_node` per layer. Geometry and screenshot stay separate calls (`atomicWithScreenshot: false`): snapshot, then capture, then compare `rev` — and `figma_compare` for the pixels themselves |
 | `figma_inspect` | Compact structure + semantic fingerprint; `compareWith` returns `EQUIVALENT` / `DIFFERENT` / `INCONCLUSIVE` *before* you mutate |
@@ -270,7 +287,31 @@ The server also ships an **operating guide** — `fileKey` routing, what `rev` a
 | `figma_export_ui_states` | The states of a button/component as one file per state, plus a manifest naming them. A `COMPONENT_SET` names its variants by property — the only one it declares, or the one you pass — and a frame names them by layer name; a set with several properties is refused until you say which one names the states. States whose **bytes are identical** are called out (a hover that draws exactly like normal is usually a variant that is not what its name says), and every file is re-read from disk: its size checked against the node, its hash recorded |
 | `figma_export_web_handoff` | One folder for a web developer: `preview.png` (1x) plus `preview@Nx.png`, `spec.json` (flat, document order — every layer's box relative to the frame, text, paints, effects and layout fields), `tokens.json` and `tokens.css` (solid colours named by their paint styles when one value has one style, fonts, text classes, spacing), a `README.md` stating what the bundle is **not**, and `handoff.json` with hashes, counts and warnings. A colour bound to several styles, a gradient, an image fill or a mixed text layer is never averaged into an invented value: it is named as missing, or carried as segments/stops. One call writes one folder, refuses to reuse it for another node, and re-reads every file from disk. Read-only — it works with writes off; above 2,500 nodes, 24 MP per preview or 8 MiB per PNG it refuses instead of truncating. Font availability is checked within a time budget: a font the check could not confirm in time is reported as **unchecked**, not assumed present, and the reply splits where the time went — `walkMs` reading the tree, `checkMs` pinging fonts, `exportMs` rasterising |
 
-Cloud-only in the official server, and not produced by this bridge: `create_new_file`, `generate_figma_design`, `generate_diagram`, `generate_image`, `html_to_figma`, `send_code_to_figma`, generative plugins, shaders, and Weave. They depend on Figma-hosted services; the bridge reports them as unavailable instead of simulating them. The official server also marks some read tools as remote-only — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — but those are answered here from the open file's Plugin API and are not cloud features.
+**Optional cloud reads (enabled only by `FIGMA_CLOUD=1` plus a token):**
+
+| Tool | What it does |
+|---|---|
+| `figma_cloud_ping` | Validate `FIGMA_CLOUD_TOKEN` (PAT) or `FIGMA_CLOUD_OAUTH_TOKEN` (OAuth) against `GET /v1/me`; returns the account and token type, never the token. Needs `current_user:read` |
+| `figma_cloud_get_file` | Read a file's JSON with optional `nodeIds`, `depth`, `version`, `geometry` and `pluginData`. Use ids/depth to keep it small; a reply over `maxBytes` is refused, never truncated |
+| `figma_cloud_get_nodes` | Read specific nodes from a file by `nodeIds` with the same depth/geometry/plugin-data controls |
+| `figma_cloud_get_image` | Get temporary render URLs for nodes (PNG/JPG/SVG/PDF) with scale and SVG options. It returns URLs, not downloaded bytes; Figma's URLs expire |
+
+### Cloud, when explicitly enabled
+
+The cloud adapter is a separate, read-only mode. It uses documented Figma REST `GET` endpoints only; there is no cloud write path and no attempt to reproduce Figma's hosted AI, file creation, shaders, generated plugins or Weave.
+
+| Setting | Meaning |
+|---|---|
+| `FIGMA_CLOUD=1` | Explicit opt-in. `0` or an unset value leaves the four cloud tools unregistered |
+| `FIGMA_CLOUD_TOKEN` | Personal access token, sent as `X-Figma-Token`. Needs `file_content:read`; `figma_cloud_ping` also needs `current_user:read` |
+| `FIGMA_CLOUD_OAUTH_TOKEN` | OAuth access token, sent as `Authorization: Bearer`. Set only one credential |
+| `FIGMA_CLOUD_TIMEOUT_MS` | Request timeout, 1000–120000 ms (default 30000) |
+| `FIGMA_CLOUD_API_BASE` | Defaults to `https://api.figma.com`; a custom base must be HTTPS |
+| `FIGMA_CLOUD_INSECURE=1` | Allows plain HTTP **only** for `127.0.0.1`/`localhost` test servers; never use it with a real token |
+
+The adapter never puts a token in a URL, a log line or a tool reply. It follows no redirects (the credential cannot be forwarded to another host), refuses a response over `maxBytes` (default 8 MB) instead of serialising a huge document, and maps failures to `CLOUD_UNAUTHORIZED`, `CLOUD_FORBIDDEN`, `CLOUD_NOT_FOUND`, `CLOUD_BAD_REQUEST`, `CLOUD_RATE_LIMITED` (with `retryAfterSeconds`), `CLOUD_UPSTREAM`, `CLOUD_TIMEOUT`, `CLOUD_UNREACHABLE`, `CLOUD_RESPONSE_TOO_LARGE` and `CLOUD_BAD_RESPONSE`. It does not run an OAuth authorization flow or refresh an expired token, and it does not retry automatically; a 429 is the caller's decision. Cloud tools work without the local daemon and are registered in read-only mode too.
+
+Cloud-only in the official server, and not produced by this bridge in either mode: `create_new_file`, `generate_figma_design`, `generate_diagram`, `generate_image`, `html_to_figma`, `send_code_to_figma`, generative plugins, shaders, and Weave. They depend on Figma-hosted services; the bridge reports them as unavailable instead of simulating them. The official server also marks some read tools as remote-only — `download_assets`, `get_libraries`, `whoami`, `search_design_system` — but those are answered here from the open file's Plugin API and are not cloud features.
 
 ## Safety model
 
@@ -284,6 +325,7 @@ The bridge edits real design files with an agent at the wheel, so most of the en
 - **A token import is a plan, not a paste.** `figma_tokens` exports every variable mode as data, diffs the document against the live file, and imports through the same dry-run boundary as the other write tools. The dry run hashes the file bytes and options into the `planId`, and the file identity plus the live variable state into the fingerprint; apply needs both, and a different file or a changed variable refuses the call before the first write. A value is never guessed: an unsupported DTCG type, a missing alias target, an alias type mismatch, an alias cycle, a variable whose type would have to change, or a prune target another variable still aliases is a blocking finding. Apply is one undo transaction; every collection, mode, description, literal and alias is read back from a fresh state, and a mismatch rolls the import back — if Figma refuses the undo, the error says `ROLLBACK FAILED` rather than claiming success.
 - **An iteration is measured against a baseline.** `figma_review` saves the pixels, the audit findings and the semantic fingerprint *before* an edit, then re-captures all three after it. The delta is the review: new errors/warnings or a size change make the result `regressed`, resolved problems make it `improved`, and a pixel/structure change without either is a neutral `changed` — never a claim that the design is better. The baseline reuses its audit rules and scale, so an audit delta is not an artefact of different settings; a capture that straddles two revisions is refused, and a truncated audit says so. Review files are local; the document is never written.
 - **The audit cannot edit.** `figma_audit` only reads; its findings are claims about the file, not a cleanup that might have changed it. The same is true of `figma_index`, `figma_search` and `figma_design_system`.
+- **The cloud adapter can only read.** The optional REST tools are registered only after an explicit `FIGMA_CLOUD=1` plus a token, call documented `GET` endpoints, carry their credential in a header (never a URL or reply), refuse redirects, cap the response size before serialising it, and keep `401`/`403`/`404`/`429` as their own error codes. There is no cloud write path and no fallback that pretends a hosted AI or file-creation service is local.
 - **A design-system diff is by key, not by name.** `figma_design_system` compares two exports by Figma's stable style/variable/component keys, and drops only the volatile node `id` from the value comparison. A style that keeps its name but changes its colour is a change; a node recreated with a new id is not.
 - **Idempotent retries.** `opId` is minted once per logical call and reused by every attempt (`server/src/figma.ts`). The plugin keeps a bounded `opId → result` cache and, on a repeat, replays the recorded answer (`replayed: true`) without touching the document. A repeat arriving while the first attempt is still running **joins it** instead of running the snippet twice.
 - **A key names one call.** The cache stores a fingerprint of the method and arguments it answered (`plugin/dispatch.ts`), so a *different* call sent under a used `opId` is refused (`OPID_REUSED`) instead of being handed the first call's answer — the one path that could report a write that never happened. Key order does not change a call, so a retry re-encoded by another JSON writer still replays.
@@ -314,7 +356,7 @@ npm test           # rebuilds artifacts, then unit + e2e with --test-concurrency
 
 `npm test` rebuilds `server/dist` and `plugin/*.mjs` first because the tests import the built modules — a test running against a stale artifact passes on code Figma will never execute. The suites run serially (`--test-concurrency=1`): e2e tests spin up real daemons on real ports and share one token file, and parallel runs make them flaky by construction.
 
-Current suites: **606 unit checks** — 322 `node:test` cases plus 284 harness checks (commands, fingerprint, scope, use-figma gate, checkpoint and checkpoint-store) — and **212 e2e checks** across daemon, link state, MCP, multifile, tools, checkpoint, exports, journal and the build/patch/batch/swap/variant-set/audit/review/capability/index/search/design-system/tokens/spec-export chain. The full `npm test` run prints **496 PASS**.
+Current suites: **610 unit checks** — 326 `node:test` cases plus 284 harness checks (commands, fingerprint, scope, use-figma gate, checkpoint and checkpoint-store) — and **228 e2e checks** across daemon, link state, MCP, multifile, tools, checkpoint, exports, journal, cloud and the build/patch/batch/swap/variant-set/audit/review/capability/index/search/design-system/tokens/spec-export chain. The full `npm test` run prints **512 PASS**.
 
 ## Troubleshooting
 
@@ -323,7 +365,12 @@ Current suites: **606 unit checks** — 322 `node:test` cases plus 284 harness c
 | `FIGMA_BRIDGE_OFFLINE` | The plugin is not running in Figma, or the daemon is down |
 | `FIGMA_BRIDGE_UNKNOWN_FILE` | The `fileKey` is not one of the connected files — an unsaved file's key changes when its panel reloads. The error lists the keys that exist: call `figma_ping` and retry with one of them instead of the same key |
 | `FIGMA_BRIDGE_FILE_KEY_REQUIRED` | Several files are connected and no `fileKey` was given — the error lists them; pass one |
-| `figma_ping` → `connected: false` | The plugin is not paired |
+| `figma_ping` → `connected: false` | The plugin is not paired; the optional cloud adapter can still work without it |
+| `figma_cloud_*` tools are missing | The adapter is off. Set `FIGMA_CLOUD=1` **and** `FIGMA_CLOUD_TOKEN` (PAT) or `FIGMA_CLOUD_OAUTH_TOKEN` (OAuth), then restart the MCP process |
+| `CLOUD_UNAUTHORIZED` / `CLOUD_FORBIDDEN` | The token is invalid/expired, or it lacks the scope: `current_user:read` for `figma_cloud_ping`, `file_content:read` for file/node/image reads |
+| `CLOUD_RATE_LIMITED` | Figma returned `429`; read `retryAfterSeconds` and wait instead of retrying in a loop. The adapter does not retry for you |
+| `CLOUD_RESPONSE_TOO_LARGE` | The reply exceeded `maxBytes`; pass `nodeIds`/`depth`, or raise `maxBytes` deliberately. It is refused rather than truncated |
+| `CLOUD_TIMEOUT` / `CLOUD_UNREACHABLE` | The REST request failed before a reply; check network/proxy and `FIGMA_CLOUD_TIMEOUT_MS`. The local daemon is not involved |
 | The daemon won't start | Port 8787 is busy — `lsof -nP -iTCP:8787 -sTCP:LISTEN` |
 | `4409 replaced by a newer socket` | Another panel took this file's slot (plugin reloaded, or the file is open in two windows). Press *reconnect* in the panel you want to keep |
 | `4413 too many files (max 16)` | The daemon already serves 16 files — close a panel |
@@ -338,6 +385,7 @@ Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the
 
 ## Limitations
 
+- The optional cloud adapter reads the public Figma REST API, not the open document. It is registered only with `FIGMA_CLOUD=1` and a PAT/OAuth token; the token's scopes decide what works (`file_content:read` for files/nodes/images, `current_user:read` for `figma_cloud_ping`). It exposes no writes, does not run an OAuth authorization flow, cannot refresh an expired OAuth token, and returns image URLs rather than downloaded files. A response over `maxBytes` is refused; use `nodeIds` and `depth` instead of raising the cap blindly. A custom `FIGMA_CLOUD_API_BASE` must be HTTPS, except for a localhost test server with `FIGMA_CLOUD_INSECURE=1`. It follows no redirects and does not retry a 429 automatically.
 - `indexTree` walks the whole page per call. On very large pages, split the work — the cache cannot be incremental because the user edits the file in parallel.
 - Figma caches screenshot exports; `rev` makes stale renders visible, but there is no way to force a redraw from the Plugin API.
 - `figma_use` hands you the full plugin API: it is a notice-and-rollback guard, not a sandbox. Code that runs after the call returns (fire-and-forget promises) escapes the diff; a timeout therefore does **not** roll back and says so.
@@ -357,7 +405,8 @@ Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the
 
 | Version | What it carries |
 |---|---|
-| `0.31.0` | `figma_ping` becomes a capability report as well as a health check. It returns the server version, the effective local mode (`read-only`, `write`, `write+destructive`) and a `cloud` object whose `available` is `false` in this build, listing the Figma-hosted features (file creation, AI generation, generative plugins, shaders, Weave) that this local bridge does not proxy or simulate. The local tools that the official server marks remote-only — assets, libraries, account identity, design-system search — remain real Plugin API reads. No new tool; no document writes. |
+| `0.32.0` | Optional read-only cloud access. With `FIGMA_CLOUD=1` and a PAT/OAuth token, four REST tools join the surface: `figma_cloud_ping` (`GET /v1/me`), `figma_cloud_get_file`, `figma_cloud_get_nodes` and `figma_cloud_get_image`. They work without the local daemon, never write, never return the token, follow no redirects, and refuse oversized responses rather than truncating. `figma_ping` reports `cloud.available`, `configured`, `mode`, `tokenType`, the registered tools and reads; the default remains off, and a token alone does not opt in. Errors keep their HTTP meaning (`CLOUD_UNAUTHORIZED`, `CLOUD_FORBIDDEN`, `CLOUD_RATE_LIMITED` with `retryAfterSeconds`, `CLOUD_RESPONSE_TOO_LARGE`, ...). Hosted file creation, AI generation, generative plugins, shaders and Weave remain unavailable. |
+| `0.31.0` | `figma_ping` becomes a capability report as well as a health check. It returns the server version, the effective local mode (`read-only`, `write`, `write+destructive`) and a `cloud` object; at that point `cloud.available` was false because no REST adapter existed yet, and the object listed the Figma-hosted features (file creation, AI generation, generative plugins, shaders, Weave) that this local bridge does not proxy or simulate. The local tools that the official server marks remote-only — assets, libraries, account identity, design-system search — remain real Plugin API reads. No new tool; no document writes. |
 | `0.30.0` | `figma_review` is the iteration harness. `save` records a local baseline as a PNG, the full `audit-v2` report and the semantic fingerprint; `compare` re-renders, re-audits and re-inspects the node, diffs the pixels, and reports new/resolved/changed findings, severity deltas, size and fingerprint changes, the heatmap and a verdict (`unchanged`, `changed`, `improved`, `regressed`). A new error/warning or a size change is a regression; resolved problems are an improvement; a visual/structural change without either is neutral. The baseline reuses its audit rules, hidden-layer setting and scale, a capture that spans revisions is refused, and a truncated audit is named. `list`, `drop` and `latest` manage local files; no document writes. |
 | `0.29.0` | `figma_audit` becomes `audit-v2`: with `suggest:true` (default) every hardcoded fill/stroke also carries **exact** local paint-style and colour-variable candidates (a variable candidate names the matching modes and whether all modes match), unstyled text carries exact local text-style candidates, and spacing/radius findings name the nearest on-scale value and delta. Suggestions are read-only candidates, never bindings, and a failed style/variable API is a warning rather than a failed audit. Two opt-in rules join the surface: `empty-text` (visible text with no characters) and `hardcoded-effect` (visible effects without an effect style). The audit schema is `audit-v2`; all existing rules and findings keep their meaning. |
 | `0.28.0` | `figma_tokens` adds design-token export, diff and guarded variable import. `export` writes the native `figma-tokens/v1` document (collections, modes, values, descriptions and aliases); `diff` compares a document with the live file; `import` creates missing collections/modes/variables and updates values/descriptions in one undo transaction. A plain DTCG tree is accepted with `collection`/`mode` for `color`, `number`, `dimension`, `string`, `boolean`, `fontFamily` and `fontWeight`; unsupported types are blocking. The dry run fingerprints the live variable state, and the server hashes the file bytes plus options into a `planId`; apply requires both, so a changed file or a changed document cannot slip through. Variables are read back mode by mode after writing and the import rolls back on a mismatch, naming `ROLLBACK FAILED` if the undo itself fails. `prune` is opt-in, needs `allowDestructive:true`, only touches the named collections, and refuses to delete a variable another variable still aliases. Modes not named by the document are preserved on existing variables and filled from the default managed mode on new ones, with that fact in the plan. |

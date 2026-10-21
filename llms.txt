@@ -1,8 +1,8 @@
 # Figma Local Bridge
 
-> Local, open-source MCP (Model Context Protocol) server for Figma Desktop. It lets an AI client read and edit the open Figma file through a bundled plugin and a localhost WebSocket — no Figma Dev/Full seat, no cloud API, no API key, no telemetry.
+> Local-first, open-source MCP (Model Context Protocol) server for Figma Desktop. It lets an AI client read and edit the open Figma file through a bundled plugin and a localhost WebSocket — no Figma Dev/Full seat, no cloud API or API key in local mode, no telemetry. An optional, explicitly enabled adapter can read files over Figma's REST API.
 
-- Version: 0.31.0
+- Version: 0.32.0
 - License: MIT
 - Repository: https://github.com/Miart/figma-local-bridge
 - Canonical README: https://github.com/Miart/figma-local-bridge#readme
@@ -10,14 +10,15 @@
 
 ## What it is
 
-Figma Local Bridge connects any MCP stdio client (Claude Code, OpenCode, Cursor, and ChatGPT/Gemini clients with local MCP support) to the Figma desktop app. A Figma plugin holds one WebSocket per open file, one local daemon routes up to 16 files, and the MCP server exposes 43 tools. Everything runs on the machine.
+Figma Local Bridge connects any MCP stdio client (Claude Code, OpenCode, Cursor, and ChatGPT/Gemini clients with local MCP support) to the Figma desktop app. A Figma plugin holds one WebSocket per open file, one local daemon routes up to 16 files, and the MCP server exposes 43 local tools. Local mode runs entirely on the machine. With `FIGMA_CLOUD=1` and a token, four optional read-only REST tools join the surface (47 total).
 
 Use it when the official Figma MCP server is unavailable, when the design file is only open locally, or when an agent needs guarded writes, visual review, design-token sync, checkpoints, or game/web exports.
 
 ## Capabilities
 
 - Inspect and screenshot the open file; read metadata, layout, variables and selection.
-- Ask `figma_ping` for a capability report: local mode and the cloud boundary.
+- Ask `figma_ping` for a capability report: local mode and whether the optional cloud read adapter is enabled.
+- With the cloud adapter enabled, read a file that is not open (`figma_cloud_get_file`, `figma_cloud_get_nodes`) or get temporary render URLs (`figma_cloud_get_image`).
 - Build/patch keyed UI trees and batch-edit many nodes in one undo transaction.
 - Author component variants and swap component instances with explicit loss reporting.
 - Audit the design system (`audit-v2`) with exact local style/variable candidates.
@@ -28,7 +29,7 @@ Use it when the official Figma MCP server is unavailable, when the design file i
 
 ## Safety model
 
-Mutating families default to a dry run and require the dry run's `planId` plus fingerprints. Targets are stable keys, not raw node ids. Batches and imports are one undo transaction and roll back on mismatch. `figma_use` is the raw Plugin API escape hatch and requires explicit destructive access and a scope. `FIGMA_BRIDGE_WRITE=0` makes the bridge read-only. Verification tools (`figma_audit`, `figma_compare`, `figma_review`, `figma_checkpoint`) report what changed rather than claiming intent.
+Mutating families default to a dry run and require the dry run's `planId` plus fingerprints. Targets are stable keys, not raw node ids. Batches and imports are one undo transaction and roll back on mismatch. `figma_use` is the raw Plugin API escape hatch and requires explicit destructive access and a scope. `FIGMA_BRIDGE_WRITE=0` makes the bridge read-only. The optional cloud adapter is read-only and off unless explicitly enabled. Verification tools (`figma_audit`, `figma_compare`, `figma_review`, `figma_checkpoint`) report what changed rather than claiming intent.
 
 ## Requirements
 
@@ -41,15 +42,19 @@ Mutating families default to a dry run and require the dry run's `planId` plus f
 
 Build the plugin and server, run `npm run daemon`, import the plugin in Figma, paste the daemon token once, then point the MCP client at `server/dist/index.js` over stdio.
 
+Optional read-only cloud reads: set `FIGMA_CLOUD=1` and one of `FIGMA_CLOUD_TOKEN` (PAT) or `FIGMA_CLOUD_OAUTH_TOKEN` (OAuth) in the MCP process environment, then restart it. No cloud writes are exposed.
+
 ## Important limits
 
 - It is not the official Figma MCP server and is not affiliated with Figma, Inc.
-- It uses the desktop plugin API, not the Figma cloud REST API; it cannot open a file that is not open in Figma.
-- It is local-only in this build: `figma_ping` reports `capabilities.cloud.available: false` (no cloud transport or credentials are configured). Figma-hosted file creation, AI generation, generative plugins, shaders and Weave are not proxied or simulated; use the official remote Figma MCP or the Figma UI for those.
+- Local mode uses the desktop plugin API and cannot open a file that is not open in Figma. The optional cloud adapter reads documented Figma REST `GET` endpoints only; it has no write path.
+- The cloud adapter is off by default. It requires `FIGMA_CLOUD=1` and a PAT/OAuth token; a token alone does not enable it. `figma_ping` reports `capabilities.cloud.available`, `configured`, `mode`, `tokenType` and the registered tools. Errors keep their HTTP meaning (`CLOUD_UNAUTHORIZED`, `CLOUD_FORBIDDEN`, `CLOUD_RATE_LIMITED`, `CLOUD_RESPONSE_TOO_LARGE`, ...).
+- Figma-hosted file creation, AI generation, generative plugins, shaders and Weave are not proxied or simulated in either mode; use the official remote Figma MCP or the Figma UI for those.
 - Some tools the official server marks remote-only (`download_assets`, `get_libraries`, `whoami`, `search_design_system`) are implemented locally against the open file and are real.
+- Cloud image tools return temporary URLs, not downloaded files; file/node responses over `maxBytes` are refused instead of truncated. The adapter does not run an OAuth authorization flow or refresh expired tokens.
 - `figma_review` baselines are local files, not restorable checkpoints; use `figma_checkpoint` for restoration.
 - `figma_tokens` manages variables, not paint/text/effect/grid styles.
 
 ## Keywords
 
-Figma MCP server, local Figma MCP, Figma Desktop automation, Figma plugin API, MCP design agent, Claude Code Figma, ChatGPT Figma, Gemini Figma, OpenCode Figma, Cursor Figma, design-system audit, design token sync, visual regression Figma, Figma sprite atlas.
+Figma MCP server, local Figma MCP, Figma Desktop automation, Figma plugin API, Figma REST API, MCP design agent, Claude Code Figma, ChatGPT Figma, Gemini Figma, OpenCode Figma, Cursor Figma, design-system audit, design token sync, visual regression Figma, Figma sprite atlas.

@@ -43,8 +43,15 @@ if (!existsSync(ENTRY)) {
 const scratch = mkdtempSync(join(tmpdir(), "figma-bridge-smoke-"));
 const INFO = join(scratch, "daemon.json"); // never created: this is the offline case
 
+// Pin the cloud adapter off: a developer's token in the environment must not
+// change what the offline build smoke test is measuring.
+const env = { ...process.env, FIGMA_BRIDGE_INFO_FILE: INFO, FIGMA_CLOUD: "0" };
+for (const key of ["FIGMA_CLOUD_TOKEN", "FIGMA_CLOUD_OAUTH_TOKEN", "FIGMA_CLOUD_API_BASE", "FIGMA_CLOUD_INSECURE", "FIGMA_CLOUD_TIMEOUT_MS"]) {
+  delete env[key];
+}
+
 const proc = spawn("node", [ENTRY], {
-  env: { ...process.env, FIGMA_BRIDGE_INFO_FILE: INFO },
+  env,
   stdio: ["pipe", "pipe", "pipe"],
 });
 
@@ -122,9 +129,11 @@ try {
     pingCapabilities = parsed.capabilities || null;
   } catch { /* stays false */ }
   check("offline figma_ping says connected:false", pingOk, ping.slice(0, 60));
-  check("figma_ping reports local-only capabilities",
+  check("figma_ping reports the local mode and no cloud adapter",
     (pingCapabilities?.local?.mode === "write" || pingCapabilities?.local?.mode === "write+destructive") &&
       pingCapabilities?.cloud?.available === false &&
+      pingCapabilities.cloud.configured === false &&
+      Array.isArray(pingCapabilities.cloud.tools) && pingCapabilities.cloud.tools.length === 0 &&
       pingCapabilities.cloud.features.includes("create_new_file"),
     JSON.stringify(pingCapabilities).slice(0, 120));
 
