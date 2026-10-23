@@ -12,7 +12,7 @@ It is a practical alternative when the official Figma MCP server is unavailable,
 
 | Fact | Value |
 |---|---|
-| Version / source | `0.35.0` · [github.com/Miart/figma-local-bridge](https://github.com/Miart/figma-local-bridge) |
+| Version / source | `0.35.1` · [github.com/Miart/figma-local-bridge](https://github.com/Miart/figma-local-bridge) |
 | What it is | Local stdio MCP server + Figma Desktop plugin + one WebSocket daemon |
 | Client support | Any MCP stdio client; examples: Claude Code, OpenCode, Cursor, and ChatGPT/Gemini clients with local MCP support |
 | Figma requirement | Local mode: Figma Desktop with the included development plugin (no Dev Mode seat). Optional cloud tools: a Figma PAT/OAuth token with file access |
@@ -22,7 +22,7 @@ It is a practical alternative when the official Figma MCP server is unavailable,
 | Writes | Local writes guarded: dry run, `planId`, fingerprints, stable keys, one undo transaction, rollback, verification. The cloud adapter never edits Figma; `figma_cloud_download_image` writes local image files only |
 | Verification | `figma_audit`, `figma_compare`, `figma_review`, `figma_checkpoint`, `figma_design_system`, `figma_tokens`, `figma_motion_*`, journal/ops |
 | Runtime | Node.js 20+ |
-| Installer | macOS 0.35.0: double-click `Install.command` in the release zip; one Figma plugin import and one token paste remain manual |
+| Installer | macOS 0.35.1: double-click `Install.command` in the release zip; one Figma plugin import and one token paste remain manual |
 | License | MIT |
 
 ### Local by default, optional read-only cloud
@@ -170,12 +170,12 @@ always checked; test placeholders such as `example.com`, `/Users/example` and
 `.privacy-denylist`.
 | `spike/` | the first prototype, kept for history |
 
-## Easy install (macOS, 0.35.0)
+## Easy install (macOS, 0.35.1)
 
 The release zip is self-contained: it already contains `server/dist`, `plugin/code.js` and the production `node_modules`, so the user does not run `npm install` or `npm run build`.
 
 1. Build the zip from a checkout with `npm run build:release` (or use a release artifact attached by the maintainer). The archive is `release/figma-local-bridge-<version>-macos.zip`.
-2. Unzip it and double-click **`Install.command`**. If macOS Gatekeeper blocks an unsigned download, use **right-click → Open** once. The installer is unsigned in `0.35.0`; signing and notarization are a later step.
+2. Unzip it and double-click **`Install.command`**. If macOS Gatekeeper blocks an unsigned download, use **right-click → Open** once. The installer is unsigned in `0.35.1`; signing and notarization are a later step.
 3. The installer checks Node.js 20+, copies the app to `~/Library/Application Support/Figma Local Bridge/app`, installs a per-user LaunchAgent (`com.miart.figma-local-bridge`), backs up and updates the MCP configs it finds for OpenCode, Claude Code, Claude Desktop and Cursor, and copies the daemon token to the clipboard. It never prints the token.
 4. In Figma, do the two things Figma exposes no API for: **Plugins → Development → Import plugin from manifest…** and choose `~/Library/Application Support/Figma Local Bridge/app/plugin/manifest.json`; then run **Figma Local Bridge** and paste the token once.
 5. Restart the MCP client. `figma_ping` should answer.
@@ -442,7 +442,7 @@ Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the
 
 ## Limitations
 
-- The `0.35.0` installer is macOS-only and unsigned. Gatekeeper can require **right-click → Open** on the first launch; a signed/notarized `.pkg` or `.dmg` is not part of this release. The installer writes only its own MCP entry, backs up each config it changes, and skips a config it cannot parse instead of rewriting it. Figma exposes no API for installing a development plugin, so importing `plugin/manifest.json` and pasting the token remain manual.
+- The `0.35.1` installer is macOS-only and unsigned. Gatekeeper can require **right-click → Open** on the first launch; a signed/notarized `.pkg` or `.dmg` is not part of this release. The installer writes only its own MCP entry, backs up each config it changes, and skips a config it cannot parse instead of rewriting it. Figma exposes no API for installing a development plugin, so importing `plugin/manifest.json` and pasting the token remain manual.
 - Motion support is **Figma Motion (Beta)** and depends on `figma.motion` plus the node-level Motion methods being present in the running Figma build. When they are not, every Motion tool fails with `MOTION_UNAVAILABLE` — it never writes `pluginData` that merely looks like an animation. Motion writes require a dry-run `planId`, are read back after apply, and roll back on a mismatch. There is no native Motion GIF/MP4/WebM exporter in this bridge; render or record in Figma if a movie file is needed.
 - The optional cloud adapter reads the public Figma REST API, not the open document. It is registered only with `FIGMA_CLOUD=1` and a PAT/OAuth token; the token's scopes decide what works (`file_content:read` for files/nodes/images, `current_user:read` for `figma_cloud_ping`). It exposes no Figma writes, does not run an OAuth authorization flow, and cannot refresh an expired OAuth token. `figma_cloud_get_image` returns temporary URLs; `figma_cloud_download_image` is the explicit byte-downloading tool and writes only local files. A response over `maxBytes` is refused; use `nodeIds` and `depth` instead of raising the cap blindly. A custom `FIGMA_CLOUD_API_BASE` must be HTTPS, except for a localhost test server with `FIGMA_CLOUD_INSECURE=1`. It follows no redirects and does not retry a 429 automatically; image downloads also refuse redirects and never send the Figma token to the image host.
 - `indexTree` walks the whole page per call. On very large pages, split the work — the cache cannot be incremental because the user edits the file in parallel.
@@ -464,6 +464,7 @@ Liveness check: `lsof -nP -iTCP:8787 | grep -i figma` — empty output means the
 
 | Version | What it carries |
 |---|---|
+| `0.35.1` | Performance pass: `figma_index` and `figma_search` build paths from the parent prefix instead of walking ancestors per node, read each node's name/type/id/visibility/children once, compute a build root's id once per subtree, and defer key/text reads in search until a node is a candidate. A no-op `figma_use` reuses the before-index when `nodechange` never fired instead of walking the page twice. `figma_inspect` gains `includeFingerprint:false` for structure-only reads. `figma_get_design_context` caches style and collection-mode name resolutions for the call. Large tool replies are compact JSON above 128 KiB, and `indexTree` derives parent ids from the traversal instead of reading `parent` per node. No tool removal; 50 local + 5 optional cloud. |
 | `0.35.0` | Figma Motion (Beta) support: `figma_motion_styles` and `figma_motion_inspect` read animation styles, applied styles, manual keyframe tracks and timelines; `figma_motion_apply_style` / `figma_motion_remove_style` apply or remove a style; `figma_motion_set_keyframes` / `figma_motion_remove_keyframes` write one manual track; `figma_motion_set_duration` sets a timeline duration. Writes default to a dry run and require its `planId` plus the node's live Motion-state fingerprint; after apply every style id, duration, offset, property and keyframe position/value/easing is read back, and a mismatch rolls the transaction back. The plugin probes `figma.motion` and the node-level methods at call time and fails with `MOTION_UNAVAILABLE` when the Beta API is absent; it never fabricates local animations or writes fake Motion metadata. The plugin reports Motion availability in `figma_ping`. Seven new tools; 50 local + 5 optional cloud. |
 | `0.34.1` | Dynamic-page correctness and a reusable agent skill. `figma_index` / `figma_search` no longer touch the synchronous `node.mainComponent` getter, which throws under `documentAccess: "dynamic-page"` (and logs to Figma's console even when caught); an index deliberately omits component metadata, and `figma_inspect` or the new `flb.main(node)` resolves one instance through `getMainComponentAsync()`. Component swap and spec export no longer retain a synchronous fallback either. The old operating guide becomes `GUIDE.md`; `SKILL.md` is now a short frontmatter-bearing skill that can be copied to `~/.claude/skills/figma-local-bridge/`. A local privacy gate (`npm run check:privacy`, optional `.githooks/pre-commit`) scans tracked or staged content for home paths, real e-mail addresses, credentials, HAR captures and a denylist stored outside the repository. No MCP tool changes; 43 local + 5 optional cloud. |
 | `0.34.0` | macOS double-click installer and release packaging. `npm run build:release` builds a self-contained zip with `server/dist`, `plugin/code.js`, `plugin/ui.html`, the plugin manifest, the installer and production `node_modules`; `Install.command` copies the app under `~/Library/Application Support/Figma Local Bridge`, writes a per-user `launchd` LaunchAgent with restart, backs up and configures OpenCode/Claude Code/Claude Desktop/Cursor MCP entries, copies the token to the clipboard without printing it, and opens the plugin manifest in Finder. `Uninstall.command` removes the app, LaunchAgent and this bridge's entries while keeping backups/data by default (`--purge` removes the token too). The installer refuses an occupied port owned by an unknown process, skips unparseable JSONC instead of corrupting it, and leaves the two Figma-manual steps explicit. No new MCP tools; the server and plugin surface stays 43 local + 5 optional cloud. |

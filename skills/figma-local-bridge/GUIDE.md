@@ -7,13 +7,13 @@ authoritative about arguments.
 
 ## Connecting a new install
 
-macOS 0.35.0 ships a self-contained release: unzip it and double-click
+macOS 0.35.1 ships a self-contained release: unzip it and double-click
 `Install.command`. It installs a per-user LaunchAgent, backs up and configures
 the MCP clients it detects, and copies the token to the clipboard without
 printing it. Figma has no API for registering a development plugin, so the
 user must still choose **Plugins → Development → Import plugin from
 manifest…** on `~/Library/Application Support/Figma Local Bridge/app/plugin/manifest.json`,
-run the plugin, and paste the token. The installer is unsigned in 0.35.0;
+run the plugin, and paste the token. The installer is unsigned in 0.35.1;
 Gatekeeper may require right-click → Open. `Uninstall.command` removes the app,
 LaunchAgent and this bridge's entries. From a source checkout, `npm run setup`
 does the same after `npm run build`.

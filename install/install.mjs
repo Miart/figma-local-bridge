@@ -48,7 +48,7 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SOURCE_ROOT = dirname(HERE);
-const VERSION = appVersionFromPackage(SOURCE_ROOT) || "0.35.0";
+const VERSION = appVersionFromPackage(SOURCE_ROOT) || "0.35.1";
 const APP_ALLOWLIST = [
   "package.json",
   "package-lock.json",
