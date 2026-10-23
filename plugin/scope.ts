@@ -64,12 +64,16 @@ export function signature(n: any, childCount?: number): string {
 /** Indexes a node and its descendants. `root` may be a PAGE. */
 export function indexTree(root: any): TreeIndex {
   const idx: TreeIndex = new Map();
-  const visit = (n: any) => {
+  const visit = (n: any, parentId: string | null) => {
     const kids = n.children;
-    idx.set(n.id, { sig: signature(n, kids ? kids.length : 0), parent: n.parent ? n.parent.id : null });
-    if (kids) for (let i = 0; i < kids.length; i++) visit(kids[i]);
+    idx.set(n.id, { sig: signature(n, kids ? kids.length : 0), parent: parentId });
+    if (kids) for (let i = 0; i < kids.length; i++) visit(kids[i], n.id);
   };
-  visit(root);
+  // The root may be a subtree, not the page: its own parent is still part of the
+  // index because containment checking walks up from a changed id. Every other
+  // parent id comes from the traversal, so the hot loop does not read
+  // `n.parent` again for each node.
+  visit(root, root.parent ? root.parent.id : null);
   return idx;
 }
 

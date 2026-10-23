@@ -6,6 +6,7 @@ import type { FigmaClient } from "./figma.js";
 import { figmaNodeId } from "./node-id.js";
 import { fileKeyParam } from "./file-key.js";
 import { BridgeOffline } from "./websocket.js";
+import { jsonText } from "./tool-text.js";
 import {
   SCHEMA, assertEnvelope, checkpointsDir, checkpointId, digest, diffDumps, dropCheckpoint, filePath,
   listCheckpoints, listFilesWithCheckpoints, readCheckpoint, resolveId, saveCheckpoint, summarize,
@@ -21,7 +22,7 @@ async function guard<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-const content = (v: unknown) => ({ content: [{ type: "text" as const, text: typeof v === "string" ? v : JSON.stringify(v, null, 2) }] });
+const content = (v: unknown) => ({ content: [{ type: "text" as const, text: jsonText(v) }] });
 /** A dump of a 2000-node subtree is a big reply; the interesting part is the list. */
 const fold = <T,>(list: T[], limit: number) =>
   list.length <= limit ? list : [...list.slice(0, limit), `… ${list.length - limit} more` as unknown as T];

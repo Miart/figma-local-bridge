@@ -264,21 +264,30 @@ const methods: Record<string, (p: Json) => Promise<Json>> = {
     if (!node) return { error: "node not found: " + nodeId };
 
     const policy = p.policy === "componentize" ? COMPONENTIZE : STRICT;
-    const fp = snapshot(node as any, policy);
+    const compared = Array.isArray(p.compareWith) && p.compareWith.length > 0;
+    // `snapshot` is a whole-subtree walk, even when `depth` only asks for one
+    // level of the compact structure. That is the right default because the
+    // fingerprint gates mutations, but a caller that only wants ids and names
+    // can say so. A comparison always needs the snapshot.
+    const fp = p.includeFingerprint === false && !compared ? null : snapshot(node as any, policy);
 
     const out: Json = {
       node: describe(node, p.depth === undefined ? 1 : p.depth),
-      fingerprint: {
-        hash: fp.hash,
-        appearanceHash: fp.appearanceHash,
-        geometryHash: fp.geometryHash,
-        childrenHash: fp.childrenHash,
-        geometryStatus: fp.geometryStatus,
-      },
-      warnings: fp.warnings,
+      ...(fp
+        ? {
+            fingerprint: {
+              hash: fp.hash,
+              appearanceHash: fp.appearanceHash,
+              geometryHash: fp.geometryHash,
+              childrenHash: fp.childrenHash,
+              geometryStatus: fp.geometryStatus,
+            },
+            warnings: fp.warnings,
+          }
+        : { warnings: [] }),
     };
 
-    if (Array.isArray(p.compareWith) && p.compareWith.length) {
+    if (compared) {
       const others: Json[] = [];
       for (const id of p.compareWith) {
         const other = await get(id);
@@ -287,8 +296,8 @@ const methods: Record<string, (p: Json) => Promise<Json>> = {
           continue;
         }
         const ofp = snapshot(other as any, policy);
-        const verdict = compare(fp, ofp);
-        others.push({ id, verdict, why: verdict === "EQUIVALENT" ? [] : explain(fp, ofp) });
+        const verdict = compare(fp!, ofp);
+        others.push({ id, verdict, why: verdict === "EQUIVALENT" ? [] : explain(fp!, ofp) });
       }
       out.compared = others;
     }

@@ -89,12 +89,13 @@ export function registerTools(server: McpServer, client: FigmaClient, caps: Capa
 
   server.tool(
     "figma_inspect",
-    "Inspect a node: compact structure plus its semantic fingerprint. Pass compareWith to get EQUIVALENT / DIFFERENT / INCONCLUSIVE against other nodes BEFORE asking for any mutation.",
+    "Inspect a node: compact structure plus its semantic fingerprint. Pass compareWith to get EQUIVALENT / DIFFERENT / INCONCLUSIVE against other nodes BEFORE asking for any mutation. Set includeFingerprint:false when only the structure is needed — the fingerprint walks the whole subtree even at depth 1.",
     {
       nodeId: figmaNodeId().optional().describe("Defaults to the current selection"),
       depth: z.number().int().min(0).max(3).default(1),
       policy: z.enum(["strict", "componentize"]).default("strict"),
       compareWith: figmaNodeIds("compareWith").optional().describe("Node ids to compare against"),
+      includeFingerprint: z.boolean().default(true).describe("false skips the semantic subtree snapshot (compareWith still computes it)"),
       fileKey: fileKeyParam,
     },
     async (a) =>

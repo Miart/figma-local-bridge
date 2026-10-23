@@ -13,6 +13,7 @@ import { join, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { figmaNodeIds } from "./node-id.js";
+import { jsonText } from "./tool-text.js";
 import {
   CLOUD_DEFAULT_DOWNLOAD_TOTAL_BYTES,
   CLOUD_DEFAULT_IMAGE_MAX_BYTES,
@@ -128,7 +129,7 @@ function imageProblem(buffer: Buffer, format: string): string | null {
 }
 
 const json = (v: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }],
+  content: [{ type: "text" as const, text: jsonText(v) }],
 });
 
 const failure = (err: CloudError) => ({

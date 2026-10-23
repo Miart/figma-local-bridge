@@ -8,6 +8,7 @@ import type { FigmaClient } from "./figma.js";
 import { figmaNodeId, figmaNodeIds } from "./node-id.js";
 import { fileKeyParam } from "./file-key.js";
 import { BridgeOffline } from "./websocket.js";
+import { jsonText } from "./tool-text.js";
 import type { Capabilities } from "./tools.js";
 
 /**
@@ -22,7 +23,7 @@ import type { Capabilities } from "./tools.js";
 type ToolResult = CallToolResult;
 
 const text = (v: unknown): ToolResult => ({
-  content: [{ type: "text" as const, text: typeof v === "string" ? v : JSON.stringify(v, null, 2) }],
+  content: [{ type: "text" as const, text: jsonText(v) }],
 });
 
 async function guard(fn: () => Promise<ToolResult>): Promise<ToolResult> {

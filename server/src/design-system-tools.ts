@@ -7,6 +7,7 @@ import type { FigmaClient } from "./figma.js";
 import { fileKeyParam } from "./file-key.js";
 import { BridgeOffline } from "./websocket.js";
 import { diffInventory } from "./design-system.js";
+import { jsonText } from "./tool-text.js";
 
 async function guard<T>(fn: () => Promise<T>): Promise<T> {
   try {
@@ -18,7 +19,7 @@ async function guard<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 const content = (v: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }],
+  content: [{ type: "text" as const, text: jsonText(v) }],
 });
 
 const INVENTORY_SCHEMA = "design-system-v1";

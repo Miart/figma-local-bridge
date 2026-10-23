@@ -6,6 +6,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { FigmaClient } from "./figma.js";
 import { fileKeyParam } from "./file-key.js";
 import { BridgeOffline } from "./websocket.js";
+import { jsonText } from "./tool-text.js";
 import type { Capabilities } from "./tools.js";
 import { planIdOf } from "./build-tools.js";
 
@@ -19,7 +20,7 @@ async function guard<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 const content = (v: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }],
+  content: [{ type: "text" as const, text: jsonText(v) }],
 });
 
 const MAX_FILE_BYTES = 16 * 1024 * 1024;

@@ -26,6 +26,8 @@ key such as `unsaved-a1b2c3d4`.
 
 - `figma_inspect` returns structure plus a semantic fingerprint; `compareWith`
   answers whether a subtree is equivalent before you mutate it.
+  `includeFingerprint:false` skips the whole-subtree snapshot when only the
+  structure is needed; a comparison still computes it.
 - `figma_index` and `figma_search` are cheap page/subtree indexes. They do not
   return `component` metadata for instances; use `figma_inspect` or `flb.main`
   for one node.

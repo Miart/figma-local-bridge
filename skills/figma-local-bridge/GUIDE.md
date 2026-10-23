@@ -110,7 +110,9 @@ Mutations are serialized by the bridge, one at a time, because Figma's undo
 barrier is global. Prefer the specific tools over raw code:
 
 - `figma_inspect` with `compareWith` answers `EQUIVALENT` / `DIFFERENT` /
-  `INCONCLUSIVE` *before* you mutate.
+  `INCONCLUSIVE` *before* you mutate. `includeFingerprint:false` skips the
+  semantic whole-subtree snapshot when you only need the compact structure; a
+  `compareWith` request still computes it.
 - `figma_replace_repeated_with_component` is transactional and refuses unless
   every target is provably equivalent; run it with `dryRun: true` first.
 - `figma_use` is the raw Plugin API. It requires `allowDestructive: true` and a

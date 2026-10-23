@@ -102,14 +102,19 @@ async function varName(id: string): Promise<string> {
   nameCache.set(id, n);
   return n;
 }
-async function styleName(id: any): Promise<string | null> {
+async function styleName(id: any, cache?: Map<string, string | null>): Promise<string | null> {
   if (!id || isMixed(id)) return null;
+  const key = String(id);
+  if (cache && cache.has(key)) return cache.get(key) ?? null;
+  let name: string | null = null;
   try {
-    const s = await figma.getStyleByIdAsync(id);
-    return s ? s.name : null;
+    const s = await figma.getStyleByIdAsync(key);
+    name = s ? s.name : null;
   } catch {
-    return null;
+    /* unknown style: keep the id out of the reply */
   }
+  if (cache) cache.set(key, name);
+  return name;
 }
 
 /** Runs `fn(mark)` as one undo step; rolls back only if it had started writing. */
@@ -215,11 +220,20 @@ function strokeWeight(node: any): Json {
  * agent (and a human reading a diff) can act on; a mode whose library is not
  * loaded keeps its id.
  */
-async function explicitModes(node: any): Promise<Json> {
+async function explicitModes(
+  node: any,
+  cache?: Map<string, { key: string; value: string }>,
+): Promise<Json> {
   const raw = node.explicitVariableModes;
   if (!raw || typeof raw !== "object") return undefined;
   const out: Json = {};
   for (const [collectionId, modeId] of Object.entries(raw as Record<string, string>)) {
+    const cacheKey = collectionId + "\u0000" + String(modeId);
+    const cached = cache && cache.get(cacheKey);
+    if (cached) {
+      out[cached.key] = cached.value;
+      continue;
+    }
     let key = collectionId;
     let value = String(modeId);
     try {
@@ -229,6 +243,7 @@ async function explicitModes(node: any): Promise<Json> {
         value = col.modes.find((m) => m.modeId === modeId)?.name ?? value;
       }
     } catch { /* unknown collection: the ids still tell the two modes apart */ }
+    if (cache) cache.set(cacheKey, { key, value });
     out[key] = value;
   }
   return Object.keys(out).length ? out : undefined;
@@ -249,7 +264,17 @@ async function boundNames(node: any): Promise<Json> {
 
 // ---------------------------------------------------------------- design context
 
-async function fullNode(node: any, depth: number, budget: { n: number; truncated: boolean }): Promise<Json> {
+type NameCaches = {
+  styles: Map<string, string | null>;
+  collections: Map<string, { key: string; value: string }>;
+};
+
+async function fullNode(
+  node: any,
+  depth: number,
+  budget: { n: number; truncated: boolean },
+  caches: NameCaches = { styles: new Map(), collections: new Map() },
+): Promise<Json> {
   budget.n++;
   const out: Json = { id: node.id, type: node.type, name: node.name };
   if (node.visible === false) out.visible = false;
@@ -291,12 +316,12 @@ async function fullNode(node: any, depth: number, budget: { n: number; truncated
 
   const styles: Json = {};
   for (const k of ["fillStyleId", "strokeStyleId", "effectStyleId", "textStyleId", "gridStyleId"]) {
-    if (k in node) { const n = await styleName(node[k]); if (n) styles[k.replace("StyleId", "")] = n; }
+    if (k in node) { const n = await styleName(node[k], caches.styles); if (n) styles[k.replace("StyleId", "")] = n; }
   }
   if (Object.keys(styles).length) out.styles = styles;
   const vars = await boundNames(node);
   if (vars) out.variables = vars;
-  const modes = await explicitModes(node);
+  const modes = await explicitModes(node, caches.collections);
   if (modes) out.explicitModes = modes;
 
   if (node.type === "TEXT") {
@@ -313,7 +338,7 @@ async function fullNode(node: any, depth: number, budget: { n: number; truncated
           lineHeight: s.lineHeight.unit === "AUTO" ? "auto" : round(s.lineHeight.value) + (s.lineHeight.unit === "PERCENT" ? "%" : "px"),
           letterSpacing: s.letterSpacing.value ? round(s.letterSpacing.value) + (s.letterSpacing.unit === "PERCENT" ? "%" : "px") : undefined,
           color: paints(s.fills),
-          style: await styleName(s.textStyleId),
+          style: await styleName(s.textStyleId, caches.styles),
         });
       }
     } catch { /* fonts unavailable */ }
@@ -350,7 +375,7 @@ async function fullNode(node: any, depth: number, budget: { n: number; truncated
       out.children = [];
       for (const c of node.children) {
         if (budget.n >= MAX_NODES) { budget.truncated = true; break; }
-        out.children.push(await fullNode(c, depth - 1, budget));
+        out.children.push(await fullNode(c, depth - 1, budget, caches));
       }
     }
   }
@@ -896,7 +921,13 @@ export const toolMethods: Record<string, (p: Json) => Promise<Json>> = {
       await sleep(120);
 
       const tDiff = Date.now();
-      const afterTree = indexTree(page);
+      // `nodechange` is attached before the snippet runs and is the page's own
+      // report of whether the tree moved. When it never fired, a second
+      // whole-page walk would rebuild exactly `beforeTree`; reusing it is what
+      // the event says, not an assumption. Page-global state (variables/styles/
+      // paints) is still read separately below, and a page switch is still a
+      // violation via its own event.
+      const afterTree = changed ? indexTree(page) : beforeTree;
       const diffMs = Date.now() - tDiff;
       const verdict = enforceScope({
         before: beforeTree,

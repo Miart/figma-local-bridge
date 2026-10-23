@@ -54,20 +54,31 @@ function sizeOf(node: any): [number, number] | null {
   return Number.isFinite(width) && Number.isFinite(height) ? [Math.round(width), Math.round(height)] : null;
 }
 
-function info(node: any, depth: number, builtRoot: any, includeText: boolean): Json {
+function info(node: any, ctx: {
+  id: string;
+  name: string;
+  type: string;
+  visible: boolean;
+  key: string;
+  path: string;
+  depth: number;
+  build: any;
+  childCount: number;
+  includeText: boolean;
+}): Json {
   const out: Json = {
-    id: node.id,
-    key: keyOf(node),
-    name: node.name,
-    type: node.type,
-    path: pathOf(node),
-    depth,
-    visible: node.visible !== false,
+    id: ctx.id,
+    key: ctx.key,
+    name: ctx.name,
+    type: ctx.type,
+    path: ctx.path,
+    depth: ctx.depth,
+    visible: ctx.visible,
     size: sizeOf(node),
-    childCount: Array.isArray(node.children) ? node.children.length : 0,
+    childCount: ctx.childCount,
   };
-  if (builtRoot) out.build = { id: builtRoot.id, name: builtRoot.name, buildId: buildOf(builtRoot) };
-  if (includeText && node.type === "TEXT") out.text = textOf(node).slice(0, TRUNC_TEXT);
+  if (ctx.build) out.build = ctx.build;
+  if (ctx.includeText && ctx.type === "TEXT") out.text = textOf(node).slice(0, TRUNC_TEXT);
   // Deliberately no `component` field for INSTANCE. This manifest declares
   // documentAccess: "dynamic-page", where the synchronous `node.mainComponent`
   // getter THROWS (and logs to Figma's console even when caught). Resolving it
@@ -100,32 +111,63 @@ export async function runIndex(ctx: any, params: Json = {}): Promise<Json> {
   let scanned = 0;
   let truncated = false;
 
-  const visit = (node: any, depth: number, builtRoot: any) => {
+  const rootPath = pathOf(root);
+
+  /**
+   * One traversal, one path prefix per node.
+   *
+   * `pathOf` walks the parent chain and reads a name at every level, so calling
+   * it once per indexed node made the index O(nodes × depth) in Figma property
+   * reads. The parent's path is already known here: append this node's name and
+   * pass it down. The same reasoning applies to the build root — its pluginData
+   * is read once, not once per descendant.
+   */
+  const visit = (node: any, depth: number, parentPath: string | null, inheritedBuild: any) => {
     if (truncated) return;
-    if (!includeHidden && node.visible === false) return;
+    const visible = node.visible !== false;
+    if (!includeHidden && !visible) return;
     scanned++;
     if (scanned > maxNodes) {
       truncated = true;
       return;
     }
-    const ownBuild = buildOf(node);
-    const activeBuild = ownBuild ? node : builtRoot;
-    nodes.push(info(node, depth, activeBuild, includeText));
-    byType[node.type] = (byType[node.type] || 0) + 1;
+    const id = node.id;
+    const type = String(node.type);
+    const name = String(node.name || type);
+    const ownBuildId = buildOf(node);
+    const build = ownBuildId
+      ? { id, name, buildId: ownBuildId }
+      : inheritedBuild;
+    const path = parentPath === null ? rootPath : parentPath + " / " + name;
+    const childList = node.children;
+    const children = Array.isArray(childList) ? childList : [];
+    nodes.push(info(node, {
+      id,
+      name,
+      type,
+      visible,
+      key: keyOf(node),
+      path,
+      depth,
+      build,
+      childCount: children.length,
+      includeText,
+    }));
+    byType[type] = (byType[type] || 0) + 1;
     if (depth >= maxDepth) return;
-    for (const child of node.children || []) visit(child, depth + 1, activeBuild);
+    for (const child of children) visit(child, depth + 1, path, build);
   };
 
   // The page is the scope, not a layer in it. Listing it would put "Page 1" at
   // the top of every index and make depth mean two different things.
   if (root.type === "PAGE") {
-    for (const child of root.children || []) visit(child, 0, buildOf(child) ? child : null);
+    for (const child of root.children || []) visit(child, 0, rootPath, null);
   } else {
-    visit(root, 0, buildOf(root) ? root : null);
+    visit(root, 0, null, null);
   }
   return {
     schema: INDEX_SCHEMA,
-    scope: { id: root.id, name: root.name, type: root.type, path: pathOf(root) },
+    scope: { id: root.id, name: root.name, type: root.type, path: rootPath },
     nodes,
     counts: { nodes: nodes.length, byType },
     settings: { includeHidden, includeText, maxNodes, maxDepth: Number.isFinite(maxDepth) ? maxDepth : null },
@@ -194,54 +236,85 @@ export async function runSearch(ctx: any, params: Json = {}): Promise<Json> {
   const matches: Json[] = [];
   const byField: Record<string, number> = {};
   const byType: Record<string, number> = {};
+  const rootPath = pathOf(root);
+  const wantName = fields.includes("name");
+  const wantKey = fields.includes("key");
+  const wantText = fields.includes("text");
+  const keyFilter = keyPrefix !== null || hasKey !== null;
+  const needKeyBeforeMatch = keyFilter || (!!matcher && wantKey);
+  const needTextBeforeMatch = !!matcher && wantText;
   let scanned = 0;
   let truncated = false;
   let resultsTruncated = 0;
 
-  const visit = (node: any, depth: number, builtRoot: any) => {
+  const visit = (node: any, depth: number, parentPath: string | null, inheritedBuild: any) => {
     if (truncated) return;
-    if (!includeHidden && node.visible === false) return;
+    const visible = node.visible !== false;
+    if (!includeHidden && !visible) return;
     scanned++;
     if (scanned > maxNodes) {
       truncated = true;
       return;
     }
-    const ownBuild = buildOf(node);
-    const activeBuild = ownBuild ? node : builtRoot;
-    if (!types || types.has(String(node.type))) {
-      const key = keyOf(node);
-      const name = String(node.name || "");
-      const text = textOf(node);
+    const id = node.id;
+    const type = String(node.type);
+    const typeOk = !types || types.has(type);
+    const name = String(node.name || type);
+    const ownBuildId = buildOf(node);
+    const build = ownBuildId ? { id, name, buildId: ownBuildId } : inheritedBuild;
+    const path = parentPath === null ? rootPath : parentPath + " / " + name;
+    const childList = node.children;
+    const children = Array.isArray(childList) ? childList : [];
+    if (typeOk) {
+      // A key is needed up front only when the caller filters by it or searches
+      // it. Otherwise it is read for an actual match, so a name/text query does
+      // not pay one pluginData read per non-matching node. Text is treated the
+      // same way: the match reads it, the result reads it for its preview.
+      let key = needKeyBeforeMatch ? keyOf(node) : "";
+      let text = needTextBeforeMatch ? textOf(node) : "";
       const matched: string[] = [];
-      if (matcher && fields.includes("name") && matcher.test(name)) matched.push("name");
-      if (matcher && fields.includes("key") && key && matcher.test(key)) matched.push("key");
-      if (matcher && fields.includes("text") && text && matcher.test(text)) matched.push("text");
+      if (matcher && wantName && matcher.test(name)) matched.push("name");
+      if (matcher && wantKey && key && matcher.test(key)) matched.push("key");
+      if (matcher && wantText && text && matcher.test(text)) matched.push("text");
       const filtersOk =
         (keyPrefix === null || key.startsWith(keyPrefix)) &&
         (hasKey === null || (hasKey ? key.length > 0 : key.length === 0)) &&
         (!matcher || matched.length > 0);
       if (filtersOk) {
-        const out = info(node, depth, activeBuild, false);
+        if (!needKeyBeforeMatch) key = keyOf(node);
+        if (!needTextBeforeMatch) text = textOf(node);
+        const out = info(node, {
+          id,
+          name,
+          type,
+          visible,
+          key,
+          path,
+          depth,
+          build,
+          childCount: children.length,
+          includeText: false,
+        });
         out.matchedIn = matched;
         if (text) out.text = text.slice(0, TRUNC_TEXT);
         if (matched.includes("text")) out.snippet = snippet(text, matcher as RegExp);
         for (const f of matched) byField[f] = (byField[f] || 0) + 1;
-        byType[node.type] = (byType[node.type] || 0) + 1;
+        byType[type] = (byType[type] || 0) + 1;
         if (matches.length < maxResults) matches.push(out);
         else resultsTruncated++;
       }
     }
-    for (const child of node.children || []) visit(child, depth + 1, activeBuild);
+    for (const child of children) visit(child, depth + 1, path, build);
   };
 
   if (root.type === "PAGE") {
-    for (const child of root.children || []) visit(child, 0, buildOf(child) ? child : null);
+    for (const child of root.children || []) visit(child, 0, rootPath, null);
   } else {
-    visit(root, 0, buildOf(root) ? root : null);
+    visit(root, 0, null, null);
   }
   return {
     schema: SEARCH_SCHEMA,
-    scope: { id: root.id, name: root.name, type: root.type, path: pathOf(root) },
+    scope: { id: root.id, name: root.name, type: root.type, path: rootPath },
     query: { text: query, mode, caseSensitive, fields },
     filters: { types: types ? [...types] : null, keyPrefix, hasKey, includeHidden },
     matches,

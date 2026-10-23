@@ -157,6 +157,31 @@ test("switching the page inside the snippet is refused and rolled back", async (
   assert.deepEqual(other.children.map((n) => n.name), ["elsewhere"], "the write landed on the other page");
 });
 
+test("a snippet that changes nothing skips the second page index", async () => {
+  const { api, state, scope } = mockFigma();
+  globalThis.figma = api;
+  const { toolMethods } = await import("../plugin/tools.mjs");
+
+  let scopeChildReads = 0;
+  const children = [];
+  Object.defineProperty(scope, "children", {
+    configurable: true,
+    get() { scopeChildReads++; return children; },
+  });
+
+  const out = await toolMethods.use_figma({
+    code: "return figma._scope.id;",
+    allowDestructive: true,
+    scopeNodeId: "1:1",
+    timeoutMs: 5000,
+  });
+  assert.equal(out.result, "1:1");
+  assert.equal(out.changed, false);
+  assert.equal(scopeChildReads, 1, "nodechange did not fire, so the before-tree is still the after-tree");
+  assert.equal(state.undos, 0);
+  assert.equal(state.commits, 2);
+});
+
 test("a snippet that is simply slow is allowed to finish", async () => {
   const { api, state, first, scope } = mockFigma();
   globalThis.figma = api;
