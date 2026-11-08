@@ -71,6 +71,19 @@ refuses the call. A timeout is **not** rolled back: the snippet is still running
 and may still write. Use `figma_ops` with the error's `opId` to settle it;
 `figma_cancel` only stops a call that is still queued.
 
+### Calling the bridge from Code Mode
+
+When the agent drives the bridge from the `execute` code-mode runtime, the
+runtime is **JavaScript only** (no `import`/`print`/Python kwargs), the tool
+result is the only output channel (`console.log` inside the snippet, not
+`return`), and a snippet that swallows its own error (`.catch(e =>
+console.error(e))`) is a *successful* call: partial changes are committed and
+nothing rolls back — log **and rethrow**. Also: there is no `node.index` (use
+`parent.children.indexOf`), set a parent's `layoutMode` before a child's
+`layoutSizing`, empty GROUPs self-delete (wrap `remove()` in try/catch), and
+`rescale` on instances is uniform-only. See **"Code Mode recipes"** in
+`GUIDE.md` for the full list of traps and the rollback discipline.
+
 ## Dynamic-page traps
 
 This manifest declares `"documentAccess": "dynamic-page"`. Code from older

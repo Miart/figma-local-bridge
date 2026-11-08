@@ -14,12 +14,15 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -122,6 +125,7 @@ function main() {
     daemon: { started: false, pid: null },
     token: { copiedToClipboard: false },
     configs: [],
+    skills: [],
     manualSteps: [],
   };
 
@@ -139,6 +143,7 @@ function main() {
       skipped: false,
     }));
     report.manualSteps = manualSteps(appDir, paths, false);
+    report.skills = options.noConfig ? [] : installSkillLinks({ appDir, dryRun: true });
     printReport(options, report);
     return;
   }
@@ -207,6 +212,12 @@ function main() {
       else say(options, `  config : ${config.label}: ${config.action} (${config.path})`);
     }
 
+    report.skills = options.noConfig ? [] : installSkillLinks({ appDir });
+    for (const skill of report.skills) {
+      const detail = skill.reason ? ` (${skill.reason})` : ` (${skill.path})`;
+      say(options, `  skill  : ${skill.label}: ${skill.action}${detail}`);
+    }
+
     if (!options.noOpen) openPluginFolder(appDir);
     report.manualSteps = manualSteps(appDir, paths, report.token.copiedToClipboard, report.token.injected > 0);
     printReport(options, report);
@@ -238,7 +249,8 @@ Usage: node install/install.mjs [options]
 Options:
   --dry-run            Print the plan without writing anything
   --no-start           Write the LaunchAgent but do not load or stop the daemon
-  --no-config          Do not edit MCP client configs
+  --no-config          Do not edit MCP client configs or link the skill
+                       into agent skill directories
   --no-clipboard       Do not copy the daemon token to the clipboard
   --no-open            Do not open the plugin folder in Finder
   --client=LIST        auto (default), all, none, or comma-separated:
@@ -413,6 +425,61 @@ function installConfigs({ targets, appDir, nodePath, serverPath, paths }) {
         path: target.path,
         action: "skipped",
         skipped: true,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return results;
+}
+
+/** Agent skill directories the bridge can drop its single skill into. */
+const SKILL_DIRS = [
+  ["Claude Code", ".claude/skills"],
+  ["Codex", ".codex/skills"],
+  ["OpenCode", ".config/opencode/skills"],
+];
+
+/**
+ * Point each agent's skill loader at the skill bundled with the app.
+ *
+ * The bridge already serves the skill over MCP — `GUIDE.md` as the handshake
+ * `instructions` and the resource `figma-local://guide/skill`, every other file
+ * under `figma-local://skill/<path>` — so any MCP client sees it with no install
+ * step. A client that only scans a skills directory (Claude Code, Codex,
+ * OpenCode) still needs a link, so drop a symlink into each directory that
+ * already exists. One copy: editing the app's skill changes every loader at
+ * once. An existing real directory is left untouched; nothing here is fatal.
+ */
+function installSkillLinks({ appDir, home = homedir(), dirs = SKILL_DIRS, dryRun = false }) {
+  const source = join(appDir, "skills/figma-local-bridge");
+  const results = [];
+  if (!existsSync(join(source, "SKILL.md"))) return results;
+  for (const [label, relative] of dirs) {
+    const parent = join(home, relative);
+    if (!existsSync(parent)) continue;
+    const target = join(parent, "figma-local-bridge");
+    try {
+      const existing = lstatSync(target, { throwIfNoEntry: false });
+      if (existing && !existing.isSymbolicLink()) {
+        results.push({ label, path: target, action: "kept-directory", reason: "existing directory left untouched" });
+        continue;
+      }
+      if (existing && resolve(parent, readlinkSync(target)) === resolve(source)) {
+        results.push({ label, path: target, action: "unchanged" });
+        continue;
+      }
+      if (dryRun) {
+        results.push({ label, path: target, action: existing ? "would-relink" : "would-link" });
+        continue;
+      }
+      if (existing) rmSync(target, { force: true });
+      symlinkSync(source, target);
+      results.push({ label, path: target, action: existing ? "relinked" : "linked" });
+    } catch (error) {
+      results.push({
+        label,
+        path: target,
+        action: "skipped",
         reason: error instanceof Error ? error.message : String(error),
       });
     }

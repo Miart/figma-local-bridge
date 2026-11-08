@@ -1,23 +1,27 @@
 /**
- * The agent-facing guide.
+ * The agent-facing skill, served by the bridge itself.
  *
  * The tool schemas say what the arguments are; they cannot say which file a
  * call lands in, what `rev` and `replayed` mean, or which failure may be
- * retried. That doctrine lives in `skills/figma-local-bridge/GUIDE.md` at the
- * repository root — a file people can read and edit — and is served twice on
- * purpose:
+ * retried. That doctrine is the skill at
+ * `skills/figma-local-bridge/` in the repository root — files people can read
+ * and edit — and the bridge ships it to *any* MCP client so a client needs no
+ * separate skill install:
  *
- *  - as `instructions` on the MCP handshake, which clients show the model at
- *    connect time;
- *  - as a resource (`figma-local://guide/skill`), which a client can request
- *    later, and which is the only way to reach clients that ignore the
- *    handshake instructions.
+ *  - `GUIDE.md` is served as `instructions` on the MCP handshake (shown by the
+ *    client to the model at connect time) and as the resource
+ *    `figma-local://guide/skill`.
+ *  - every other file under the skill directory (SKILL.md, assets/prelude.js)
+ *    is served as `figma-local://skill/<path>`.
  *
- * Reading it from disk at startup means there is exactly one copy of the text.
- * If the file is missing (a `server/dist` copied without the repository), a
- * short inline fallback keeps the server useful instead of failing to start.
+ * Resource bodies are read from disk on every request, so editing the skill
+ * takes effect without restarting the server (the handshake `instructions` are
+ * read once, at startup). If the directory is missing (a `server/dist` copied
+ * without the repository), a short inline fallback keeps the server useful
+ * instead of failing to start.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -25,7 +29,11 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 /** server/dist (or server/src when run through a TS loader). */
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+/** The one copy of the skill: `skills/figma-local-bridge/` at the repo root. */
+export const SKILL_DIR = join(HERE, "../../skills/figma-local-bridge");
+
 export const GUIDE_URI = "figma-local://guide/skill";
+export const SKILL_URI_ROOT = "figma-local://skill";
 export const GUIDE_MIME = "text/markdown";
 
 const FALLBACK = `# figma-local-bridge
@@ -90,6 +98,12 @@ mode (use flb.byId and flb.main), writing characters needs a loaded font, and
 node.x is parent-relative while bbox() is absolute. Its write helpers refuse an
 out-of-scope or other-page target before writing.
 
+The skill directory also carries a plain-JS prelude (assets/prelude.js, served
+as figma-local://skill/assets/prelude.js) and a failure catalogue: paste the
+prelude at the top of every figma_use code string so colour tokens, fonts,
+frame sizing, PaintStyle.paints and the async style/node getters are handled by
+construction.
+
 Exports for a build or the web: figma_export_ui_atlas (one PNG plus rects in
 that file's pixels, with overlaps/off-sheet/bleed/duplicate names named, and
 the file re-read from disk), figma_export_9slice (insets in file pixels plus
@@ -106,17 +120,61 @@ with the numbers, before the export). All only read the document,
 so they work with writes off.
 `;
 
-function readGuide(): string {
+function readFileOrNull(path: string): string | null {
   try {
-    return readFileSync(join(HERE, "../../skills/figma-local-bridge/GUIDE.md"), "utf8");
+    return readFileSync(path, "utf8");
   } catch {
-    return FALLBACK;
+    return null;
   }
 }
 
+function readGuide(): string {
+  return readFileOrNull(join(SKILL_DIR, "GUIDE.md")) ?? FALLBACK;
+}
+
+/** Files shipped with the skill, relative to SKILL_DIR, sorted, no dotfiles. */
+function listSkillFiles(): string[] {
+  const out: string[] = [];
+  const walk = (dir: string, prefix: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(join(dir, entry.name), rel);
+      else if (entry.isFile()) out.push(rel);
+    }
+  };
+  walk(SKILL_DIR, "");
+  return out.sort();
+}
+
+function mimeFor(name: string): string {
+  if (name.endsWith(".md")) return GUIDE_MIME;
+  if (name.endsWith(".js") || name.endsWith(".mjs") || name.endsWith(".cjs")) return "text/javascript";
+  if (name.endsWith(".json")) return "application/json";
+  return "text/plain";
+}
+
+function descriptionFor(rel: string): string {
+  if (rel === "SKILL.md") {
+    return "figma-local-bridge skill (short playbook): first call, read-before-write, guarded edits, flb helpers, Code Mode recipes.";
+  }
+  if (rel === "assets/prelude.js") {
+    return "Safe-snippet prelude (plain JS, no import/require): paste at the top of every figma_use code string — validated colour tokens, font loading, frame sizing order, PaintStyle.paints, async style/node getters.";
+  }
+  return `figma-local-bridge skill file: ${rel}`;
+}
+
+/** The handshake doctrine. Read once, at startup. */
 export const GUIDE = readGuide();
 
 export function registerGuide(server: McpServer): void {
+  // Canonical guide URI: unchanged, so existing clients keep working.
   server.registerResource(
     "guide",
     GUIDE_URI,
@@ -127,7 +185,23 @@ export function registerGuide(server: McpServer): void {
       mimeType: GUIDE_MIME,
     },
     async (uri) => ({
-      contents: [{ uri: uri.href, mimeType: GUIDE_MIME, text: GUIDE }],
+      contents: [{ uri: uri.href, mimeType: GUIDE_MIME, text: readFileOrNull(join(SKILL_DIR, "GUIDE.md")) ?? GUIDE }],
     }),
   );
+
+  // Everything else the skill ships, so any agent can fetch the prelude and the
+  // playbook even when its client ignores the handshake instructions.
+  for (const rel of listSkillFiles()) {
+    if (rel === "GUIDE.md") continue;
+    const mimeType = mimeFor(rel);
+    const uri = `${SKILL_URI_ROOT}/${rel.split("/").map(encodeURIComponent).join("/")}`;
+    server.registerResource(
+      `skill:${rel}`,
+      uri,
+      { title: `figma-local-bridge skill — ${rel}`, description: descriptionFor(rel), mimeType },
+      async (u) => ({
+        contents: [{ uri: u.href, mimeType, text: readFileOrNull(join(SKILL_DIR, rel)) ?? "" }],
+      }),
+    );
+  }
 }

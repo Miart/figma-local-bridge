@@ -551,6 +551,111 @@ const placed = flb.grid(sprites, { parent: sheet, cell: 128, columns: 4, fit: tr
 return { cells: placed.cells, resized: placed.resized, notes: placed.notes };
 ```
 
+## Code Mode recipes: driving the bridge from the agent runtime
+
+The agent calls bridge tools from a **JavaScript-only** code-mode runtime
+(the `execute` tool), not from a shell and not from Python. Everything below
+was learned by failing in a real session.
+
+- **The runtime is JS.** Python idioms throw immediately: `import`, `print`,
+  `exec`, keyword arguments (`fileKey="…"`) → `Unknown identifier 'fileKey'`,
+  `'import' and 'export' may appear only with 'sourceType: module'`. Call tools
+  as `await tools["figmaBridge"]["figma_use"]({…})` with plain object literals.
+- **`console.log` is the output channel; the `return` value is not.** A snippet
+  that returns an object may answer `result: null` on the tool envelope, so put
+  everything you need into logged strings. Also wrap the tool call itself in
+  `try/catch` in the wrapper: a failed call yields `undefined`, and
+  `v.logs.join()` crashing is the *symptom*, not the error.
+- **Snippet API traps (dynamic-page manifest):**
+  - `figma.loadFontAsync("Barlow")` throws — pass `{family, style}`.
+  - `node.index` does not exist. Use `parent.children.indexOf(node)`.
+  - Set the parent's `layoutMode` **before** setting a child's
+    `layoutSizingHorizontal/Vertical` to `FILL`/`HUG`, otherwise
+    `node must be an auto-layout frame or a child of an auto-layout frame`.
+  - Figma auto-deletes a GROUP when its last child moves out; a later
+    `group.remove()` then throws `The node with id … does not exist`. Wrap
+    shell removals in `try/catch`.
+  - `src.clone()` on a child of an auto-layout row lands beside the source;
+    reparent (`newParent.appendChild(clone)`) immediately afterwards.
+  - `rescale(scale)` works on INSTANCEs and is **uniform only**; there is no
+    non-uniform scale API, and resizing an instance stretches the frame without
+    scaling its children.
+  - Component properties: `set.addComponentProperty(name, type, defaultValue)`
+    on the `COMPONENT_SET` returns a suffixed key (`"Price#1529:0"`). Link
+    nodes with that exact key
+    (`node.componentPropertyReferences = {characters: key}` /
+    `{mainComponent: key}`). The `INSTANCE_SWAP` default and the
+    `instance.setProperties` value are the component **id**.
+- **Rollback discipline (the expensive lesson).** A snippet that ends with
+  `.catch(e => console.error(e))` and returns `undefined` is a *successful
+  call* to the bridge: partial changes are committed and nothing rolls back.
+  Log **and rethrow** (`console.error(...); throw e;`) so the transaction rolls
+  back whole. Then verify the live state with a read-only snippet instead of
+  assuming the rollback happened — both `changedPage:false` and an unchanged
+  node count can be lies when the error was swallowed.
+- **Split big structural work.** "Convert to component + replace instances +
+  re-layout + rename" is four `figma_use` calls with a read between them, not
+  one giant snippet: a snippet that throws at step 9 of 12 leaves a half-moved
+  tree that still logs fine.
+- **One server per task.** Call `figma_ping` first and stay on the local bridge
+  for the open file. The cloud `tools.figma.*` server can answer read calls
+  about the same file key and quietly creates two sources of truth.
+
+## Safe-snippet prelude (start every `figma_use` code with it)
+
+`assets/prelude.js` in this skill is a plain-JS prelude — paste it at the top of
+the `code` string. It removes the whole class of errors catalogued below by
+construction: colour tokens become validated hex (`paint("textAccent")` throws a
+named error instead of feeding `solidPaint` a number/object/`undefined`), text is
+written through `.characters` after the font is loaded, frames set `layoutMode`
+before sizing modes, `PaintStyle.paints` is used instead of `.fills`, style
+binding goes through the async setters, and node access uses `getNodeByIdAsync`.
+Call `preflight([...tokens])` before the first write; a snippet that throws there
+rolls back having touched nothing.
+
+This whole skill travels **with the bridge**, so no client needs a separate skill
+install: `GUIDE.md` is both the handshake `instructions` and the resource
+`figma-local://guide/skill`, and every file under the skill directory is a
+resource under `figma-local://skill/<path>` — the prelude is
+`figma-local://skill/assets/prelude.js`, the short playbook
+`figma-local://skill/SKILL.md`. Resource bodies are read from disk per request,
+so an edit lands without a restart; a client that only shows the handshake can
+still fetch the prelude instead of retyping it.
+
+### Failure catalogue (symptom → cause → fix) — all seen in one session
+
+| Symptom in the envelope / log | Cause | Fix |
+|---|---|---|
+| `in solidPaint: Property "color" … Expected string, received number` | `figma.util.solidPaint()` got RGB numbers, not a hex string | pass `"#03110B"` (string), never `{r,g,b}` numbers |
+| `… Expected string, received object` | a constant that was already `solidPaint(hex)` was passed back into `solidPaint()` | keep tokens as **hex strings**; convert only at assignment. One representation per token |
+| `… Required value missing (rolled back)` | `solidPaint(undefined)` — a referenced colour key did not exist (e.g. `C.keycapShine`) | `preflight(["keycapShine"])` first; the prelude's `paint()` names the bad key |
+| text nodes render empty; `chars=""` | used `node.text = label` — the property is `node.characters` | `t.characters = label` |
+| `Cannot use unloaded font "Space Mono Bold"` | `fontName`/`fontSize`/`characters` set before `loadFontAsync` | `await figma.loadFontAsync({family,style})` first (`loadFontAsync("Name")` also throws) |
+| `The font "Space Mono Medium" could not be loaded` | family has no `Medium` style | Space Mono ships `Regular` / `Bold` / `Italic` / `Bold Italic` — pick an existing style |
+| `Cannot call with documentAccess: dynamic-page. Use node.setFillStyleIdAsync` | sync setter used for a style link | `await node.setFillStyleIdAsync(id)` / `setStrokeStyleIdAsync` |
+| `Cannot read property of undefined` on `style.fills[0]` | `PaintStyle.fills` is not the storage — it is `null` | write `style.paints = [paint]`; read `style.paints` |
+| sync `figma.getNodeById(id)` throws | `documentAccess: dynamic-page` | `await figma.getNodeByIdAsync(id)` (prelude `byId`) |
+| reading `node.mainComponent` throws | same reason (the getter is sync) | `await node.getMainComponentAsync()` (prelude `mainOf`) |
+| node is 100×100 / icon stretched to 100 | a child got `layoutAlign: STRETCH` because the frame's cross size was the 100px default | set `layoutMode`, then `counterAxisSizingMode="FIXED"`, then `resize(w,h)` **before** adding children; prelude `mkFrame` does this order |
+| `frame.resize()` did nothing / width snapped back after `AUTO` | `resize` after `primaryAxisSizingMode="AUTO"` forces `FIXED` back on | decide hug-vs-fixed first; for hug set `AUTO` and never `resize` the primary axis |
+| slider fill/knob drift after a resize | resizing a frame **scales** children by constraints | `resizeNoScale()` (set children to `MIN/MIN`), or build at the final width and never resize |
+| `The node with id … does not exist` | iterated a `COMPONENT_SET` after removing the set, or an emptied auto-deleted GROUP | remove only **top-level roots** (`removeTopLevel`), guard with `try/catch` |
+| bound `0` fills, or `"fills" in n === false` | the `in` operator does not see plugin node properties | test `Array.isArray(node.fills)` directly |
+| `figma.createPage()` → "Starter plan only comes with 3 pages" | plan page cap hit | reuse an existing page; do not create one |
+| `figma.createVariable is not a function` | Variables API absent in this manifest/plan | use Paint Styles (`createPaintStyle`) + Text Styles; the guide's "tokens" path is for files that expose it |
+| `search needs a query, types, keyPrefix or hasKey` | `figma_search` got `name:`/`match:` | the parameter is **`query`**: `figma_search({query:"Bunker", limit:3})` |
+| write tool: `figma_use requires allowDestructive: true` (even for a read) | `figma_use` always needs the flag | pass `allowDestructive:true` (and `allowGlobalChanges` for styles) |
+| `Reaction … was invalid (destination … rejected)` | a tab reacted to its own frame (`NAVIGATE` to self) | skip self: build the reaction only when `dest !== frame.id` |
+| a whole batch of created components vanished | the snippet threw at item N and the bridge **rolled back the transaction** | split into small snippets; `console.error(e); throw e;` (never swallow) so the rollback is explicit, then verify live |
+| `'ImportExpression' is not supported` / `Unknown identifier 'require'/'process'/'fs'/'globalThis'` | the code-mode runtime has no Node/ESM globals | no `import`/`require`; paste the code as a plain string literal |
+| `expecting ';'` / `unexpected end of string` | a mangled/stray fragment pasted into the `code` string | keep the snippet in one block; when it is big, write it to a file and re-paste verbatim |
+| empty section around frames | a `Section` does not adopt sibling frames | `section.appendChild(frame)` then restate the child's x/y relative to the section origin |
+
+**Rule of thumb for this bridge:** every colour is a hex string, every text write
+follows a `loadFontAsync`, every frame fixes its sizing mode before it is filled,
+every style/`fillStyleId`/`mainComponent` read-write is async, and every snippet is
+small enough that a rollback costs one step, not one session.
+
 ## Exporting for a build or the web: atlas, 9-slice, states, handoff
 
 `figma_export_ui_atlas` takes the sheet you just built and returns ONE PNG plus a
