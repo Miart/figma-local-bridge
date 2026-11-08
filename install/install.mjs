@@ -182,10 +182,13 @@ function main() {
       report.daemon = { started: true, pid: info.pid, startedAt: info.startedAt };
       say(options, `  daemon : running (pid ${info.pid}, port ${port})`);
 
+      const injected = injectPluginToken(appDir, String(info.pluginToken));
+      report.token.injected = injected;
+      say(options, `  plugin : token written into ${injected} file(s) — the panel pairs by itself`);
       if (!options.noClipboard) {
         const copied = copyToClipboard(String(info.pluginToken));
         report.token.copiedToClipboard = copied;
-        say(options, `  token  : ${copied ? "copied to clipboard" : "could not copy; see " + paths.infoFile}`);
+        say(options, `  token  : ${copied ? "copied to clipboard (fallback)" : "could not copy; see " + paths.infoFile}`);
       }
     }
 
@@ -205,7 +208,7 @@ function main() {
     }
 
     if (!options.noOpen) openPluginFolder(appDir);
-    report.manualSteps = manualSteps(appDir, paths, report.token.copiedToClipboard);
+    report.manualSteps = manualSteps(appDir, paths, report.token.copiedToClipboard, report.token.injected > 0);
     printReport(options, report);
     if (options.gui) finalDialog(appDir, report);
     appInstall.commit();
@@ -417,6 +420,21 @@ function installConfigs({ targets, appDir, nodePath, serverPath, paths }) {
   return results;
 }
 
+/** Writes the daemon token into the installed plugin so a first open needs no paste. */
+function injectPluginToken(appDir, token) {
+  const pattern = /const DEFAULT_TOKEN = "[^"]*";/;
+  let patched = 0;
+  for (const file of ["plugin/ui.html", "plugin/code.js"]) {
+    const path = join(appDir, file);
+    if (!existsSync(path)) continue;
+    const text = readFileSync(path, "utf8");
+    if (!pattern.test(text)) continue;
+    writeFileSync(path, text.replace(pattern, `const DEFAULT_TOKEN = "${token}";`));
+    patched++;
+  }
+  return patched;
+}
+
 function copyToClipboard(text) {
   const result = spawnSync("pbcopy", [], { input: text, encoding: "utf8" });
   return result.status === 0;
@@ -428,10 +446,12 @@ function openPluginFolder(appDir) {
   } catch { /* Finder is a convenience, not a requirement */ }
 }
 
-function manualSteps(appDir, paths, tokenCopied) {
+function manualSteps(appDir, paths, tokenCopied, paired) {
   return [
     `Figma → Plugins → Development → Import plugin from manifest… → ${join(appDir, "plugin/manifest.json")}`,
-    "Run “Figma Local Bridge” and paste the token" + (tokenCopied ? " (already in the clipboard)" : ` from ${paths.infoFile}`),
+    paired
+      ? "Run “Figma Local Bridge” — it connects by itself (the token is already inside the plugin)"
+      : "Run “Figma Local Bridge” and paste the token" + (tokenCopied ? " (already in the clipboard)" : ` from ${paths.infoFile}`),
     "Restart the MCP client you configured",
   ];
 }
@@ -442,8 +462,10 @@ function finalDialog(appDir, report) {
     "",
     "1. Figma → Plugins → Development → Import plugin from manifest…",
     `   ${join(appDir, "plugin/manifest.json")}`,
-    "2. Run “Figma Local Bridge” and paste the token" +
-      (report.token.copiedToClipboard ? " (it is in the clipboard)." : "."),
+    report.token.injected
+      ? "2. Run “Figma Local Bridge” — it pairs with the daemon by itself."
+      : "2. Run “Figma Local Bridge” and paste the token" +
+        (report.token.copiedToClipboard ? " (it is in the clipboard)." : "."),
     "3. Restart your MCP client.",
   ].join("\n");
   osaDialog(message, "Figma Local Bridge");

@@ -67,6 +67,14 @@ function main() {
     if (existsSync(from)) cpSync(from, join(STAGE, entry), { recursive: true, force: true });
   }
 
+  // A release never carries the builder's own token: every install gets its own
+  // one injected by the installer, so the panel pairs without a paste.
+  for (const file of ["plugin/ui.html", "plugin/code.js"]) {
+    const path = join(STAGE, file);
+    if (!existsSync(path)) continue;
+    writeFileSync(path, readFileSync(path, "utf8").replace(/const DEFAULT_TOKEN = "[^"]*";/g, 'const DEFAULT_TOKEN = "";'));
+  }
+
   // The double-clickable files live at the top of the zip, not inside install/.
   cpSync(join(ROOT, "install/Install.command"), join(STAGE, "Install.command"));
   cpSync(join(ROOT, "install/Uninstall.command"), join(STAGE, "Uninstall.command"));
