@@ -198,7 +198,11 @@ export function readState(node: any): Dict {
   if ("componentPropertyDefinitions" in node) {
     // Omitted when empty, like layout grids: an old checkpoint of a component
     // with no properties still compares equal against a fresh dump.
-    const defs = copy(node.componentPropertyDefinitions);
+    // A variant COMPONENT exposes the property but THROWS when it is read
+    // ("only ... a component set or non-variant component"); its set carries the
+    // definitions, and restore deletes them from variants anyway.
+    let defs: Dict | null = null;
+    try { defs = copy(node.componentPropertyDefinitions); } catch { defs = null; }
     if (defs && Object.keys(defs).length) s.componentPropertyDefinitions = defs;
   }
   if ("componentPropertyReferences" in node && node.componentPropertyReferences) {
