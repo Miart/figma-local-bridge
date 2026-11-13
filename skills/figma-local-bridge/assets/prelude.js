@@ -7,6 +7,9 @@
 //   - font not loaded before fontName/fontSize/characters
 //   - frame.resize() after primaryAxisSizingMode="AUTO" (forces FIXED)
 //   - resizing a frame scales its children (constraints) -> knob/fill drift
+//   - resizing/moving a node INSIDE an instance (relative-transform / silent no-op)
+//   - enum values written from memory (overflowDirection takes "VERTICAL";
+//     an unknown option throws and rolls back the whole snippet)
 //   - PaintStyle.fills (must be .paints)
 //   - fillStyleId / mainComponent / getNodeById sync access under dynamic-page
 //   - one bad value rolls back the WHOLE snippet
@@ -136,11 +139,146 @@ function isInsideInstance(node) {
   while (p) { if (p.type === "INSTANCE") return true; if (p.type === "PAGE") return false; p = p.parent; }
   return false;
 }
+/** Refuse geometry edits on an instance child with a readable error (not "relative-transform"). */
+function assertGeometryEditable(node) {
+  if (isInsideInstance(node)) {
+    throw new Error("geometry is locked: '" + node.name + "' is inside an INSTANCE. " +
+      "Instance children cannot be resized or moved; change the main component, use a variant, " +
+      "or detach (flb.flatten) and edit the returned frame. Text/fills/visibility/opacity still override.");
+  }
+}
+/** Resize that throws a named error on an instance child instead of a silent no-op. */
+function setSize(node, w, h) { assertGeometryEditable(node); node.resize(w, h); return node; }
+/** Move that throws a named error on an instance child instead of relative-transform. */
+function moveTo(node, x, y) { assertGeometryEditable(node); node.x = x; node.y = y; return node; }
+/** Resize that verifies the change instead of trusting a silent no-op. */
+function resizeTo(node, w, h) {
+  assertGeometryEditable(node);
+  node.resize(w, h);
+  if (Math.abs(node.width - w) > 0.5 || Math.abs(node.height - h) > 0.5) {
+    throw new Error("resize() did not apply to '" + node.name + "' (" + node.width + "x" + node.height +
+      " instead of " + w + "x" + h + "); do not assign .width/.height either — re-check the node type and layout mode");
+  }
+  return node;
+}
+/** Refuse putting a layer INTO an instance: Figma accepts no new children there. */
+function assertAcceptsChildren(parent) {
+  if (!parent) throw new Error("appendTo: no parent");
+  if (parent.type === "INSTANCE") {
+    throw new Error("'" + parent.name + "' is an INSTANCE and accepts no new layers. " +
+      "Add the layer as an absolutely-positioned sibling (layoutPositioning='ABSOLUTE'), " +
+      "put it in the main component, or expose it as a component property (INSTANCE_SWAP).");
+  }
+  return parent;
+}
+/** appendChild with the instance-parent trap named up front. */
+function appendTo(parent, node) { assertAcceptsChildren(parent); parent.appendChild(node); return node; }
 
 // ---- 6. ID / SELECTION HELPERS --------------------------------------------
 async function findBySvgOrName(root, name) { return root.findOne((n) => n.name === name); }
 
-// ---- 7. INSTANCE TEXT OVERRIDE (per-instance label, safe) -----------------
+// ---- 7. RUNTIME ENUMS: validate BEFORE the write --------------------------
+// An enum setter is validated by the runtime: one unknown string throws and the
+// WHOLE snippet is rolled back, after every write before it is already done.
+// Never type an enum literal from memory. `setEnum` repairs a known cross-API
+// spelling (VERTICAL_SCROLLING -> VERTICAL, ROW -> HORIZONTAL), refuses a typo
+// with the nearest accepted value, and otherwise assigns the value for the
+// runtime to judge — so an older table never blocks a newer runtime value. The
+// bridge's figma_use applies the same policy to `node.prop = "literal"` before
+// the snippet is sent.
+const ENUMS = {
+  overflowDirection: ["NONE", "HORIZONTAL", "VERTICAL", "BOTH"],
+  layoutMode: ["NONE", "HORIZONTAL", "VERTICAL", "GRID"],
+  primaryAxisSizingMode: ["FIXED", "AUTO"],
+  counterAxisSizingMode: ["FIXED", "AUTO"],
+  layoutSizingHorizontal: ["FIXED", "HUG", "FILL"],
+  layoutSizingVertical: ["FIXED", "HUG", "FILL"],
+  layoutAlign: ["MIN", "CENTER", "MAX", "STRETCH", "INHERIT"],
+  layoutPositioning: ["AUTO", "ABSOLUTE"],
+  primaryAxisAlignItems: ["MIN", "MAX", "CENTER", "SPACE_BETWEEN", "SPACE_EVENLY", "SPACE_AROUND"],
+  counterAxisAlignItems: ["MIN", "MAX", "CENTER", "BASELINE"],
+  textAutoResize: ["NONE", "WIDTH_AND_HEIGHT", "HEIGHT", "TRUNCATE"],
+  textAlignHorizontal: ["LEFT", "CENTER", "RIGHT", "JUSTIFIED"],
+  textAlignVertical: ["TOP", "CENTER", "BOTTOM"],
+  textCase: ["ORIGINAL", "UPPER", "LOWER", "TITLE", "SMALL_CAPS", "SMALL_CAPS_FORCED"],
+  textDecoration: ["NONE", "UNDERLINE", "STRIKETHROUGH"],
+  strokeAlign: ["CENTER", "INSIDE", "OUTSIDE"],
+  strokeCap: ["NONE", "ROUND", "SQUARE", "ARROW_LINES", "ARROW_EQUILATERAL", "DIAMOND_FILLED", "TRIANGLE_FILLED", "CIRCLE_FILLED"],
+  strokeJoin: ["MITER", "BEVEL", "ROUND"],
+  scaleMode: ["FILL", "FIT", "CROP", "TILE"],
+};
+// Spellings borrowed from other layout APIs, repaired instead of rejected.
+const ENUM_ALIASES = {
+  overflowDirection: { VERTICAL_SCROLLING: "VERTICAL", HORIZONTAL_SCROLLING: "HORIZONTAL", VERTICAL_SCROLL: "VERTICAL", HORIZONTAL_SCROLL: "HORIZONTAL", SCROLLING: "VERTICAL" },
+  layoutMode: { ROW: "HORIZONTAL", COLUMN: "VERTICAL" },
+  primaryAxisSizingMode: { HUG: "AUTO" },
+  counterAxisSizingMode: { HUG: "AUTO" },
+  layoutSizingHorizontal: { AUTO: "HUG" },
+  layoutSizingVertical: { AUTO: "HUG" },
+  textAutoResize: { AUTO: "HEIGHT", WIDTH: "HEIGHT" },
+  textAlignHorizontal: { START: "LEFT", END: "RIGHT", JUSTIFY: "JUSTIFIED" },
+  textAlignVertical: { MIDDLE: "CENTER" },
+  textCase: { CAPS: "UPPER", CAPITALIZE: "TITLE" },
+};
+/** Levenshtein distance, capped: only "is this a typo?" matters. */
+function enumDistance(a, b) {
+  if (Math.abs(a.length - b.length) > 3) return 4;
+  let prev = [];
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+/**
+ * Normalize, repair or reject an enum value without writing. A known cross-API
+ * spelling is mapped to the runtime value; a near-miss throws with the accepted
+ * list; anything else passes through for the runtime to validate.
+ * @param {string} property
+ * @param {string} value
+ */
+function enumValue(property, value) {
+  const accepted = ENUMS[property];
+  const normal = String(value).trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (!accepted) return normal; // property newer than this table: runtime decides
+  const alias = ENUM_ALIASES[property] && ENUM_ALIASES[property][normal];
+  if (alias) return alias;
+  if (accepted.indexOf(normal) >= 0) return normal;
+  let best = null;
+  let bestDistance = Infinity;
+  for (const candidate of accepted) {
+    const d = enumDistance(normal, candidate);
+    if (d < bestDistance) { bestDistance = d; best = candidate; }
+  }
+  if (bestDistance <= 2) {
+    throw new Error("enumValue(): " + property + "=" + JSON.stringify(value) + " looks like a typo; " +
+      "did you mean " + JSON.stringify(best) + "? accepted: " + accepted.join(" | "));
+  }
+  return normal; // possibly a newer runtime value: the setter is authoritative
+}
+/** Assign an enum property after validation. Fails before writing, not mid-snippet. */
+function setEnum(node, property, value) {
+  node[property] = enumValue(property, value);
+  return node;
+}
+/**
+ * Make a frame scrollable. `clipsContent` must be on for scrolling to show.
+ * Accepts "vertical", "VERTICAL", "VERTICAL_SCROLLING", and the rest.
+ * @param {FrameNode} frame
+ * @param {"none"|"horizontal"|"vertical"|"both"} dir
+ */
+function setOverflow(frame, dir) {
+  const value = enumValue("overflowDirection", dir == null ? "vertical" : dir);
+  if (value !== "NONE") frame.clipsContent = true; // scrolling is invisible without it
+  frame.overflowDirection = value;                 // VERTICAL, never VERTICAL_SCROLLING
+  return frame;
+}
+
+// ---- 8. INSTANCE TEXT OVERRIDE (per-instance label, safe) -----------------
 async function setInstanceText(instance, newLabel, nodeName) {
   const t = nodeName
     ? instance.findOne((n) => n.type === "TEXT" && n.name === nodeName)
@@ -159,5 +297,7 @@ async function setInstanceText(instance, newLabel, nodeName) {
 //                                stroke: "borderMain", radius: 10 });
 //   const s = paintStyle(await figma.getLocalPaintStylesAsync(), "Color / bg", "#03110B");
 //   await bindFill(f, s.id);
+//   setOverflow(f, "vertical");                    // clipsContent + VERTICAL (not VERTICAL_SCROLLING)
+//   setEnum(t, "textAutoResize", "WIDTH_AND_HEIGHT"); // validated before assigning
 //   return "ok";
 // ============================================================================

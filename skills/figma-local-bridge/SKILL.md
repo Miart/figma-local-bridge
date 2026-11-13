@@ -81,8 +81,13 @@ console.error(e))`) is a *successful* call: partial changes are committed and
 nothing rolls back — log **and rethrow**. Also: there is no `node.index` (use
 `parent.children.indexOf`), set a parent's `layoutMode` before a child's
 `layoutSizing`, empty GROUPs self-delete (wrap `remove()` in try/catch), and
-`rescale` on instances is uniform-only. See **"Code Mode recipes"** in
-`GUIDE.md` for the full list of traps and the rollback discipline.
+`rescale` on instances is uniform-only. An enum value must come from the
+runtime's accepted list, never from memory: `overflowDirection` is `NONE |
+HORIZONTAL | VERTICAL | BOTH` (there is no `VERTICAL_SCROLLING`). Use the
+prelude's `setEnum(node, property, value)` / `setOverflow(frame, "vertical")`;
+`figma_use` also refuses a known-bad enum spelling (or a typo) before sending.
+See **"Code Mode recipes"** in `GUIDE.md` for the full list of traps and the
+rollback discipline.
 
 ## Dynamic-page traps
 
@@ -101,9 +106,20 @@ Figma examples fails here:
 - `node.x` / `node.y` are parent-relative; `absoluteBoundingBox` and
   `flb.bbox(node, {render:true})` are absolute. Convert deliberately when
   packing sprites.
-- An INSTANCE cannot be resized directly. Detach it first with `flb.flatten`;
-  the node you passed in is dead afterwards, so carry on with the returned
-  `root` / `frame`.
+- An INSTANCE cannot be resized directly, and neither can a node **inside** one:
+  setting its `x`/`y` throws `relative-transform`, and `resize()` silently does
+  nothing. Only text, fills, strokes, visibility, opacity, effects and corner
+  radius can be overridden. Use a component **variant** for per-instance
+  geometry, or detach with `flb.flatten`; the node you passed in is dead
+  afterwards, so carry on with the returned `root` / `frame`.
+- An INSTANCE also accepts **no new children** (`insertChild` throws "New parent
+  is an instance"). Add the layer as an absolutely-positioned sibling of the
+  instance, or put it in the main component and expose a property. Padding,
+  alignment and font size on the instance root *are* overridable, so a sibling
+  icon can be given room.
+- Resize with `resize(w,h)`, never by assigning `.width`/`.height`: the setter
+  can be a silent no-op. Read the value back, and give equal-width instances an
+  explicit width instead of `FILL`.
 - `flb.clear(node)`, `flb.grid(...)` and `flb.text(...)` refuse an out-of-scope
   or other-page target before writing.
 

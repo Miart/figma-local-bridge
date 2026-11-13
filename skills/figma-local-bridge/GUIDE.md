@@ -580,6 +580,25 @@ was learned by failing in a real session.
   - `rescale(scale)` works on INSTANCEs and is **uniform only**; there is no
     non-uniform scale API, and resizing an instance stretches the frame without
     scaling its children.
+  - A node **inside** an INSTANCE cannot be resized or moved: `node.x = …`
+    throws `relative-transform`, and `resize()` is a silent no-op. Only text,
+    fills, strokes, visibility, opacity, effects and corner radius can be
+    overridden. For per-instance geometry use a component **variant**, or detach
+    (`flb.flatten`) and edit the returned frame — then set the size/position.
+  - **Never type an enum value from memory.** Enum setters are validated by the
+    runtime: one unknown string throws `Invalid option` and rolls the whole
+    snippet back — including every write before it. `frame.overflowDirection`
+    accepts only `"NONE" | "HORIZONTAL" | "VERTICAL" | "BOTH"`; there is no
+    `"VERTICAL_SCROLLING"`. Use the prelude's `setEnum(node, property, value)` or
+    `setOverflow(frame, "vertical")`, and set `clipsContent = true` alongside a
+    scrolling value. The typings agree with the runtime for these enums —
+    `node_modules/@figma/plugin-typings/plugin-api-standalone.d.ts` is the place
+    to copy a value from, not memory. `figma_use` additionally refuses a
+    known-bad enum spelling (or a value one typo away) **before sending**,
+    naming the line and the accepted list, so nothing is applied and there is
+    nothing to roll back. A value that is merely unfamiliar is passed through:
+    the runtime stays the authority, and an older bridge cannot block a newer
+    enum value.
   - Component properties: `set.addComponentProperty(name, type, defaultValue)`
     on the `COMPONENT_SET` returns a suffixed key (`"Price#1529:0"`). Link
     nodes with that exact key
@@ -597,6 +616,21 @@ was learned by failing in a real session.
   re-layout + rename" is four `figma_use` calls with a read between them, not
   one giant snippet: a snippet that throws at step 9 of 12 leaves a half-moved
   tree that still logs fine.
+- **Instances accept no new layers.** `insertChild`/`appendChild` with an
+  INSTANCE as the parent throws `Cannot move node. New parent is an instance`.
+  An icon that has to sit on an instance root goes in as an **absolutely
+  positioned sibling** (`layoutPositioning = "ABSOLUTE"`), or into the main
+  component as a slot exposed through a component property. Per-instance
+  padding, alignment and font size *are* overridable — that is how you make room
+  for a sibling icon.
+- **Size changes go through `resize()`.** Assigning `node.width`/`height` can be
+  a silent no-op (nothing thrown, value unchanged) — `resize(w,h)` applies. Read
+  the value back before reporting it, and prefer explicit widths over `FILL`
+  when several instance roots must end up equal.
+- **"Rolled back" is information.** A `failed` journal line that ends in
+  `(rolled back)` restored the document; one that does not may have committed
+  whatever was created before the throw (a stray instance at page `(0,0)` is the
+  usual trace). After such a failure, scan and clean up instead of assuming.
 - **One server per task.** Call `figma_ping` first and stay on the local bridge
   for the open file. The cloud `tools.figma.*` server can answer read calls
   about the same file key and quietly creates two sources of truth.
@@ -639,6 +673,19 @@ still fetch the prelude instead of retyping it.
 | node is 100×100 / icon stretched to 100 | a child got `layoutAlign: STRETCH` because the frame's cross size was the 100px default | set `layoutMode`, then `counterAxisSizingMode="FIXED"`, then `resize(w,h)` **before** adding children; prelude `mkFrame` does this order |
 | `frame.resize()` did nothing / width snapped back after `AUTO` | `resize` after `primaryAxisSizingMode="AUTO"` forces `FIXED` back on | decide hug-vs-fixed first; for hug set `AUTO` and never `resize` the primary axis |
 | slider fill/knob drift after a resize | resizing a frame **scales** children by constraints | `resizeNoScale()` (set children to `MIN/MIN`), or build at the final width and never resize |
+| `in set_x: This property cannot be overridden in an instance: relative-transform` | tried to set `x`/`y` (or `resize`) on a node **inside** an INSTANCE — instance-child geometry is locked | change the main component, add a **variant**, or detach (`flb.flatten`) and edit the returned frame. Text, fills, strokes, visibility, opacity, effects and corner radius **are** overridable |
+| instance child `resize()` kept the master width and did not throw | `resize()` on an instance child is a silent no-op (only `x`/`y` throw) | same fix: variant or detach. Never trust the post-call `width` as proof it applied — screenshot it |
+| `in set_layoutSizingHorizontal: FILL can only be set on children of auto-layout frames` | the parent's `layoutMode` is `NONE`, or was set *after* the child's sizing | set `parent.layoutMode` **first**, then `child.layoutSizingHorizontal = "FILL"` |
+| `in set_overflowDirection: Property "overflowDirection" failed validation: Invalid option: expected one of "NONE"…"BOTH"` | an enum spelling recalled from memory (`VERTICAL_SCROLLING`); the runtime accepts the list in the message | use `VERTICAL` (or `HORIZONTAL` / `BOTH`), keep `clipsContent = true`, or call `setOverflow(frame,"vertical")` / `setEnum(node,"overflowDirection",value)` from the prelude. `figma_use` refuses this known-bad spelling (and near-misses) **before sending**, naming the line and accepted values, so nothing is applied |
+| `flb.byId: no node … in this file` | the id came from another file or an older answer (ids are file-scoped and do not survive a rebuild) | re-read ids with `figma_get_metadata` / `figma_index`; never reuse an id across files |
+| `in insertChild: Cannot move node. New parent is an instance or is inside of an instance` | tried to add a layer **into** an INSTANCE — an instance accepts no new children, only property/text/fill overrides | put the layer as an absolutely-positioned **sibling** (`parent.appendChild`), change the main component, or add a component property (`INSTANCE_SWAP`) and swap it per instance |
+| `node.width = 500` looks applied but reads back the old value | the width/height setters can be a **silent no-op** (seen on a component's child rect); nothing is thrown, so a whole batch of edits quietly does nothing | use `node.resize(w,h)`, then read `node.width` back as proof. Never report a size change without the read-back |
+| two bars rotated ±45° render as `<` instead of `X` | `rotation` is applied to the transform, and a later `x/y` write anchors the **unrotated** box, so both bars share one edge | draw diagonals as one `VECTOR` with `vectorPaths` + `strokes`, or re-read `width`/`height` after rotation and centre by those |
+| tabs set to FILL came out 1 px, 76 px, 127 px … | `layoutSizingHorizontal = "FILL"` on instance roots in an auto-layout row distributes by content, not equally | compute `floor((row.width - gaps) / n)` and `resize()` every instance; verify the sum |
+| bare `not a function` with no stack/name | a method was called on a node type that does not have it (or an API absent from this manifest) | guard with `typeof node.method === "function"` and use the `flb` helpers; log the step name so the next failure is locatable |
+| `use_figma REFUSED — touched outside the declared scope` although every edit was inside it | `createInstance()` (and the `figma.createX` factories) parent the new node to the **page** for an instant, so the diff sees page-level changes | scope such calls to the page (`scopeNodeId: "0:1"` / `allowPageWide`) or split: create in one call, reparent in the next scoped to the section |
+| a failed call left a node behind (stray INSTANCE at page 0,0) | the error carried **no** `(rolled back)` marker: nodes created before the throw were committed | after any failure whose message lacks `(rolled back)`, scan the page for leftovers (`page.children`, `findAll(n=>n.x===0&&n.y===0)`) and remove them |
+| `checkpoint save` fails with `Can only get component property definitions of a component set or non-variant component` | the dump read that property on a **variant** COMPONENT (a section/component set that contains one) | fixed in 0.36.0 by guarding the read; reload the development plugin so the rebuilt `plugin/code.js` runs |
 | `The node with id … does not exist` | iterated a `COMPONENT_SET` after removing the set, or an emptied auto-deleted GROUP | remove only **top-level roots** (`removeTopLevel`), guard with `try/catch` |
 | bound `0` fills, or `"fills" in n === false` | the `in` operator does not see plugin node properties | test `Array.isArray(node.fills)` directly |
 | `figma.createPage()` → "Starter plan only comes with 3 pages" | plan page cap hit | reuse an existing page; do not create one |
@@ -650,11 +697,19 @@ still fetch the prelude instead of retyping it.
 | `'ImportExpression' is not supported` / `Unknown identifier 'require'/'process'/'fs'/'globalThis'` | the code-mode runtime has no Node/ESM globals | no `import`/`require`; paste the code as a plain string literal |
 | `expecting ';'` / `unexpected end of string` | a mangled/stray fragment pasted into the `code` string | keep the snippet in one block; when it is big, write it to a file and re-paste verbatim |
 | empty section around frames | a `Section` does not adopt sibling frames | `section.appendChild(frame)` then restate the child's x/y relative to the section origin |
+| a new `combineAsVariants` set reports `20×42` and the screenshot shows one glyph | every variant was created at the same `x/y`, so the set sized to a single cell — and a `COMPONENT_SET` does **not** auto-fit after its children move | place variants on a grid (`v.x = col*(w+gap)`), then `set.resize(maxX+pad, maxY+pad)`; read `set.width` back, it stays stale until the resize |
+| after replacing a child in a master, instances flip a layer that used to be hidden | overrides on a removed child are dropped (only some are remapped), so visibility overrides silently vanish | snapshot per-instance state (`instanceId → visible`) **before** the swap and re-apply `child.visible` on every instance in the same call; compare the hidden/shown counts to the snapshot afterwards |
+| an icon component still depends on a font / a glyph renders differently when the font is missing | a text glyph was used as artwork inside the component | `figma.flatten([textNode], parent)` outlines it to a `VECTOR` at exactly `absoluteRenderBounds` and keeps the fill — no font dependency, pixel-identical |
+| `figma.flatten` turned a 3-rect floppy icon into a solid square | flatten converts strokes into filled outlines and unions overlapping shapes, so a 2 px `INSIDE` stroke on a 22×22 rect becomes a filled block and same-colour shapes merge | do not flatten icon artwork. Rebuild the variant from the source component's **children**, scaling each one (`resize(w*s, h*s)`, `x*s`, `strokeWeight*s`) so strokes and holes survive; flatten only a single text glyph |
+| a cloned icon instance jumps to `x:19, y:617` after `appendChild` | the target frame is auto-layout, so the new instance enters the flow; the originals were `layoutPositioning:"ABSOLUTE"` | set `inst.layoutPositioning = "ABSOLUTE"` **before** writing `x`/`y`, then read them back |
+| scaling a 32×32 icon down to 24 with `resize()` keeps it looking too big | `resize()` on an instance stretches the frame; children keep their size | `inst.rescale(0.75)` scales artwork and strokes uniformly — build the variant at 32 with `strokeWeight 2.67` and it returns to exactly 2 px at 24 |
 
 **Rule of thumb for this bridge:** every colour is a hex string, every text write
 follows a `loadFontAsync`, every frame fixes its sizing mode before it is filled,
-every style/`fillStyleId`/`mainComponent` read-write is async, and every snippet is
-small enough that a rollback costs one step, not one session.
+every style/`fillStyleId`/`mainComponent` read-write is async, every enum value
+comes from the runtime's accepted list (the prelude's `ENUMS` / `setEnum`) rather
+than memory, and every snippet is small enough that a rollback costs one step,
+not one session.
 
 ## Exporting for a build or the web: atlas, 9-slice, states, handoff
 

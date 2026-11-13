@@ -495,6 +495,21 @@ try {
   const useReq = seen.filter((e) => e.method === "use_figma")[0];
   check("figma_use sends verbose:false by default", useReq.params.verbose === false);
 
+  // A rejected enum literal is refused locally: the plugin is never called, so
+  // there is no partial write and no rollback to reason about.
+  const seenBeforeEnum = seen.length;
+  const enumBad = await c.rpc("tools/call", {
+    name: "figma_use",
+    arguments: { code: 'node.overflowDirection = "VERTICAL_SCROLLING";', ...useArgs },
+  });
+  const enumText = String(enumBad.error?.message ?? enumBad.result?.content?.[0]?.text ?? JSON.stringify(enumBad));
+  check("figma_use refuses a rejected enum literal before the plugin is called",
+    /figma_use refused before sending/.test(enumText) &&
+      /accepted: NONE \| HORIZONTAL \| VERTICAL \| BOTH/.test(enumText) &&
+      /Use "VERTICAL"/.test(enumText) &&
+      seen.length === seenBeforeEnum,
+    enumText.slice(0, 160));
+
   const runAgain = c.text(await c.rpc("tools/call", {
     name: "figma_use",
     arguments: { code: "return 2 // replayed", ...useArgs, verbose: true },

@@ -9,6 +9,7 @@ import { figmaNodeId, figmaNodeIds } from "./node-id.js";
 import { fileKeyParam } from "./file-key.js";
 import { BridgeOffline } from "./websocket.js";
 import { jsonText } from "./tool-text.js";
+import { findEnumLiteralViolations, formatEnumViolations } from "./enum-guard.js";
 import type { Capabilities } from "./tools.js";
 
 /**
@@ -227,6 +228,7 @@ export function registerParityTools(server: McpServer, client: FigmaClient, caps
     "Run Plugin API JavaScript inside the open Figma file (async function body; `figma` and a capturing `console` are in scope; `return` a value to get it back). One call = one undo step. " +
       "SAFETY: arbitrary code cannot be sandboxed, so the plugin indexes the page before and after, and ROLLS BACK the call if anything outside `scopeNodeId` was created, deleted, reparented or altered, if the scope root itself disappeared, or if page-global state (variables/styles/paints) changed. " +
       "Known limits: fire-and-forget async work that lands after the diff is not covered, and edits inside an existing node are detected only by a cheap signature (type, name, child count, text length), not pixel-exact. " +
+      "Enum literals assigned in the snippet are checked locally BEFORE sending: a known cross-API spelling or near-miss (e.g. overflowDirection=\"VERTICAL_SCROLLING\") is refused with the accepted values, so nothing is applied; an unfamiliar value is passed through for the runtime to judge. " +
       "Requires allowDestructive:true, and scopeNodeId unless allowPageWide:true. Prefer small calls and return the ids you create. " +
       "A third argument `flb` is a small helper set for this manifest's traps (dynamic-page mode, font loading, absolute vs parent-relative coordinates): " +
       "`await flb.byId(id)` resolves a node id (figma.getNodeById throws in dynamic-page mode; the error says an id from another file never resolves); " +
@@ -265,6 +267,10 @@ export function registerParityTools(server: McpServer, client: FigmaClient, caps
               "or allowPageWide: true to run unconfined.",
           );
         }
+        // Cheap, local, and before the plugin: an enum literal the runtime will
+        // reject throws mid-snippet there and rolls back every write before it.
+        const enumViolations = findEnumLiteralViolations(code);
+        if (enumViolations.length) throw new Error(formatEnumViolations(enumViolations));
         const { result: r, rev, replayed } = await callMeta<any>(
           "use_figma",
           { code, allowDestructive, scopeNodeId, allowPageWide, allowGlobalChanges, verbose, timeoutMs, description, fileKey },
