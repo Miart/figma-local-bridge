@@ -408,6 +408,21 @@ figma.ui.onmessage = async (envelope: Json) => {
     figma.clientStorage.setAsync("flb.petHidden", petHidden).catch(() => {});
     return;
   }
+  // The panel is sandboxed and cannot start a process. `figma.openExternal` is
+  // its one door out: the URL goes to the OS, and LaunchServices routes our own
+  // scheme (figma-local-bridge://) to the tiny handler app that starts the
+  // daemon. Only that scheme is forwarded — a general URL opener reachable from
+  // a plugin message handler is a hole nobody needs.
+  if (typeof msg.openExternal === "string") {
+    if (/^figma-local-bridge:\/\//.test(msg.openExternal)) {
+      try {
+        figma.openExternal(msg.openExternal);
+      } catch (e) {
+        console.log("openExternal failed", e);
+      }
+    }
+    return;
+  }
   // The UI measured its own content. Clamp and fit the window to it.
   if (typeof msg.uiHeight === "number" && isFinite(msg.uiHeight)) {
     const h = Math.max(UI_MIN_H, Math.min(UI_MAX_H, Math.round(msg.uiHeight)));

@@ -217,6 +217,9 @@
       .primary { padding: 4px 11px; border: 1px solid color-mix(in srgb, var(--ok) 80%, var(--line)); background: var(--ok); color: var(--ink); font-weight: 600; }
       .primary:hover:not(:disabled) { filter: brightness(1.06); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent); }
       .ghost { padding: 3px 6px; border: 0; background: none; color: var(--dim); }
+      /* Only shown when the daemon is unreachable; must not squeeze the token
+         field into uselessness, so it keeps its own width and never wraps. */
+      #wake { flex: 0 0 auto; white-space: nowrap; }
       .ghost:hover:not(:disabled) { color: var(--text); }
       #drop:hover:not(:disabled) { color: var(--err); }
 
@@ -279,6 +282,10 @@
       </div>
       <button id="go" class="primary">connect</button>
       <button id="drop" class="ghost" hidden title="disconnect">stop</button>
+      <!-- Appears only when the socket could not reach a daemon: the panel is
+           sandboxed, so this asks the OS to open figma-local-bridge://start and
+           the registered handler starts the daemon. -->
+      <button id="wake" class="ghost" hidden title="the daemon is not running — start it">start daemon</button>
     </div>
 
     <div class="errline" id="errRow" hidden>
@@ -318,6 +325,7 @@
         pet: $("pet"), mascot: $("mascot"), zzz: $("zzz"),
         dot: $("dot"), status: $("status"), statusBox: $("statusBox"),
         port: $("port"), token: $("token"), go: $("go"), drop: $("drop"), peek: $("peek"),
+        wake: $("wake"),
         page: $("page"), sel: $("sel"), selSummary: $("selSummary"), selNames: $("selNames"),
         mcp: $("mcp"), errRow: $("errRow"), last: $("last"),
         calls: $("calls"), footer: $("footer"), petToggle: $("petToggle"),
@@ -330,6 +338,7 @@
       let backingOff = false; // true when the last socket died instantly
       let openedAt = 0;
       let retryDelay = RETRY_MIN;
+      let daemonDown = false; // last socket never reached a daemon — offer "start daemon"
 
       let calls = 0;
       let mcpCount = 0;
@@ -696,6 +705,7 @@
         el.go.textContent = live ? "reconnect" : "connect";
         el.go.disabled = !hasToken;
         el.drop.hidden = !live;
+        el.wake.hidden = !daemonDown;
       }
 
       // ---------------------------------------------------------------- session
@@ -805,6 +815,7 @@
           if (socket !== sock) return;
           openedAt = Date.now();
           retryWhy = null;
+          daemonDown = false;
           setStatus("connected", "ok");
           setMood("happy");
           pulse("hop");
@@ -905,6 +916,8 @@
           // onclose follows and carries the close code; this fires first for the
           // cases where no socket ever opened, so it must not claim more than it
           // knows.
+          daemonDown = true;
+          updateButtons();
           setStatus("cannot reach the daemon on this port", "err");
         };
       }
@@ -941,6 +954,19 @@
         const shown = el.token.type === "text";
         el.token.type = shown ? "password" : "text";
         el.peek.textContent = shown ? "show" : "hide";
+      });
+      // The panel cannot spawn a process: this asks the OS to open our own scheme,
+      // and the registered handler app starts the daemon. The daemon is up within
+      // about a second, so a pending backoff (which can be 15 s by now) is thrown
+      // away instead of making the user wait for it.
+      el.wake.addEventListener("click", () => {
+        toMain({ openExternal: "figma-local-bridge://start" });
+        if (retry) { clearTimeout(retry); retry = null; }
+        retryAt = 0;
+        retryWhy = null;
+        retryDelay = RETRY_MIN;
+        setStatus("starting the daemon — retrying…", "warn");
+        retry = setTimeout(connect, 1400);
       });
       el.petToggle.addEventListener("click", () => {
         const hidden = !petHidden();
